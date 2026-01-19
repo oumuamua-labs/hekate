@@ -31,6 +31,32 @@ The result is absolute linearity. Infinite execution streams proved with flat, O
 
 ---
 
+### UNDER THE HOOD (ARCHITECTURE)
+
+Hekate is not a fork. It is a ground-up rewrite of the ZK stack tailored for the "Memory Wall" era.
+
+#### 1. The Physics (Binary Tower Fields)
+Instead of large prime fields (which waste bandwidth) or naive binary fields (which lack expressiveness), Hekate operates on **Canonical Binary Tower Fields** (GF(2^128)).
+* **Base:** GF(2^8) optimized for AVX/Neon lookups.
+* **Tower:** Recursive extension up to 128-bits.
+* **Hardware Isomorphism:** On-the-fly basis conversion to utilize native carry-less multiplication (`PMULL` / `clmul`) instructions.
+
+#### 2. The Engine (Streaming Sumcheck & GKR)
+Traditional provers (Halo2/Plonky2) materialize the full execution trace ($N \times M$ matrix) to evaluate constraints.
+Hekate defines the trace as a **Virtual Polynomial**.
+* **JIT Evaluation:** Constraints are evaluated Just-In-Time. The "Trace" exists only ephemerally in CPU registers during the Sumcheck protocol.
+* **Lazy Folding:** The memory footprint for the prover is $O(\log N)$ relative to the trace length during the folding phase.
+
+#### 3. The Commitment (Brakedown PCS)
+The architecture discards FFT-based commitments (FRI/KZG) in favor of **Linear Codes (Brakedown)**.
+* **Complexity:** Strictly linear $O(N)$ prover time.
+* **Zero-Copy Merkle:** The commitment phase streams data directly from the generator to the Hasher, bypassing RAM buffers.
+
+#### 4. The Bus (GKR-based GPA)
+Chiplets (CPU, RAM, Keccak) are interconnected via a **Grand Product Argument (GPA)** based on GKR layer reduction, avoiding the high degree constraints of standard permutation arguments.
+
+---
+
 ### THE KILL SHOT (BENCHMARKS)
 
 Benchmarks conducted on a consumer-grade M3 Max Laptop.
@@ -39,7 +65,7 @@ Benchmarks conducted on a consumer-grade M3 Max Laptop.
 
 > [!CAUTION]
 > **The Workload:**
-> Unlike the synthetic Fibonacci test bellow, this benchmark runs Keccak-f[1600] (Ethereum-native hashing). This is a real-world, heavy-duty cryptographic workload.
+> Unlike the synthetic Fibonacci test below, this benchmark runs Keccak-f[1600] (Ethereum-native hashing). This is a real-world, heavy-duty cryptographic workload.
 
 ![Benchmark Chart](https://github.com/oumuamua-corp/hekate/blob/main/hekate_vs_binius64_keccak_f1600.png?raw=true)
 
@@ -49,7 +75,9 @@ Benchmarks conducted on a consumer-grade M3 Max Laptop.
 | **$2^{20}$ (41k Permutations)** | SWAP HELL (**72 GB RAM**) | **4.74 s** (1.4 GB RAM) | **50x Less RAM** |
 | **$2^{24}$ (671k Permutations)** | **CRASH (Out of Memory)** | **88 s** (21.5 GB Peak) | **Operational vs Dead** |
 
-*Note: Binius64 scales linearly in time but exponentially in memory cost due to massive allocation requirements for binary field extensions. Hekate maintains a flat memory profile via streaming.*
+> **Why Hekate Wins (The "Virtual Unpacking" Technique):**
+> A standard Keccak trace requires ~1600 bit-columns. Storing this for 2^24 rows consumes massive RAM.
+> Hekate stores the state in a packed format (25 `u64` columns) and **virtually unpacks** bits only at the precise moment they are needed by the AIR constraints. The raw bit-trace is never fully materialized in RAM.
 
 ### Winterfell
 
@@ -69,6 +97,12 @@ Benchmarks conducted on a consumer-grade M3 Max Laptop.
 
 *Note: Winterfell crashes because it attempts to materialize the entire execution trace + LDE in RAM (O(N log N)). Hekate streams the computation (O(N)), keeping memory usage flat.*
 
-### STATUS: PROPRIETARY
+### STATUS: PROPRIETARY / PILOT PROGRAM
 
-Hekate Engine is a closed-source, proprietary binary designed for protocols requiring actual sovereignty and viable unit economics.
+Hekate Engine is currently a closed-source, proprietary technology.
+Hekate is solving the "Cloud Cost Crisis" for protocols that require heavy client-side proving or massive zkML workloads.
+
+**Looking for pilot partners:**
+If you are running ZK bridges, Rollups, or ML inference and are bleeding money on RAM-heavy cloud instances, Hekate can reduce your infrastructure costs by an order of magnitude.
+
+[Email](mailto:zeek@tuta.com) | [LinkedIn](https://www.linkedin.com/in/andrei-kochergin-0966002a3)
