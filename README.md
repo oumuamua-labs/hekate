@@ -4,7 +4,7 @@ Zero-knowledge proof system over binary tower fields. Streaming architecture. Bo
 
 Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory. No FFTs,
 no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation and ML-DSA signature
-verification on a laptop.
+verification on a laptop and mobile.
 
 ---
 
@@ -55,7 +55,7 @@ all proven natively in binary fields without bit-decomposition overhead.
             │
    ┌────────▼────────┐
    │   hekate-core   │   trace, transcript, Merkle, polys
-   │  hekate-crypto  │   Blake3, Groestl, SHA-256
+   │  hekate-crypto  │   Blake3, SHA3, SHA-256
    │   hekate-math   │   tower fields (external, sealed)
    └────────┬────────┘
             │
@@ -70,10 +70,9 @@ hekate-prover   hekate-verifier
 ## Quick Example
 
 Real 32-bit-integer Fibonacci. The CPU side holds five columns and the two Fibonacci transition
-constraints. Every `u32` ADD is offloaded to the `IntArithmeticChiplet` — its own trace, own
-commitment, own ZeroCheck, own evaluation argument — and is wired in by a LogUp bus
-(`(val_a, val_b, val_res, opcode, request_idx)` keys with a row-index clock). See
-`hekate/examples/many_chiplets.rs` for the same pattern with CPU + ROM + Arith + RAM.
+constraints. Every `u32` ADD is offloaded to the `IntArithmeticChiplet`, its own trace, own
+commitment, own ZeroCheck, own evaluation argument, and is wired in by a LogUp bus
+(`(val_a, val_b, val_res, opcode, request_idx)` keys with a row-index clock).
 
 ```rust
 type F = Block128;
@@ -189,7 +188,7 @@ let witness  = ProgramWitness::new(cpu).with_chiplets(vec![arith]);
 ```
 
 The chiplet enforces 32-bit ADD with carry, boolean-checks its own selectors, and zero-pins shadow
-columns when its row is idle. The CPU AIR only needs the two transition constraints above — the
+columns when its row is idle. The CPU AIR only needs the two transition constraints above, the
 LogUp bus guarantees `val_res = a + b` for every row where `s = 1`.
 
 ---
