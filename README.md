@@ -3,8 +3,8 @@
 Zero-knowledge proof system over binary tower fields. Streaming architecture. Bounded memory. Edge-native.
 
 Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory. No FFTs,
-no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation in 1.6s and ML-DSA signature
-verification in 4.7s on a laptop.
+no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation and ML-DSA signature
+verification on a laptop.
 
 ---
 
