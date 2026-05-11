@@ -6,6 +6,16 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation and ML-DSA signature
 verification on a laptop and mobile.
 
+> [!IMPORTANT]
+> Open core lands soon. Currently finishing SDK tooling for iOS and Android developers.
+
+> [!WARNING]
+> Workspace is under active development. Signatures and APIs may change without notice. Not production-ready yet.
+
+> [!NOTE]
+> Verifier, core SDK, and chiplets are being open-sourced. Prover and recursive engine remain closed-source, but
+> binaries are free for everyone, no license required.
+
 ---
 
 ## Why Hekate Exists
@@ -277,11 +287,6 @@ explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns.
 - [Security](security.md), threat model, adversarial test suite, Fiat-Shamir binding
 
 ---
-
-## Status
-
-Hekate verifier, core SDK, and chiplets are being open-sourced. The prover and recursive engine remain closed-source,
-licensed as proprietary binaries.
 
 ## Contact
 
