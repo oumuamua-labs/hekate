@@ -1,0 +1,37 @@
+[package]
+name = "hekate-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Client SDK for the Hekate ZK proving system: program bundling, wire format, and preflight diagnostics."
+keywords = ["zk", "cryptography", "sdk", "prover", "verifier"]
+categories = ["cryptography"]
+readme = "README.md"
+
+[features]
+default = ["std", "parallel", "blake3"]
+std = [
+    "hekate-core/std",
+    "hekate-math/std",
+    "hekate-program/std",
+]
+parallel = ["dep:rayon"]
+blake3 = ["hekate-core/blake3"]
+sha2 = ["hekate-core/sha2"]
+sha3 = ["hekate-core/sha3"]
+
+[dependencies]
+hekate-math = { workspace = true }
+hekate-crypto = { workspace = true }
+hekate-core = { workspace = true }
+hekate-program = { workspace = true }
+hashbrown = { workspace = true }
+rayon = { workspace = true, optional = true }
+flatbuffers = "25.2"
+
+[dev-dependencies]
+hekate-gadgets = { path = "../hekate-gadgets" }
+keccak = "0.2"

@@ -6,15 +6,18 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation and ML-DSA signature
 verification on a laptop and mobile.
 
-> [!IMPORTANT]
-> Open core lands soon. Currently finishing SDK tooling for iOS and Android developers.
+> [!IMPORTANT]  
+> **Hekate Core is now public.** We are currently building the native iOS and Android SDKs to bring sub-2GB RAM ZK
+> proving directly to mobile edge devices.
 
-> [!WARNING]
-> Workspace is under active development. Signatures and APIs may change without notice. Not production-ready yet.
+> [!WARNING]  
+> **Alpha State.** This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
+> without notice. Do not deploy to mainnet.
 
-> [!NOTE]
-> Verifier, core SDK, and chiplets are being open-sourced. Prover and recursive engine remain closed-source, but
-> binaries are free for everyone, no license required.
+> [!NOTE]  
+> **Open Core Model.** The verifier, core SDK, and cryptographic chiplets are open-source. The high-performance prover
+> and recursive engine remain proprietary IP. However, compiled binaries of the prover are provided free of charge with
+> no license restrictions for developers.
 
 ---
 
@@ -212,14 +215,8 @@ in `hekate/examples/`. Peak / total heap via `dhat-heap`.
 Reproduce:
 
 ```bash
-# Proving time
 RUSTFLAGS="-C target-cpu=native" cargo run --release \
   --no-default-features --features "std parallel blake3 table-math" \
-  --example <name> [-- <arg>]
-
-# Peak / total heap (add dhat-heap)
-RUSTFLAGS="-C target-cpu=native" cargo run --release \
-  --no-default-features --features "std parallel blake3 table-math dhat-heap" \
   --example <name> [-- <arg>]
 ```
 

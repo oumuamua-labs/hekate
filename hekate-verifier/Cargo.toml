@@ -1,0 +1,27 @@
+[package]
+name = "hekate-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Analytical verifier for the Hekate ZK proving system: Fiat-Shamir replay, Sumcheck, Brakedown LDT, LogUp bus matching."
+keywords = ["zk", "cryptography", "verifier", "brakedown", "sumcheck"]
+categories = ["cryptography", "no-std"]
+readme = "README.md"
+
+[features]
+default = ["std", "blake3"]
+std = []
+blake3 = ["hekate-core/blake3"]
+sha2 = ["hekate-core/sha2"]
+sha3 = ["hekate-core/sha3"]
+transcript-trace = ["hekate-crypto/transcript-trace"]
+
+[dependencies]
+hekate-math = { workspace = true }
+hekate-crypto = { workspace = true }
+hekate-core = { workspace = true }
+hekate-program = { workspace = true }
+tracing = { workspace = true }

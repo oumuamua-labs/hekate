@@ -1,0 +1,297 @@
+// SPDX-License-Identifier: Apache-2.0
+// This file is part of the hekate-math project.
+// Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! ML-DSA signature verification
+//! proof (FIPS 204).
+//!
+//! Usage:
+//! mldsa [44|65|87]
+//!
+//! Proof existence IS the verdict:
+//! an honest transcript requires
+//! c̃ == c̃'. Invalid signatures yield
+//! an unsatisfiable constraint system,
+//! no valid proof can be constructed,
+//! so no verdict-bit column is needed.
+
+#[path = "common/mod.rs"]
+mod common;
+
+use hekate::core::trace::{ColumnType, TraceBuilder};
+use hekate::crypto::transcript::Transcript;
+use hekate::crypto::DefaultHasher;
+use hekate::math::{Bit, Block128, Block32};
+use hekate_core::config::Config;
+use hekate_gadgets::chiplets::pqc::mldsa::{
+    self, CpuMlDsaColumns, CpuMlDsaUnit, MlDsaChiplet, MlDsaLevel, MlDsaParams, MlDsaPublicKey,
+    MlDsaSignature,
+};
+use hekate_math::TowerField;
+use hekate_program::chiplet::ChipletDef;
+use hekate_program::constraint::builder::ConstraintSystem;
+use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
+use hekate_program::permutation::PermutationCheckSpec;
+use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
+use hekate_prover_sys::prove;
+use hekate_verifier::HekateVerifier;
+use pqcrypto_mldsa::{mldsa44, mldsa65, mldsa87};
+use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+use rand::rngs::OsRng;
+use rand::TryRngCore;
+
+type F = Block128;
+type H = DefaultHasher;
+
+// =================================================================
+// ML-DSA Verification Program
+// =================================================================
+
+#[derive(Clone)]
+struct MlDsaVerifyProgram {
+    mldsa: MlDsaChiplet<F>,
+    num_public: usize,
+}
+
+impl Air<F> for MlDsaVerifyProgram {
+    fn name(&self) -> String {
+        "MlDsaVerifyProgram".into()
+    }
+
+    fn num_columns(&self) -> usize {
+        CpuMlDsaUnit::num_columns()
+    }
+
+    fn boundary_constraints(&self) -> Vec<BoundaryConstraint<F>> {
+        (0..self.num_public)
+            .map(|k| BoundaryConstraint::with_public_input(CpuMlDsaColumns::DATA, k, k))
+            .collect()
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        Box::leak(CpuMlDsaColumns::build_layout().into_boxed_slice())
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![(
+            mldsa::MLDSA_DATA_BUS_ID.into(),
+            CpuMlDsaUnit::linking_spec(),
+        )]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+        cs.assert_boolean(cs.col(CpuMlDsaColumns::SELECTOR));
+
+        cs.build()
+    }
+}
+
+impl Program<F> for MlDsaVerifyProgram {
+    fn num_public_inputs(&self) -> usize {
+        self.num_public
+    }
+
+    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+        self.mldsa.composite().flatten_defs()
+    }
+}
+
+// =================================================================
+// Main
+// =================================================================
+
+fn params_for_level(level: &MlDsaLevel) -> MlDsaParams {
+    match level.k() {
+        8 => MlDsaParams {
+            ctrl_rows: 1 << 17,
+            keccak_rows: 1 << 14,
+            ntt_rows: 1 << 17,
+            twiddle_rows: 1 << 17,
+            norm_rows: 1 << 12,
+            highbits_rows: 1 << 12,
+            ram_rows: 1 << 17,
+        },
+        _ => MlDsaParams {
+            ctrl_rows: 1 << 16,
+            keccak_rows: 1 << 13,
+            ntt_rows: 1 << 16,
+            twiddle_rows: 1 << 16,
+            norm_rows: 1 << 11,
+            highbits_rows: 1 << 11,
+            ram_rows: 1 << 16,
+        },
+    }
+}
+
+fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], msg: &[u8]) {
+    common::init(label);
+
+    let params = params_for_level(&level);
+    let cpu_num_rows: usize = 1 << 10;
+    let domain = b"ML-DSA_Verify";
+
+    println!("  Public key:     {} bytes", pk_bytes.len());
+    println!("  Signature:      {} bytes", sig_bytes.len());
+    println!("  Message:        {} bytes", msg.len());
+
+    let pk = MlDsaPublicKey::from_bytes(level, pk_bytes);
+    let sig = MlDsaSignature::from_bytes(level, sig_bytes).expect("NIST signature must parse");
+
+    // Phase 1:
+    // Generate traces.
+    let mldsa_chiplet = MlDsaChiplet::<F>::new(level, params);
+
+    let (cpu_trace, chiplet_traces, io_public) = common::phase("Trace Generation", || {
+        let chiplet_traces = mldsa_chiplet
+            .generate_traces(&pk, &sig, msg)
+            .expect("Trace generation failed");
+
+        let layout = CpuMlDsaColumns::build_layout();
+        let cpu_vars = cpu_num_rows.trailing_zeros() as usize;
+
+        let mut cpu_tb = TraceBuilder::new(&layout, cpu_vars).expect("CPU trace build failed");
+
+        // Public input:
+        // c̃ from the signature, B32-aligned.
+        let mut io_buf = sig.c_tilde.clone();
+        while !io_buf.len().is_multiple_of(4) {
+            io_buf.push(0);
+        }
+
+        for (i, chunk) in io_buf.chunks(4).enumerate() {
+            let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+
+            cpu_tb
+                .set_b32(CpuMlDsaColumns::DATA, i, Block32::from(val))
+                .expect("CPU DATA set");
+            cpu_tb
+                .set_bit(CpuMlDsaColumns::SELECTOR, i, Bit::ONE)
+                .expect("CPU SELECTOR set");
+        }
+
+        let cpu_trace = cpu_tb.build();
+
+        (cpu_trace, chiplet_traces, io_buf)
+    });
+
+    println!("  Chiplet traces: {}", chiplet_traces.len());
+
+    let ct_public: Vec<F> = io_public
+        .chunks(4)
+        .map(|chunk| Block128(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u128))
+        .collect();
+
+    println!(
+        "  Public inputs:  {} (c̃ as {} × B32)",
+        ct_public.len(),
+        ct_public.len()
+    );
+
+    // Phase 2:
+    // Prove
+    let air = MlDsaVerifyProgram {
+        mldsa: mldsa_chiplet,
+        num_public: ct_public.len(),
+    };
+
+    let instance = ProgramInstance::new(cpu_num_rows, ct_public);
+    let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
+
+    let mut config = Config {
+        sumcheck_blinding_factor: 2,
+        ..Config::default()
+    };
+
+    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
+
+    let mut blinding_seed = [0u8; 32];
+    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+
+    let proof = common::phase("Proving", || {
+        prove(
+            domain,
+            &air,
+            &instance,
+            &witness,
+            &config,
+            blinding_seed,
+            None,
+        )
+        .expect("Prover failed")
+    });
+
+    common::proof_breakdown(&proof);
+
+    // Phase 3:
+    // Verify
+    let mut verifier_transcript = Transcript::<H>::new(domain);
+    let is_valid = common::phase("Verifying", || {
+        HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut verifier_transcript, &config)
+            .expect("Verifier failed")
+    });
+
+    common::result(is_valid);
+}
+
+fn main() {
+    let level_arg = std::env::args().nth(1).unwrap_or_else(|| "65".to_string());
+    match level_arg.as_str() {
+        "44" => {
+            let (pk, sk) = mldsa44::keypair();
+            let msg = b"Hekate ML-DSA-44 verification example";
+            let sig = mldsa44::detached_sign(msg, &sk);
+
+            run_mldsa(
+                "ML-DSA-44 Signature Verification",
+                MlDsaLevel::MLDSA_44,
+                pk.as_bytes(),
+                sig.as_bytes(),
+                msg,
+            );
+        }
+        "65" => {
+            let (pk, sk) = mldsa65::keypair();
+            let msg = b"Hekate ML-DSA-65 verification example";
+            let sig = mldsa65::detached_sign(msg, &sk);
+
+            run_mldsa(
+                "ML-DSA-65 Signature Verification",
+                MlDsaLevel::MLDSA_65,
+                pk.as_bytes(),
+                sig.as_bytes(),
+                msg,
+            );
+        }
+        "87" => {
+            let (pk, sk) = mldsa87::keypair();
+            let msg = b"Hekate ML-DSA-87 verification example";
+            let sig = mldsa87::detached_sign(msg, &sk);
+
+            run_mldsa(
+                "ML-DSA-87 Signature Verification",
+                MlDsaLevel::MLDSA_87,
+                pk.as_bytes(),
+                sig.as_bytes(),
+                msg,
+            );
+        }
+        other => {
+            eprintln!("Usage: mldsa [44|65|87] (got {:?})", other);
+            std::process::exit(1);
+        }
+    }
+}

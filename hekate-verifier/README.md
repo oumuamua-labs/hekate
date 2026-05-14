@@ -1,0 +1,25 @@
+# hekate-verifier
+
+Analytical verifier for the Hekate ZK proving system.
+
+## Modules
+
+| Module      | Description                                               |
+|-------------|-----------------------------------------------------------|
+| `brakedown` | LDT query replay and Merkle path checks                   |
+| `evaluator` | Multi-point evaluation argument against trace commitments |
+| `sumcheck`  | Per-round Sumcheck verifier                               |
+| `logup`     | Cross-table bus-sum matching                              |
+
+Top-level `HekateVerifier::verify` replays Fiat-Shamir and chains the above into a single pass over the proof.
+
+## Usage
+
+```toml
+[dependencies]
+hekate-verifier = "0.23"
+```
+
+## License
+
+Licensed under Apache-2.0. See the [LICENSE](LICENSE) and [NOTICE](NOTICE) files for details.

@@ -1,0 +1,36 @@
+[package]
+name = "hekate-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Core primitives for the Hekate ZK proving system: Merkle trees, Brakedown commitments, Fiat-Shamir transcript, multilinear polynomials, trace memory."
+keywords = ["zk", "cryptography", "merkle", "sumcheck", "no-std"]
+categories = ["cryptography", "no-std"]
+readme = "README.md"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["std", "parallel", "blake3"]
+std = []
+parallel = ["hekate-crypto/parallel", "hekate-math/parallel"]
+blake3 = ["hekate-crypto/blake3"]
+sha2 = ["hekate-crypto/sha2"]
+sha3 = ["hekate-crypto/sha3"]
+secure-memory = []
+
+[dependencies]
+hekate-math = { workspace = true }
+hekate-crypto = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.8"
+dhat = "0.3"
+rand = "0.10"

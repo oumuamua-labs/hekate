@@ -1,0 +1,43 @@
+[package]
+name = "hekate-prover-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Open-source shim that links the closed-source Hekate prover cdylib over a stable C ABI."
+keywords = ["zk", "prover", "ffi", "hekate", "cdylib"]
+categories = ["cryptography", "external-ffi-bindings"]
+links = "hekate_prover_cdylib"
+
+[features]
+default = ["blake3"]
+blake3 = ["hekate-sdk/blake3"]
+sha2 = ["hekate-sdk/sha2"]
+sha3 = ["hekate-sdk/sha3"]
+ct = []
+public = []
+
+[dependencies]
+hekate-math = { workspace = true }
+hekate-core = { workspace = true, features = ["std"] }
+hekate-crypto = { workspace = true, features = ["std"] }
+hekate-program = { workspace = true, features = ["std"] }
+hekate-sdk = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+
+[build-dependencies]
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+serde = { workspace = true, features = ["std"] }
+sha2 = { version = "0.11", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["pem", "std"] }
+pqcrypto-mldsa = { version = "0.1", default-features = false, features = ["std"] }
+pqcrypto-traits = { version = "0.3", default-features = false, features = ["std"] }
+spki = { version = "0.8", default-features = false, features = ["alloc", "pem"] }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+hex = { version = "0.4", default-features = false, features = ["std"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+hekate-verifier = { workspace = true, features = ["std"] }

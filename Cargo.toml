@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = [
+    "hekate-crypto",
+    "hekate-core",
+    "hekate-program",
+    "hekate-verifier",
+    "hekate-gadgets",
+    "hekate-sdk",
+    "hekate-prover-sys",
+    "hekate",
+]
+
+[workspace.package]
+version = "0.27.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/oumuamua-labs/hekate"
+homepage = "https://oumuamua.dev/hekate"
+readme = "README.md"
+authors = [
+    "Oumuamua Labs <info@oumuamua.dev>",
+    "Andrei Kochergin <andrei@oumuamua.dev>",
+]
+
+[workspace.dependencies]
+hekate-crypto = { path = "hekate-crypto", version = "=0.27.0", default-features = false }
+hekate-core = { path = "hekate-core", version = "=0.27.0", default-features = false }
+hekate-program = { path = "hekate-program", version = "=0.27.0", default-features = false }
+hekate-verifier = { path = "hekate-verifier", version = "=0.27.0", default-features = false }
+hekate-sdk = { path = "hekate-sdk", version = "=0.27.0", default-features = false }
+hekate-gadgets = { path = "hekate-gadgets", version = "=0.27.0", default-features = false }
+hekate-math = { version = "0.6.0", default-features = false }
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
+zeroize = { version = "1.8", default-features = false, features = ["alloc", "derive"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+once_cell = { version = "1.21", default-features = false, features = ["race", "alloc"] }
+thiserror = { version = "2", default-features = false }
+rayon = "1.11"
+hashbrown = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

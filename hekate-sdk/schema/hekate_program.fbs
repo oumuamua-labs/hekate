@@ -1,0 +1,204 @@
+namespace hekate.wire;
+
+// ===== Field Elements =====
+
+struct Block128 {
+  lo: uint64;
+  hi: uint64;
+}
+
+// ===== Column Types =====
+
+enum ColumnType : byte { Bit, B8, B16, B32, B64, B128 }
+
+// ===== Constraint AST =====
+
+enum NodeTag : byte { Cell, Const, Add, Mul, Sum, Scale }
+
+table AstNode {
+  tag: NodeTag;
+  col_index: uint32;
+  next_row: bool;
+  const_value: Block128;
+  left: uint32;
+  right: uint32;
+  sum_children: [uint32];
+  scalar: Block128;
+}
+
+table ConstraintAst {
+  nodes: [AstNode];
+  roots: [uint32];
+  labels: [string];
+}
+
+// ===== Boundary Conditions =====
+
+enum BoundaryTargetKind: ubyte {
+  PublicInput = 0,
+  Constant = 1,
+}
+
+table BoundaryConstraint {
+  col_idx: uint32;
+  row_idx: uint64;
+  kind: BoundaryTargetKind;
+  public_input_idx: uint32;
+  constant_value: Block128;
+}
+
+// ===== Permutation / LogUp =====
+
+enum BusKind : byte {
+  Permutation,
+  Lookup
+}
+
+enum SourceKind : byte {
+  Column,
+  Columns,
+  RowIndexLeBytes,
+  RowIndexByte,
+  Constant
+}
+
+table Source {
+  kind: SourceKind;
+  column_index: uint32;
+  column_indices: [uint32];
+  byte_index: uint32;
+  constant_value: Block128;
+}
+
+table SourceEntry {
+  source: Source;
+  challenge_label: string;
+}
+
+table PermutationCheckSpec {
+  kind: BusKind;
+  sources: [SourceEntry];
+  selector: uint32;
+  has_selector: bool;
+  clock_waiver_reason: string;
+  recv_selector: uint32;
+  has_recv_selector: bool;
+}
+
+table BusEndpoint {
+  bus_id: string;
+  spec: PermutationCheckSpec;
+}
+
+// ===== Virtual Expansion =====
+
+enum ExpansionKind : byte {
+  ExpandBits,
+  PassThrough,
+  ControlBits,
+  ReusePassThrough
+}
+
+table ExpansionEntry {
+  kind: ExpansionKind;
+  count: uint32;
+  storage: ColumnType;
+  phy_col_start: uint32;
+}
+
+table VirtualExpander {
+  entries: [ExpansionEntry];
+}
+
+// ===== Lagrange Pins =====
+
+enum LagrangePointKind: ubyte {
+  LastRow = 0,
+  FirstRow = 1,
+  Custom = 2,
+}
+
+table LagrangePin {
+  col_idx: uint32;
+  kind: LagrangePointKind;
+  custom_bits: [ubyte];
+}
+
+// ===== Inline Kernel Hints =====
+
+table InlineKernelHint {
+  chiplet_idx: uint32;
+  root_offset: uint32;
+  column_offset: uint32;
+}
+
+// ===== Chiplet Definition =====
+
+table ChipletDef {
+  name: string;
+  num_columns: uint32;
+  column_layout: [ColumnType];
+  virtual_column_layout: [ColumnType];
+  constraint_ast: ConstraintAst;
+  boundary_constraints: [BoundaryConstraint];
+  permutation_checks: [BusEndpoint];
+  virtual_expander: VirtualExpander;
+  lagrange_pins: [LagrangePin];
+}
+
+// ===== Trace Data =====
+
+table TraceColumn {
+  col_type: ColumnType;
+  data: [ubyte];
+}
+
+table ColumnTrace {
+  columns: [TraceColumn];
+  num_rows: uint64;
+}
+
+// ===== Config =====
+
+table Config {
+  expansion_degree: uint32;
+  num_queries: uint32;
+  sumcheck_blinding_factor: uint32;
+  ldt_blinding_factor: uint32;
+  min_security_bits: uint32;
+  matrix_seed: [ubyte];
+}
+
+// ===== Top-Level Bundle =====
+
+table ProgramBundle {
+  version: uint32;
+
+  // Program description
+  num_columns: uint32;
+  num_public_inputs: uint32;
+  column_layout: [ColumnType];
+  virtual_column_layout: [ColumnType];
+  constraint_ast: ConstraintAst;
+  boundary_constraints: [BoundaryConstraint];
+  permutation_checks: [BusEndpoint];
+  virtual_expander: VirtualExpander;
+  chiplet_defs: [ChipletDef];
+  inline_chiplets: [ChipletDef];
+  inline_chiplet_kernels: [InlineKernelHint];
+
+  // Instance (public)
+  num_rows: uint64;
+  public_inputs: [Block128];
+
+  // Witness (private)
+  main_trace: ColumnTrace;
+  chiplet_traces: [ColumnTrace];
+
+  // Config
+  config: Config;
+
+  lagrange_pins: [LagrangePin];
+}
+
+root_type ProgramBundle;

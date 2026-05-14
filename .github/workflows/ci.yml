@@ -1,0 +1,146 @@
+name: CI workflow
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  changes:
+    name: Detect changed crates
+    runs-on: ubuntu-latest
+    outputs:
+      crypto: ${{ steps.f.outputs.crypto }}
+      core: ${{ steps.f.outputs.core }}
+      program: ${{ steps.f.outputs.program }}
+      verifier: ${{ steps.f.outputs.verifier }}
+      gadgets: ${{ steps.f.outputs.gadgets }}
+      sdk: ${{ steps.f.outputs.sdk }}
+      workspace: ${{ steps.f.outputs.workspace }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            workspace:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - '.github/workflows/**'
+            crypto:
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            core:
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            program:
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            verifier:
+              - 'hekate-verifier/**'
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            gadgets:
+              - 'hekate-gadgets/**'
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            sdk:
+              - 'hekate-sdk/**'
+              - 'hekate-verifier/**'
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  audit:
+    name: Audit + deny
+    needs: changes
+    if: needs.changes.outputs.workspace == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit, cargo-deny
+      - run: cargo audit
+      - run: cargo deny check
+
+  test:
+    name: ${{ matrix.crate }}
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: hekate-crypto
+            filter: crypto
+          - crate: hekate-core
+            filter: core
+          - crate: hekate-program
+            filter: program
+          - crate: hekate-verifier
+            filter: verifier
+          - crate: hekate-gadgets
+            filter: chiplets
+          - crate: hekate-sdk
+            filter: sdk
+    steps:
+      - name: Should run
+        id: run
+        run: echo "skip=${{ needs.changes.outputs[matrix.filter] != 'true' }}" >> "$GITHUB_OUTPUT"
+
+      - if: steps.run.outputs.skip == 'false'
+        uses: actions/checkout@v5
+
+      - if: steps.run.outputs.skip == 'false'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - if: steps.run.outputs.skip == 'false'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.crate }}
+
+      - if: steps.run.outputs.skip == 'false'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - if: steps.run.outputs.skip == 'false'
+        name: Clippy
+        run: cargo clippy -p ${{ matrix.crate }} --all-targets --all-features -- -D warnings
+
+      - if: steps.run.outputs.skip == 'false'
+        name: Nextest
+        run: cargo nextest run -p ${{ matrix.crate }} --all-features

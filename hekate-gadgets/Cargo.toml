@@ -1,0 +1,43 @@
+[package]
+name = "hekate-gadgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Base AIR gadgets for the Hekate ZK proving system."
+keywords = ["zk", "cryptography", "air", "chiplet", "no-std"]
+categories = ["cryptography", "no-std"]
+readme = "README.md"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["std", "parallel", "blake3"]
+std = [
+    "hekate-core/std",
+    "hekate-math/std",
+]
+blake3 = ["hekate-core/blake3"]
+sha2 = ["hekate-core/sha2"]
+sha3 = ["hekate-core/sha3"]
+parallel = [
+    "dep:rayon",
+    "hekate-core/parallel",
+    "hekate-math/parallel",
+]
+
+[dependencies]
+hekate-core = { workspace = true }
+hekate-math = { workspace = true }
+hekate-program = { workspace = true }
+once_cell = { workspace = true }
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+pqcrypto-mlkem = { version = "0.1", default-features = false, features = ["std"] }
+pqcrypto-mldsa = { version = "0.1", default-features = false, features = ["std"] }
+pqcrypto-traits = { version = "0.3", default-features = false, features = ["std"] }
+keccak = "0.2"

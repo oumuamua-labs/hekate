@@ -1,0 +1,35 @@
+[package]
+name = "hekate-program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "AIR program and chiplet definition API for the Hekate ZK proving system: constraint DSL, typed column schema, virtual expansion, LogUp bus wiring."
+keywords = ["zk", "cryptography", "air", "constraints", "no-std"]
+categories = ["cryptography", "no-std"]
+readme = "README.md"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["std", "parallel", "blake3"]
+std = [
+    "hekate-core/std",
+    "hekate-math/std",
+]
+blake3 = ["hekate-core/blake3"]
+sha2 = ["hekate-core/sha2"]
+sha3 = ["hekate-core/sha3"]
+parallel = [
+    "hekate-core/parallel",
+    "hekate-math/parallel",
+]
+
+[dependencies]
+hekate-core = { workspace = true }
+hekate-crypto = { workspace = true }
+hekate-math = { workspace = true }
+hashbrown = { workspace = true }

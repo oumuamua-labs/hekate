@@ -1,0 +1,84 @@
+namespace hekate.wire;
+
+// ===== Field Elements =====
+
+struct Block128 {
+  lo: uint64;
+  hi: uint64;
+}
+
+// ===== Commitment =====
+
+table BrakedownCommitment {
+  root: [ubyte];
+  num_rows: uint64;
+  num_cols: uint64;
+}
+
+// ===== Sumcheck =====
+
+table UnivariatePoly {
+  coefficients: [Block128];
+}
+
+table SumcheckProof {
+  round_polys: [UnivariatePoly];
+  claimed_evaluation: Block128;
+}
+
+// ===== Brakedown Opening =====
+
+table MerklePath {
+  hashes: [ubyte];
+}
+
+table BrakedownProof {
+  ldt_proofs: [MerklePath];
+  opened_columns: [ubyte];
+}
+
+// ===== Evaluation Argument =====
+
+table PointEvaluation {
+  point: [Block128];
+  column_values: [Block128];
+}
+
+table EvalBatchProof {
+  sumcheck_proof: SumcheckProof;
+  ldt_proof: BrakedownProof;
+  point_evaluations: [PointEvaluation];
+  tensor_vec: [Block128];
+}
+
+// ===== LogUp Auxiliary =====
+
+table LogUpEntry {
+  bus_id: string;
+  value: Block128;
+}
+
+table LogUpAux {
+  h_evals: [LogUpEntry];
+  claimed_sums: [LogUpEntry];
+}
+
+// ===== Top-Level Proof =====
+
+table Proof {
+  version: uint32;
+
+  // Main trace
+  trace_commitment: BrakedownCommitment;
+  zerocheck_proof: SumcheckProof;
+  main_logup_aux: LogUpAux;
+  eval_proof: EvalBatchProof;
+
+  // Chiplets (parallel arrays)
+  chiplet_commitments: [BrakedownCommitment];
+  chiplet_zerocheck_proofs: [SumcheckProof];
+  chiplet_logup_aux: [LogUpAux];
+  chiplet_eval_proofs: [EvalBatchProof];
+}
+
+root_type Proof;

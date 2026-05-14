@@ -1,0 +1,76 @@
+[package]
+name = "hekate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[features]
+default = ["std", "parallel", "blake3"]
+std = [
+    "hekate-math/std",
+    "hekate-core/std",
+    "hekate-verifier/std",
+    "hekate-gadgets/std",
+    "hekate-sdk/std",
+]
+parallel = [
+    "dep:rayon",
+    "hekate-math/parallel",
+    "hekate-core/parallel",
+    "hekate-gadgets/parallel",
+    "hekate-sdk/parallel",
+]
+secure-memory = ["hekate-core/secure-memory"]
+blake3 = [
+    "hekate-core/blake3",
+    "hekate-gadgets/blake3",
+    "hekate-sdk/blake3",
+]
+sha2 = [
+    "hekate-core/sha2",
+    "hekate-gadgets/sha2",
+    "hekate-sdk/sha2",
+]
+sha3 = [
+    "hekate-core/sha3",
+    "hekate-gadgets/sha3",
+    "hekate-sdk/sha3",
+]
+table-math = ["hekate-math/table-math"]
+
+[dependencies]
+hekate-core = { path = "../hekate-core", default-features = false }
+hekate-crypto = { workspace = true }
+hekate-math = { workspace = true }
+hekate-program = { path = "../hekate-program", default-features = false }
+hekate-gadgets = { path = "../hekate-gadgets", default-features = false }
+hekate-verifier = { path = "../hekate-verifier", default-features = false }
+rayon = { version = "1.11", optional = true }
+
+[dev-dependencies]
+hekate-prover-sys = { path = "../hekate-prover-sys", default-features = false, features = ["blake3", "public"] }
+hekate-sdk = { path = "../hekate-sdk", default-features = false }
+zk-scribble = { path = "../../../zk-scribble" }
+criterion = "0.8"
+proptest = "1.9"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing = { version = "0.1", features = ["attributes"] }
+bincode = { version = "2.0.1", features = ["serde", "alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.9"
+keccak = "0.2"
+pqcrypto-mlkem = "0.1"
+pqcrypto-mldsa = "0.1"
+pqcrypto-traits = "0.3"
+
+[[bench]]
+name = "keccak"
+harness = false
+
+[[bench]]
+name = "rom"
+harness = false
