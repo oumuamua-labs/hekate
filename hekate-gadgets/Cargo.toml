@@ -35,9 +35,3 @@ hekate-math = { workspace = true }
 hekate-program = { workspace = true }
 once_cell = { workspace = true }
 rayon = { workspace = true, optional = true }
-
-[dev-dependencies]
-pqcrypto-mlkem = { version = "0.1", default-features = false, features = ["std"] }
-pqcrypto-mldsa = { version = "0.1", default-features = false, features = ["std"] }
-pqcrypto-traits = { version = "0.3", default-features = false, features = ["std"] }
-keccak = "0.2"

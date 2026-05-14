@@ -30,16 +30,12 @@ pub mod atoms;
 pub mod chiplets;
 
 pub use chiplets::int::arith::{
-    generate_arithmetic_trace, ArithmeticOpcode, CpuArithColumns, CpuIntArithmeticUnit,
-    IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
-};
-pub use chiplets::keccak::{
-    generate_keccak_trace, sha3_256, sha3_512, shake128, shake256, CpuKeccakColumns, CpuKeccakUnit,
-    KeccakCall, KeccakChiplet, KeccakColumns, KeccakSpongeNative, KeccakWitness,
+    ArithmeticOpcode, CpuArithColumns, CpuIntArithmeticUnit, IntArithmeticChiplet,
+    IntArithmeticLayout, IntArithmeticOp, generate_arithmetic_trace,
 };
 pub use chiplets::ram::{
-    generate_ram_trace, CpuMemColumns, CpuMemoryUnit, MemoryEvent, RamChiplet, RamColumns,
+    CpuMemColumns, CpuMemoryUnit, MemoryEvent, RamChiplet, RamColumns, generate_ram_trace,
 };
 pub use chiplets::rom::{
-    generate_rom_trace, CpuFetchColumns, CpuFetchUnit, Instruction, RomChiplet, RomColumns,
+    CpuFetchColumns, CpuFetchUnit, Instruction, RomChiplet, RomColumns, generate_rom_trace,
 };

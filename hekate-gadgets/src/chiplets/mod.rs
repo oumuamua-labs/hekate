@@ -15,9 +15,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aes;
 pub mod int;
-pub mod keccak;
-pub mod pqc;
 pub mod ram;
 pub mod rom;
