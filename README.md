@@ -1,5 +1,10 @@
 # Hekate Engine
 
+[![Crates.io](https://img.shields.io/crates/v/hekate.svg)](https://crates.io/crates/hekate)
+[![Docs.rs](https://docs.rs/hekate/badge.svg)](https://docs.rs/hekate)
+[![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache2-yellow.svg)](./LICENSE)
+
 Zero-knowledge proof system over binary tower fields. Streaming architecture. Bounded memory. Edge-native.
 
 Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory. No FFTs,
