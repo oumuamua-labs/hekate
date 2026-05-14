@@ -36,7 +36,7 @@ use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block32, Block128};
 use hekate_core::config::Config;
-use hekate_gadgets::chiplets::pqc::mldsa::{
+use hekate_pqc::mldsa::{
     self, CpuMlDsaColumns, CpuMlDsaUnit, MlDsaChiplet, MlDsaLevel, MlDsaParams, MlDsaPublicKey,
     MlDsaSignature,
 };

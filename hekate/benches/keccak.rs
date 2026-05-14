@@ -20,7 +20,7 @@ use hekate::core::config::Config;
 use hekate::core::errors;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate::math::{Block128, TowerField};
-use hekate_gadgets::{
+use hekate_keccak::{
     CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, KeccakColumns, KeccakWitness,
     generate_keccak_trace,
 };

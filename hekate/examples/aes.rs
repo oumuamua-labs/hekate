@@ -24,7 +24,7 @@ use hekate::math::{Bit, Block8, Block128, TowerField};
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate_gadgets::chiplets::aes::{
+use hekate_aes::{
     Aes128Chiplet, Aes256Chiplet, AesRound128Air, AesRound256Air, CpuAes128Columns, CpuAes128Unit,
     CpuAes256Columns, CpuAes256Unit, PhysAes128Columns, PhysAes256Columns,
     trace::{Aes128Call, Aes256Call, expand_key, expand_key_256},

@@ -28,11 +28,11 @@ use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
 use hekate_gadgets::{
     ArithmeticOpcode, CpuArithColumns, CpuFetchColumns, CpuFetchUnit, CpuIntArithmeticUnit,
-    CpuKeccakColumns, CpuKeccakUnit, CpuMemColumns, CpuMemoryUnit, Instruction,
-    IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp, KeccakChiplet, MemoryEvent,
-    RamChiplet, RomChiplet, generate_arithmetic_trace, generate_keccak_trace, generate_ram_trace,
-    generate_rom_trace,
+    CpuMemColumns, CpuMemoryUnit, Instruction, IntArithmeticChiplet, IntArithmeticLayout,
+    IntArithmeticOp, MemoryEvent, RamChiplet, RomChiplet, generate_arithmetic_trace,
+    generate_ram_trace, generate_rom_trace,
 };
+use hekate_keccak::{CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, generate_keccak_trace};
 use hekate_math::{
     Bit, Block32, Block64, Block128, CanonicalDeserialize, CanonicalSerialize, TowerField,
 };

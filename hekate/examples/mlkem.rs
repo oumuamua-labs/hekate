@@ -35,7 +35,7 @@ use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block32, Block128};
 use hekate_core::config::Config;
-use hekate_gadgets::chiplets::pqc::mlkem::{
+use hekate_pqc::mlkem::{
     self, CpuMlKemColumns, CpuMlKemUnit, MlKemChiplet, MlKemLevel, MlKemParams,
 };
 use hekate_math::TowerField;

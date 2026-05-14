@@ -24,10 +24,12 @@ use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::{
-    ArithmeticOpcode, CpuArithColumns, CpuIntArithmeticUnit, CpuKeccakColumns, CpuKeccakUnit,
-    CpuMemColumns, CpuMemoryUnit, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
-    KeccakChiplet, KeccakWitness, MemoryEvent, RamChiplet, generate_arithmetic_trace,
-    generate_keccak_trace, generate_ram_trace,
+    ArithmeticOpcode, CpuArithColumns, CpuIntArithmeticUnit, CpuMemColumns, CpuMemoryUnit,
+    IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp, MemoryEvent, RamChiplet,
+    generate_arithmetic_trace, generate_ram_trace,
+};
+use hekate_keccak::{
+    CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, KeccakWitness, generate_keccak_trace,
 };
 use hekate_math::{Bit, Block32, Block64, Block128, Flat, HardwareField, TowerField};
 use hekate_program::chiplet::ChipletDef;

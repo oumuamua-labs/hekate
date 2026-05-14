@@ -25,7 +25,7 @@ use hekate::math::{Block128, TowerField};
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
-use hekate_gadgets::{
+use hekate_keccak::{
     CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, KeccakColumns, generate_keccak_trace,
 };
 use hekate_math::{Bit, Block64};
