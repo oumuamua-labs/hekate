@@ -54,8 +54,8 @@ rayon = { version = "1.11", optional = true }
 [dev-dependencies]
 hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
 hekate-sdk = { workspace = true }
-hekate-keccak = { version = "0.1", default-features = false, features = ["std", "blake3"] }
-zk-scribble = { path = "../../../zk-scribble" }
+# hekate-keccak = { version = "0.1", default-features = false, features = ["std", "blake3"] }  # TEMP: restore after publishing hekate-keccak 0.1.0
+# zk-scribble = { path = "../../../zk-scribble" }  # TEMP: restore after publishing workspace crates
 criterion = "0.8"
 proptest = "1.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
