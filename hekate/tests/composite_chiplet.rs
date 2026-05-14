@@ -22,9 +22,8 @@ use hekate::crypto::DefaultHasher;
 use hekate::math::{Block128, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
-use hekate_gadgets::{
-    generate_rom_trace, CpuFetchColumns, CpuFetchUnit, Instruction, KeccakChiplet, RomChiplet,
-};
+use hekate_gadgets::{generate_rom_trace, CpuFetchColumns, CpuFetchUnit, Instruction, RomChiplet};
+use hekate_keccak::KeccakChiplet;
 use hekate_math::{Bit, Block32};
 use hekate_program::chiplet::{ChipletDef, CompositeChiplet};
 use hekate_program::constraint::builder::ConstraintSystem;
