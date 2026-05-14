@@ -31,6 +31,7 @@ hekate-program = { path = "hekate-program", version = "=0.27.0", default-feature
 hekate-verifier = { path = "hekate-verifier", version = "=0.27.0", default-features = false }
 hekate-sdk = { path = "hekate-sdk", version = "=0.27.0", default-features = false }
 hekate-gadgets = { path = "hekate-gadgets", version = "=0.27.0", default-features = false }
+hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.27.0", default-features = false }
 hekate-math = { version = "0.6.0", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 zeroize = { version = "1.8", default-features = false, features = ["alloc", "derive"] }
