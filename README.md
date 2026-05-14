@@ -293,3 +293,16 @@ explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns.
 ## Contact
 
 [info@oumuamua.dev](mailto:info@oumuamua.dev)
+
+## Security & Audits
+
+> [!WARNING]
+> This implementation is currently UNAUDITED.
+>
+> It is provided "AS IS" with ABSOLUTELY NO WARRANTY under the terms
+> of the Apache 2.0 License. The authors assume zero liability for
+> any damages arising from its use in production environments.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
