@@ -276,12 +276,17 @@ explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns.
 
 ## Next Steps
 
-- [Installation](installation.md), build from source, configure features
-- [Getting Started](getting-started.md), first proof end-to-end
-- [Architecture](architecture.md), binary tower fields, Sumcheck, Brakedown, LogUp
-- [Writing AIR Constraints](air-constraints.md), constraint DSL, boundary conditions
-- [Chiplets](chiplets.md), independent tables, virtual packing, bus integration
-- [Security](security.md), threat model, adversarial test suite, Fiat-Shamir binding
+- [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), build from source, configure features
+- [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), first proof
+  end-to-end
+- [Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture), binary tower fields, Sumcheck, Brakedown,
+  LogUp
+- [Writing AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints), constraint DSL, boundary
+  conditions
+- [Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), independent tables, virtual packing, bus
+  integration
+- [Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial test suite,
+  Fiat-Shamir binding
 
 ---
 
