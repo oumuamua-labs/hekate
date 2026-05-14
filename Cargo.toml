@@ -41,6 +41,15 @@ thiserror = { version = "2", default-features = false }
 rayon = "1.11"
 hashbrown = "0.17"
 
+[patch.crates-io]
+hekate-crypto = { path = "hekate-crypto" }
+hekate-core = { path = "hekate-core" }
+hekate-program = { path = "hekate-program" }
+hekate-verifier = { path = "hekate-verifier" }
+hekate-sdk = { path = "hekate-sdk" }
+hekate-gadgets = { path = "hekate-gadgets" }
+hekate-prover-sys = { path = "hekate-prover-sys" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
