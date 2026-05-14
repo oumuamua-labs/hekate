@@ -1,7 +1,5 @@
-# Hekate Engine
+# Hekate ZK Engine
 
-[![Crates.io](https://img.shields.io/crates/v/hekate.svg)](https://crates.io/crates/hekate)
-[![Docs.rs](https://docs.rs/hekate/badge.svg)](https://docs.rs/hekate)
 [![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache2-yellow.svg)](./LICENSE)
 
@@ -12,7 +10,7 @@ no trace materialization, no server-grade RAM requirements. Proves ML-KEM decaps
 verification on a laptop and mobile.
 
 > [!IMPORTANT]  
-> **Hekate Core is now public.** We are currently building the native iOS and Android SDKs to bring sub-2GB RAM ZK
+> **Hekate Core is now public.** We are currently building the native iOS and Android SDKs to bring ZK
 > proving directly to mobile edge devices.
 
 > [!WARNING]  

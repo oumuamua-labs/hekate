@@ -733,10 +733,13 @@ version = "0.27.2"
 dependencies = [
  "bincode",
  "criterion",
+ "hekate-aes",
  "hekate-core",
  "hekate-crypto",
  "hekate-gadgets",
+ "hekate-keccak",
  "hekate-math",
+ "hekate-pqc",
  "hekate-program",
  "hekate-prover-sys",
  "hekate-sdk",
@@ -751,6 +754,19 @@ dependencies = [
  "serde",
  "tracing",
  "tracing-subscriber",
+ "zk-scribble",
+]
+
+[[package]]
+name = "hekate-aes"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d334ee7f2223e102bf903fe2a37a1373450e96f7f898c9f1b173bdfde2494919"
+dependencies = [
+ "hekate-core",
+ "hekate-math",
+ "hekate-program",
+ "once_cell",
 ]
 
 [[package]]
@@ -792,6 +808,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hekate-keccak"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad3fa4572f92cbced9adc9332e405c560262b23da10f57b7d4090c537d728d1d"
+dependencies = [
+ "hekate-core",
+ "hekate-math",
+ "hekate-program",
+ "once_cell",
+]
+
+[[package]]
 name = "hekate-math"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -802,6 +830,20 @@ dependencies = [
  "rayon",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "hekate-pqc"
+version = "0.1.0-pre.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "348ad88f92de1ab4fed9ee18b12c895ba4cb45cdb641d841bbc500b690687fd3"
+dependencies = [
+ "hekate-core",
+ "hekate-gadgets",
+ "hekate-keccak",
+ "hekate-math",
+ "hekate-program",
+ "once_cell",
 ]
 
 [[package]]
@@ -846,6 +888,7 @@ dependencies = [
  "hekate-core",
  "hekate-crypto",
  "hekate-gadgets",
+ "hekate-keccak",
  "hekate-math",
  "hekate-program",
  "keccak",
@@ -2339,6 +2382,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zk-scribble"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d91491d4527696de8110e244d6500b15e2a49e4e8bc95aaab8cf051a10646081"
+dependencies = [
+ "hekate-core",
+ "hekate-math",
+ "hekate-program",
+ "hekate-sdk",
+ "proptest",
 ]
 
 [[package]]
