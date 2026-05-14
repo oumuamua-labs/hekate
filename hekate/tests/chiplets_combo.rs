@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -17,16 +17,16 @@
 
 use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, Trace, TraceColumn};
-use hekate::crypto::transcript::Transcript;
 use hekate::crypto::DefaultHasher;
+use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
 use hekate_core::trace::IntoTraceColumn;
 use hekate_gadgets::{
-    generate_rom_trace, CpuFetchColumns, CpuFetchUnit, Instruction, RomChiplet, RomColumns,
+    CpuFetchColumns, CpuFetchUnit, Instruction, RomChiplet, RomColumns, generate_rom_trace,
 };
 use hekate_math::{Bit, Block32};
-use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::ConstraintAst;
+use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -32,9 +32,9 @@
 mod common;
 
 use hekate::core::trace::{ColumnType, TraceBuilder};
-use hekate::crypto::transcript::Transcript;
 use hekate::crypto::DefaultHasher;
-use hekate::math::{Bit, Block128, Block32};
+use hekate::crypto::transcript::Transcript;
+use hekate::math::{Bit, Block32, Block128};
 use hekate_core::config::Config;
 use hekate_gadgets::chiplets::pqc::mldsa::{
     self, CpuMlDsaColumns, CpuMlDsaUnit, MlDsaChiplet, MlDsaLevel, MlDsaParams, MlDsaPublicKey,
@@ -50,8 +50,8 @@ use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 use pqcrypto_mldsa::{mldsa44, mldsa65, mldsa87};
 use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
-use rand::rngs::OsRng;
 use rand::TryRngCore;
+use rand::rngs::OsRng;
 
 type F = Block128;
 type H = DefaultHasher;

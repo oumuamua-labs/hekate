@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 use hekate_core::errors;
 use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::SumcheckProof;
-use hekate_crypto::transcript::Transcript;
 use hekate_crypto::Hasher;
+use hekate_crypto::transcript::Transcript;
 use hekate_math::{Flat, HardwareField};
 
 pub type SumcheckVerifyResult<F> = errors::Result<Option<(Vec<Flat<F>>, Flat<F>)>>;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -15,24 +15,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hekate::core::config::Config;
 use hekate::core::errors;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate::math::{Block128, TowerField};
 use hekate_gadgets::{
-    generate_keccak_trace, CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, KeccakColumns,
-    KeccakWitness,
+    CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, KeccakColumns, KeccakWitness,
+    generate_keccak_trace,
 };
 use hekate_math::{Bit, Block64};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::ConstraintAst;
+use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, InlineKernelHint, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{TryRngCore, rngs::OsRng};
 use std::hint::black_box;
 use std::time::Duration;
 

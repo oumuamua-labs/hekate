@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -31,12 +31,12 @@ use alloc::vec::Vec;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_math::{Bit, Block32, Block64, TowerField};
-use hekate_program::constraint::builder::{ConstraintSystem, Expr};
+use hekate_program::Air;
 use hekate_program::constraint::ConstraintAst;
+use hekate_program::constraint::builder::{ConstraintSystem, Expr};
 use hekate_program::define_columns;
 use hekate_program::expander::VirtualExpander;
-use hekate_program::permutation::{PermutationCheckSpec, Source, REQUEST_IDX_LABEL};
-use hekate_program::Air;
+use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
 // =================================================================
 // 0. LAYOUT
 // =================================================================

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -20,7 +20,7 @@ use core::iter::repeat_n;
 use hekate_core::errors::Error;
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{ColumnType, Trace, TraceColumn, TraceCompatibleField};
-use hekate_math::{Bit, Block16, Block32, Block64, Block8, Flat};
+use hekate_math::{Bit, Block8, Block16, Block32, Block64, Flat};
 
 /// Serializable expansion step descriptor.
 #[derive(Clone, Copy, Debug)]

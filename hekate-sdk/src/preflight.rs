@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -25,7 +25,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
 use hekate_program::{
-    validate_lagrange_pins, Air, LagrangePin, Program, ProgramInstance, ProgramWitness,
+    Air, LagrangePin, Program, ProgramInstance, ProgramWitness, validate_lagrange_pins,
 };
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -21,7 +21,7 @@ use crate::trace::TraceCompatibleField;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
-use hekate_math::{Bit, Block128, Block16, Block32, Block64, Block8, Flat};
+use hekate_math::{Bit, Block8, Block16, Block32, Block64, Block128, Flat};
 use zeroize::Zeroize;
 
 /// Failures raised by `PolyVariant` operations.
@@ -635,7 +635,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hekate_math::{Bit, Block128, Block8, FlatPromote, HardwareField, TowerField};
+    use hekate_math::{Bit, Block8, Block128, FlatPromote, HardwareField, TowerField};
 
     type F = Block128;
 

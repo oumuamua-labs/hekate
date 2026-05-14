@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -26,8 +26,8 @@ use hekate_core::proofs::{BrakedownCommitment, EvalBatchProof};
 use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::TraceCompatibleField;
 use hekate_core::utils;
-use hekate_crypto::transcript::Transcript;
 use hekate_crypto::Hasher;
+use hekate_crypto::transcript::Transcript;
 use hekate_math::matrix::ByteSparseMatrix;
 use hekate_math::{Flat, HardwareField, PackableField};
 use tracing::{debug, instrument, warn};

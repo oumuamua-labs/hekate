@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -21,15 +21,15 @@ mod common;
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate_crypto::transcript::Transcript;
 use hekate_crypto::DefaultHasher;
+use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::{
-    generate_arithmetic_trace, generate_keccak_trace, generate_ram_trace, ArithmeticOpcode,
-    CpuArithColumns, CpuIntArithmeticUnit, CpuKeccakColumns, CpuKeccakUnit, CpuMemColumns,
-    CpuMemoryUnit, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp, KeccakChiplet,
-    KeccakWitness, MemoryEvent, RamChiplet,
+    ArithmeticOpcode, CpuArithColumns, CpuIntArithmeticUnit, CpuKeccakColumns, CpuKeccakUnit,
+    CpuMemColumns, CpuMemoryUnit, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
+    KeccakChiplet, KeccakWitness, MemoryEvent, RamChiplet, generate_arithmetic_trace,
+    generate_keccak_trace, generate_ram_trace,
 };
-use hekate_math::{Bit, Block128, Block32, Block64, Flat, HardwareField, TowerField};
+use hekate_math::{Bit, Block32, Block64, Block128, Flat, HardwareField, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
@@ -37,7 +37,7 @@ use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{TryRngCore, rngs::OsRng};
 // =================================================================
 // 0. SETUP
 // =================================================================

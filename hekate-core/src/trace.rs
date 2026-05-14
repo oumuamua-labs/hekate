@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -23,7 +23,7 @@ use core::any::TypeId;
 use core::fmt;
 use core::mem::transmute;
 use hekate_math::{
-    Bit, Block128, Block16, Block32, Block64, Block8, CanonicalSerialize, Flat, FlatPromote,
+    Bit, Block8, Block16, Block32, Block64, Block128, CanonicalSerialize, Flat, FlatPromote,
     HardwareField, PackableField, TowerField,
 };
 use zeroize::Zeroize;

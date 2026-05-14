@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -15,8 +15,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::{Signature as EdSignature, VerifyingKey as EdKey};
 use pqcrypto_mldsa::mldsa65;
@@ -25,7 +25,7 @@ use pqcrypto_traits::sign::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use spki::{der::Decode, SubjectPublicKeyInfoOwned};
+use spki::{SubjectPublicKeyInfoOwned, der::Decode};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};

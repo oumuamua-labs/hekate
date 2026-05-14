@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -38,11 +38,11 @@ use hekate_core::proofs::InnerProof;
 use hekate_core::protocol;
 use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::{ColumnType, TraceCompatibleField};
-use hekate_crypto::transcript::Transcript;
 use hekate_crypto::Hasher;
+use hekate_crypto::transcript::Transcript;
 use hekate_math::{Flat, HardwareField, PackableField, TowerField};
 use hekate_program::permutation::{self, BusKind};
-use hekate_program::{chiplet, validate_lagrange_pins, Air, LagrangePin, Program, ProgramInstance};
+use hekate_program::{Air, LagrangePin, Program, ProgramInstance, chiplet, validate_lagrange_pins};
 use tracing::{debug, info, instrument, warn};
 
 /// The main Hekate Verifier for AIR circuits.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -16,11 +16,11 @@
 // limitations under the License.
 
 use core::hint::black_box;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hekate_crypto::merkle::MerkleTree;
-use hekate_crypto::{default_hasher_name, DefaultHasher, Hasher};
+use hekate_crypto::{DefaultHasher, Hasher, default_hasher_name};
 use hekate_math::Block128;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::time::Duration;
 
 type H = DefaultHasher;

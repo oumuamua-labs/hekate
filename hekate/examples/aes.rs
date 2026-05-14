@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -18,25 +18,25 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use hekate::crypto::transcript::Transcript;
 use hekate::crypto::DefaultHasher;
-use hekate::math::{Bit, Block128, Block8, TowerField};
+use hekate::crypto::transcript::Transcript;
+use hekate::math::{Bit, Block8, Block128, TowerField};
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_gadgets::chiplets::aes::{
-    trace::{expand_key, expand_key_256, Aes128Call, Aes256Call},
     Aes128Chiplet, Aes256Chiplet, AesRound128Air, AesRound256Air, CpuAes128Columns, CpuAes128Unit,
     CpuAes256Columns, CpuAes256Unit, PhysAes128Columns, PhysAes256Columns,
+    trace::{Aes128Call, Aes256Call, expand_key, expand_key_256},
 };
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::ConstraintAst;
+use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{TryRngCore, rngs::OsRng};
 type F = Block128;
 type H = DefaultHasher;
 

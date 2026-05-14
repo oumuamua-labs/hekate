@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -19,14 +19,14 @@
 mod common;
 
 use hekate::core::trace::{ColumnTrace, ColumnType};
-use hekate::crypto::transcript::Transcript;
 use hekate::crypto::DefaultHasher;
+use hekate::crypto::transcript::Transcript;
 use hekate::math::Block128;
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_gadgets::{
-    generate_arithmetic_trace, ArithmeticOpcode, IntArithmeticChiplet, IntArithmeticLayout,
-    IntArithmeticOp,
+    ArithmeticOpcode, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
+    generate_arithmetic_trace,
 };
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
@@ -34,7 +34,7 @@ use hekate_program::expander::VirtualExpander;
 use hekate_program::{Air, InlineKernelHint, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{TryRngCore, rngs::OsRng};
 
 type F = Block128;
 type H = DefaultHasher;

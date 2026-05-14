@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -27,14 +27,14 @@ use hekate_core::errors;
 use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
 use hekate_gadgets::{
-    generate_arithmetic_trace, generate_keccak_trace, generate_ram_trace, generate_rom_trace,
     ArithmeticOpcode, CpuArithColumns, CpuFetchColumns, CpuFetchUnit, CpuIntArithmeticUnit,
     CpuKeccakColumns, CpuKeccakUnit, CpuMemColumns, CpuMemoryUnit, Instruction,
     IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp, KeccakChiplet, MemoryEvent,
-    RamChiplet, RomChiplet,
+    RamChiplet, RomChiplet, generate_arithmetic_trace, generate_keccak_trace, generate_ram_trace,
+    generate_rom_trace,
 };
 use hekate_math::{
-    Bit, Block128, Block32, Block64, CanonicalDeserialize, CanonicalSerialize, TowerField,
+    Bit, Block32, Block64, Block128, CanonicalDeserialize, CanonicalSerialize, TowerField,
 };
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::builder::ConstraintSystem;
@@ -44,7 +44,7 @@ use hekate_program::constraint::{
 use hekate_program::define_columns;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
 use hekate_program::{Air, LagrangePin, LagrangePoint, Program, ProgramInstance, ProgramWitness};
-use hekate_sdk::{build_bundle, deserialize_bundle, serialize_bundle, DeserializedBundle};
+use hekate_sdk::{DeserializedBundle, build_bundle, deserialize_bundle, serialize_bundle};
 
 type F = Block128;
 

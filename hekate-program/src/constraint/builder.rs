@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -41,8 +41,8 @@
 //! subtraction is addition (XOR). This is correct
 //! for binary tower fields only.
 
-use crate::constraint::{ConstraintArena, ConstraintAst, ExprId};
 use crate::ProgramCell;
+use crate::constraint::{ConstraintArena, ConstraintAst, ExprId};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ops::{Add, Mul, Sub};

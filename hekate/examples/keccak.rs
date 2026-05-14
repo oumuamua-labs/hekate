@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -18,13 +18,13 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use hekate::crypto::transcript::Transcript;
 use hekate::crypto::DefaultHasher;
+use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
 use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_gadgets::{
-    generate_keccak_trace, CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, KeccakColumns,
+    CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, KeccakColumns, generate_keccak_trace,
 };
 use hekate_math::{Bit, Block64};
 use hekate_program::chiplet::ChipletDef;
@@ -34,7 +34,7 @@ use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{TryRngCore, rngs::OsRng};
 
 type F = Block128;
 type H = DefaultHasher;

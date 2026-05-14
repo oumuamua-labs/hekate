@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -616,9 +616,9 @@ fn is_mutex_product<F: TowerField>(
 fn current_col_idx<F: TowerField>(ast: &ConstraintAst<F>, id: ExprId) -> Option<usize> {
     match ast.arena.get(id) {
         ConstraintExpr::Cell(ProgramCell {
-                                 col_idx,
-                                 next_row: false,
-                             }) => Some(*col_idx),
+            col_idx,
+            next_row: false,
+        }) => Some(*col_idx),
         _ => None,
     }
 }

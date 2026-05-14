@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -19,8 +19,8 @@ use alloc::vec::Vec;
 use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::{Error, Result};
 use hekate_math::TowerField;
-use hekate_program::constraint::{ConstraintArena, ConstraintAst, ConstraintExpr, ExprId};
 use hekate_program::ProgramCell;
+use hekate_program::constraint::{ConstraintArena, ConstraintAst, ConstraintExpr, ExprId};
 
 use crate::generated::program as fb;
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// This file is part of the hekate-math project.
+// This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
 // Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
 //
@@ -17,21 +17,21 @@
 
 use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate::crypto::transcript::Transcript;
 use hekate::crypto::DefaultHasher;
+use hekate::crypto::transcript::Transcript;
 use hekate::math::Block128;
 use hekate_math::{Bit, Block32, TowerField};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::ConstraintAst;
+use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::permutation::{
-    ChallengeLabel, PermutationCheckSpec, Source, REQUEST_IDX_LABEL,
+    ChallengeLabel, PermutationCheckSpec, REQUEST_IDX_LABEL, Source,
 };
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
-use zk_scribble::{assert_all_caught, MutationKind, ScribbleConfig, Target};
+use zk_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
 
 type F = Block128;
 type H = DefaultHasher;
