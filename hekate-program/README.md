@@ -11,14 +11,6 @@ AIR program and chiplet definition API for the Hekate ZK proving system.
 | `expander`    | Wide physical columns expanded to virtual bit columns at eval time |
 | `chiplet`     | Standalone AIR-table definition and composition                    |
 | `permutation` | LogUp bus endpoint specification for cross-table wiring            |
-| `kernel`      | Shared AIR gadget trait                                            |
-
-## Usage
-
-```toml
-[dependencies]
-hekate-program = "0.23"
-```
 
 ## License
 
