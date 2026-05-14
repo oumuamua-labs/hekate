@@ -13,7 +13,12 @@ readme = "README.md"
 
 [features]
 default = ["std", "blake3"]
-std = []
+std = [
+    "hekate-core/std",
+    "hekate-program/std",
+    "hekate-crypto/std",
+    "hekate-math/std",
+]
 blake3 = ["hekate-core/blake3"]
 sha2 = ["hekate-core/sha2"]
 sha3 = ["hekate-core/sha3"]

@@ -15,6 +15,7 @@ readme = "README.md"
 default = ["std", "parallel", "blake3"]
 std = [
     "hekate-core/std",
+    "hekate-crypto/std",
     "hekate-math/std",
     "hekate-program/std",
 ]

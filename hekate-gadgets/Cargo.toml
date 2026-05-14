@@ -18,6 +18,7 @@ crate-type = ["rlib"]
 default = ["std", "parallel", "blake3"]
 std = [
     "hekate-core/std",
+    "hekate-program/std",
     "hekate-math/std",
 ]
 blake3 = ["hekate-core/blake3"]

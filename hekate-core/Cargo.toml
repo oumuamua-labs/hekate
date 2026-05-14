@@ -16,7 +16,7 @@ crate-type = ["rlib"]
 
 [features]
 default = ["std", "parallel", "blake3"]
-std = []
+std = ["hekate-crypto/std", "hekate-math/std"]
 parallel = ["hekate-crypto/parallel", "hekate-math/parallel"]
 blake3 = ["hekate-crypto/blake3"]
 sha2 = ["hekate-crypto/sha2"]
