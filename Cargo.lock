@@ -729,7 +729,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hekate"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "bincode",
  "criterion",
@@ -751,12 +751,11 @@ dependencies = [
  "serde",
  "tracing",
  "tracing-subscriber",
- "zk-scribble",
 ]
 
 [[package]]
 name = "hekate-core"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "criterion",
  "dhat",
@@ -770,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-crypto"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "blake3",
  "criterion",
@@ -783,16 +782,12 @@ dependencies = [
 
 [[package]]
 name = "hekate-gadgets"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "hekate-core",
  "hekate-math",
  "hekate-program",
- "keccak",
  "once_cell",
- "pqcrypto-mldsa",
- "pqcrypto-mlkem",
- "pqcrypto-traits",
  "rayon",
 ]
 
@@ -811,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-program"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "hashbrown 0.17.1",
  "hekate-core",
@@ -821,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-prover-sys"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -844,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-sdk"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "flatbuffers",
  "hashbrown 0.17.1",
@@ -859,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-verifier"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -2344,17 +2339,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "zk-scribble"
-version = "0.1.0"
-dependencies = [
- "hekate-core",
- "hekate-math",
- "hekate-program",
- "hekate-sdk",
- "proptest",
 ]
 
 [[package]]
