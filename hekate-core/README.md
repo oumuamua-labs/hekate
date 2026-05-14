@@ -16,23 +16,16 @@ Core primitives for the Hekate ZK proving system.
 
 ## Features
 
-| Feature            | Default | Effect                                                |
-|--------------------|---------|-------------------------------------------------------|
-| `std`              | yes     | Enable `std` (transitively through dependencies)      |
-| `parallel`         | yes     | Rayon-backed Merkle build                             |
-| `blake3`           | yes     | Blake3 as `DefaultHasher`                             |
-| `sha2`             | no      | SHA-256 as `DefaultHasher`                            |
-| `sha3`             | no      | SHA-3-256 as `DefaultHasher`                          |
-| `secure-memory`    | no      | `ZeroizeOnDrop` on `TraceColumn`                      |
+| Feature         | Default | Effect                                           |
+|-----------------|---------|--------------------------------------------------|
+| `std`           | yes     | Enable `std` (transitively through dependencies) |
+| `parallel`      | yes     | Rayon-backed Merkle build                        |
+| `blake3`        | yes     | Blake3 as `DefaultHasher`                        |
+| `sha2`          | no      | SHA-256 as `DefaultHasher`                       |
+| `sha3`          | no      | SHA-3-256 as `DefaultHasher`                     |
+| `secure-memory` | no      | `ZeroizeOnDrop` on `TraceColumn`                 |
 
 Exactly one of `blake3` / `sha2` / `sha3` must be enabled.
-
-## Usage
-
-```toml
-[dependencies]
-hekate-core = "0.23"
-```
 
 ## License
 

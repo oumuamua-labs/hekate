@@ -13,13 +13,6 @@ Analytical verifier for the Hekate ZK proving system.
 
 Top-level `HekateVerifier::verify` replays Fiat-Shamir and chains the above into a single pass over the proof.
 
-## Usage
-
-```toml
-[dependencies]
-hekate-verifier = "0.23"
-```
-
 ## License
 
 Licensed under Apache-2.0. See the [LICENSE](LICENSE) and [NOTICE](NOTICE) files for details.
