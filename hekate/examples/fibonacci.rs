@@ -103,6 +103,8 @@ impl Air<F> for FibChipletProgram {
         cs.constrain(s_add * (next_val_a + val_b));
         cs.constrain(s_add * (next_val_b + val_res));
 
+        cs.assert_zero_when(cs.one() + s_add, val_res);
+
         let fib_ast = cs.build();
 
         ast.merge(fib_ast);

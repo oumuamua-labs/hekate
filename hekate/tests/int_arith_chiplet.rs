@@ -92,7 +92,15 @@ impl Air<F> for ArithCpuProgram {
 
     fn constraint_ast(&self) -> ConstraintAst<F> {
         let cs = ConstraintSystem::<F>::new();
-        cs.assert_boolean(cs.col(CpuArithColumns::SELECTOR));
+
+        let selector = cs.col(CpuArithColumns::SELECTOR);
+        cs.assert_boolean(selector);
+
+        let not_active = cs.one() + selector;
+        cs.assert_zero_when(not_active, cs.col(CpuArithColumns::VAL_A));
+        cs.assert_zero_when(not_active, cs.col(CpuArithColumns::VAL_B));
+        cs.assert_zero_when(not_active, cs.col(CpuArithColumns::VAL_RES));
+        cs.assert_zero_when(not_active, cs.col(CpuArithColumns::OPCODE));
 
         cs.build()
     }
@@ -986,35 +994,35 @@ where
 }
 
 #[test]
-fn padding_val_a_garbage_still_verifies() {
+fn padding_val_a_garbage_rejected() {
     let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
         tamper_b32(cpu, CpuArithColumns::VAL_A, row, 0xDEADBEEF);
     });
-    assert_eq!(r, Ok(true));
+    assert_eq!(r, Ok(false));
 }
 
 #[test]
-fn padding_val_b_garbage_still_verifies() {
+fn padding_val_b_garbage_rejected() {
     let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
         tamper_b32(cpu, CpuArithColumns::VAL_B, row, 0xCAFEBABE);
     });
-    assert_eq!(r, Ok(true));
+    assert_eq!(r, Ok(false));
 }
 
 #[test]
-fn padding_val_res_garbage_still_verifies() {
+fn padding_val_res_garbage_rejected() {
     let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
         tamper_b32(cpu, CpuArithColumns::VAL_RES, row, 0xBADF00D);
     });
-    assert_eq!(r, Ok(true));
+    assert_eq!(r, Ok(false));
 }
 
 #[test]
-fn padding_opcode_garbage_still_verifies() {
+fn padding_opcode_garbage_rejected() {
     let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
         tamper_b32(cpu, CpuArithColumns::OPCODE, row, 0xFFFFFFFF);
     });
-    assert_eq!(r, Ok(true));
+    assert_eq!(r, Ok(false));
 }
 
 #[test]

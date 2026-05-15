@@ -358,14 +358,8 @@ impl<F: TowerField> Air<F> for IntArithmeticChiplet {
         Some(&self.expander)
     }
 
-    // Root ordering is load-bearing:
-    // hekate-prover's `IntArithKernel` covers
-    // roots [28, 28+13n+1) by positional index.
-    // Reorder or insert a root here and the
-    // kernel silently misaligns. Update
-    // `num_uncovered_prefix` / `num_covered`
-    // and the kernel term formulas together
-    // with any change below.
+    /// Operand columns (val_a, val_b, val_res, opcode) are CPU-host owned.
+    /// Chiplet pins only internal state: carry_packed, request_idx.
     fn constraint_ast(&self) -> ConstraintAst<F> {
         let ly = &self.layout;
         let cs = ConstraintSystem::<F>::new();
@@ -451,6 +445,14 @@ impl<F: TowerField> Air<F> for IntArithmeticChiplet {
         for &bit in &r[1..bw] {
             cs.assert_zero_when(s_lt, bit);
         }
+
+        let request_idx = cs.col(ly.request_idx);
+        let not_active = one + s_out;
+
+        cs.assert_zero_when(not_active, request_idx);
+
+        let carry_unused = one + s_add + s_sub + s_lt;
+        cs.assert_zero_when(carry_unused, carry_packed);
 
         cs.build()
     }
