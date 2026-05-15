@@ -50,8 +50,8 @@ Every resolved cdylib is verified before linking:
 - Ed25519 signature
 - ML-DSA-65 (post-quantum) signature
 
-Manifest signatures use Anthropic-pinned publisher keys; any tamper
-fails the build.
+Manifest signatures use publisher keys (Ed25519 + ML-DSA-65) pinned
+into this crate at build-time; any tamper fails the build.
 
 ## License
 
