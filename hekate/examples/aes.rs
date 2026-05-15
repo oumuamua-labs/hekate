@@ -21,14 +21,14 @@ mod common;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block8, Block128, TowerField};
-use hekate_core::config::Config;
-use hekate_core::errors;
-use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_aes::{
     Aes128Chiplet, Aes256Chiplet, AesRound128Air, AesRound256Air, CpuAes128Columns, CpuAes128Unit,
     CpuAes256Columns, CpuAes256Unit, PhysAes128Columns, PhysAes256Columns,
     trace::{Aes128Call, Aes256Call, expand_key, expand_key_256},
 };
+use hekate_core::config::Config;
+use hekate_core::errors;
+use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
