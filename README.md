@@ -209,6 +209,20 @@ LogUp bus guarantees `val_res = a + b` for every row where `s = 1`.
 
 ---
 
+## Examples
+
+End-to-end programs that prove and verify with `hekate-prover-sys` and `hekate-verifier`. Each file is a self-contained
+binary you can run with `cargo run --release --example <name>`.
+
+- [ML-DSA signature verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs) (FIPS 204; 44 / 65 / 87 levels)
+- [ML-KEM-768 decapsulation](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem.rs) (FIPS 203)
+- [AES-128 / AES-256 block proving](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs) (FIPS 197)
+- [Keccak inline kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak_inline.rs) (CPU AIR with embedded f1600 permutation)
+- [32-bit integer arithmetic](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/arith.rs) (add / sub / mul via `IntArithmeticChiplet`)
+- [RAM read/write proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/ram.rs) (offline-memory consistency via `RamChiplet`)
+
+---
+
 ## Performance
 
 All numbers on Apple M3 Max (16 cores, 48 GB RAM), `--release` with `-C target-cpu=native`,
