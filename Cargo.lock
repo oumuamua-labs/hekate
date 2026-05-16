@@ -809,9 +809,9 @@ dependencies = [
 
 [[package]]
 name = "hekate-keccak"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c23fd847754f7ac1da51a1adf26d8d77e40939897b3458660b0742f730e6156"
+checksum = "dc3fe7174ef21bf5ef09f55c5c57bf18c436e6eef4043e0cbf4058dc393302bb"
 dependencies = [
  "hekate-core",
  "hekate-math",
@@ -2386,9 +2386,9 @@ dependencies = [
 
 [[package]]
 name = "zk-scribble"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ccbba5eab7b060d1a7e027378cbd2e2a316c8ae67b87bfddde016997e02a00f"
+checksum = "d37132dc7c5128ee9732792d84b4077566b657a08dd16ccf3f395d90f94c5776"
 dependencies = [
  "hekate-core",
  "hekate-math",
