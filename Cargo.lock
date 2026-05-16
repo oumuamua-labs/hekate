@@ -834,9 +834,9 @@ dependencies = [
 
 [[package]]
 name = "hekate-pqc"
-version = "0.1.0-pre.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9d3f2be5be503120dce16c5c1cd1cea475e092a866e9c07ada0dfe6fa64612b"
+checksum = "815e1fdb3e4ed2ddbd59b229f559eb17cd222bdcd5fdbf27bd031c5540c9f82a"
 dependencies = [
  "hekate-core",
  "hekate-gadgets",

@@ -56,7 +56,7 @@ hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
 hekate-sdk = { workspace = true }
 hekate-keccak = { version = "0.1", default-features = false, features = ["std", "blake3"] }
 hekate-aes = { version = "0.1", default-features = false, features = ["std", "blake3"] }
-hekate-pqc = { version = "0.1.0-pre.1", default-features = false, features = ["std", "blake3"] }
+hekate-pqc = { version = "0.2", default-features = false, features = ["std", "blake3"] }
 zk-scribble = "0.1"
 criterion = "0.8"
 proptest = "1.9"
