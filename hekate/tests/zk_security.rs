@@ -569,7 +569,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
 
     let config_no_zk = Config {
         sumcheck_blinding_factor: 0,
-        ldt_blinding_factor: 1,
+        ldt_blinding_factor: 4,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()
@@ -577,7 +577,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
 
     let config_zk = Config {
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 2,
+        ldt_blinding_factor: 4,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()
