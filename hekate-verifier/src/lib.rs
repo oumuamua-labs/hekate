@@ -160,10 +160,7 @@ where
                 spec.validate_clock_stitching(bus_id)?;
             }
 
-            chiplet::validate_paired_bus_mutex(
-                &def.permutation_checks,
-                &def.constraint_ast(),
-            )?;
+            chiplet::validate_paired_bus_mutex(&def.permutation_checks, &def.constraint_ast())?;
         }
 
         chiplet::validate_paired_bus_mutex(&main_perm, &program.constraint_ast())?;
