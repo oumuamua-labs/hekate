@@ -1,0 +1,39 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # bincode 2.x, used only by hekate dev-examples
+    # for proof-size measurement. Upstream ceased
+    # development after a doxxing incident;
+    # no CVE, no upgrade path.
+    { id = "RUSTSEC-2025-0141", reason = "dev-only proof-size example; upstream archived, no security vulnerability" },
+    # paste 1.0.15, transitive dep of pqcrypto-mldsa.
+    # Repo archived; no CVE, no upgrade path
+    # until pqcrypto migrates.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via pqcrypto-mldsa; upstream archived, no security vulnerability" },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "allow"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

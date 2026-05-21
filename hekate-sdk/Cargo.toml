@@ -34,6 +34,6 @@ rayon = { workspace = true, optional = true }
 flatbuffers = "25.2"
 
 [dev-dependencies]
-hekate-gadgets = { path = "../hekate-gadgets" }
+hekate-gadgets = { workspace = true }
 hekate-keccak = { version = "0.1", default-features = false, features = ["std", "blake3"] }
 keccak = "0.2"
