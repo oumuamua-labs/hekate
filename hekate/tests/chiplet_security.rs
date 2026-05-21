@@ -489,3 +489,44 @@ fn chiplet_eval_proof_multiple_points_rejected() {
         "SECURITY FAILURE: multi-point chiplet eval_proof accepted"
     );
 }
+
+// =====================================================
+// chiplet_commitments[i].num_rows
+// must be non-zero power of two.
+// =====================================================
+
+#[test]
+fn chiplet_commitment_num_rows_non_power_of_two_rejected() {
+    let (air, instance, witness, config) = build_test_system(6);
+    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+
+    assert!(ok, "Baseline proof must verify");
+
+    proof.chiplet_commitments[0].num_rows = 5;
+
+    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
+    let result = HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut vt, &config);
+
+    assert!(
+        result.is_err() || !result.unwrap(),
+        "SECURITY FAILURE: chiplet_commitments[0].num_rows = 5 accepted"
+    );
+}
+
+#[test]
+fn chiplet_commitment_num_rows_zero_rejected() {
+    let (air, instance, witness, config) = build_test_system(6);
+    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+
+    assert!(ok, "Baseline proof must verify");
+
+    proof.chiplet_commitments[0].num_rows = 0;
+
+    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
+    let result = HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut vt, &config);
+
+    assert!(
+        result.is_err() || !result.unwrap(),
+        "SECURITY FAILURE: chiplet_commitments[0].num_rows = 0 accepted"
+    );
+}
