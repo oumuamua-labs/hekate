@@ -79,7 +79,7 @@ impl<F: HardwareField> TensorProduct<F> {
     /// as slices.
     #[inline(always)]
     pub fn evaluate_eq_slice(r: &[Flat<F>], x: &[Flat<F>]) -> Flat<F> {
-        debug_assert_eq!(r.len(), x.len());
+        assert_eq!(r.len(), x.len());
 
         let mut res = Flat::from_raw(F::ONE);
         let one = Flat::from_raw(F::ONE);
@@ -136,5 +136,27 @@ impl<F: HardwareField> TensorProduct<F> {
             r_coords: new_r,
             current_scale: self.current_scale * factor,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use hekate_math::Block128;
+
+    type F = Block128;
+
+    fn f(v: u128) -> Flat<F> {
+        F::from(v).to_hardware()
+    }
+
+    #[test]
+    #[should_panic]
+    fn evaluate_eq_slice_length_mismatch_panics() {
+        let r = vec![f(0x1), f(0x2), f(0x3)];
+        let x = vec![f(0x4), f(0x5)];
+
+        let _ = TensorProduct::<F>::evaluate_eq_slice(&r, &x);
     }
 }

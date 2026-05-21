@@ -28,6 +28,14 @@ pub enum Error {
         estimated_bits: usize,
         min_bits: usize,
     },
+
+    /// `ldt_blinding_factor < num_queries`;
+    /// opened columns exhaust the noise
+    /// budget and witness data leaks.
+    InsufficientLdtBlinding {
+        ldt_blinding_factor: usize,
+        num_queries: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -39,6 +47,13 @@ impl fmt::Display for Error {
             } => write!(
                 f,
                 "Security too low: estimated {estimated_bits} bits, but {min_bits} required",
+            ),
+            Self::InsufficientLdtBlinding {
+                ldt_blinding_factor,
+                num_queries,
+            } => write!(
+                f,
+                "ldt_blinding_factor ({ldt_blinding_factor}) must be >= num_queries ({num_queries})",
             ),
         }
     }
@@ -147,6 +162,14 @@ impl Config {
     /// `min_security_bits` for the given
     /// trace dimensions.
     pub fn check_security(&self, num_vars: usize, field_bits: usize) -> errors::Result<()> {
+        if self.ldt_blinding_factor < self.num_queries {
+            return Err(Error::InsufficientLdtBlinding {
+                ldt_blinding_factor: self.ldt_blinding_factor,
+                num_queries: self.num_queries,
+            }
+            .into());
+        }
+
         let split_vars = compute_split_vars(num_vars, self.num_queries);
         let grid_cols = 1usize << split_vars;
 

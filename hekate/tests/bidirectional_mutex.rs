@@ -480,3 +480,170 @@ fn paired_air_constraint_ast_mutated_post_prove_rejected() {
         "SECURITY FAILURE: proof accepted under mutated constraint_ast"
     );
 }
+
+// =====================================================
+// Chiplet permutation_checks mutated post-construction
+// =====================================================
+
+const HONEST_BUS_A: &str = "honest_paired_a";
+const EVIL_BUS_B: &str = "evil_paired_b";
+
+define_columns! {
+    EvilChipletCols {
+        KEY: B32,
+        S_SEND_A: Bit,
+        S_RECV_A: Bit,
+        S_SEND_B: Bit,
+        S_RECV_B: Bit,
+    }
+}
+
+#[derive(Clone)]
+struct HonestChipletWithMutexA;
+
+impl Air<F> for HonestChipletWithMutexA {
+    fn name(&self) -> String {
+        "evil_host".to_string()
+    }
+
+    fn num_columns(&self) -> usize {
+        EvilChipletCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(EvilChipletCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![(
+            HONEST_BUS_A.into(),
+            PermutationCheckSpec::new_paired(
+                vec![
+                    (
+                        Source::Column(EvilChipletCols::KEY),
+                        b"key" as ChallengeLabel,
+                    ),
+                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                ],
+                EvilChipletCols::S_SEND_A,
+                EvilChipletCols::S_RECV_A,
+                BusKind::Permutation,
+            ),
+        )]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+
+        cs.assert_boolean(cs.col(EvilChipletCols::S_SEND_A));
+        cs.assert_boolean(cs.col(EvilChipletCols::S_RECV_A));
+        cs.assert_boolean(cs.col(EvilChipletCols::S_SEND_B));
+        cs.assert_boolean(cs.col(EvilChipletCols::S_RECV_B));
+
+        cs.constrain_named(
+            "paired_bus_mutex",
+            cs.col(EvilChipletCols::S_SEND_A) * cs.col(EvilChipletCols::S_RECV_A),
+        );
+
+        cs.build()
+    }
+}
+
+#[derive(Clone)]
+struct MaliciousHost;
+
+impl Air<F> for MaliciousHost {
+    fn num_columns(&self) -> usize {
+        1
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        &[ColumnType::Bit]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+        cs.assert_boolean(cs.col(0));
+
+        cs.build()
+    }
+}
+
+impl Program<F> for MaliciousHost {
+    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+        let mut def = ChipletDef::from_air(&HonestChipletWithMutexA)?;
+
+        def.permutation_checks.push((
+            EVIL_BUS_B.into(),
+            PermutationCheckSpec::new_paired(
+                vec![
+                    (
+                        Source::Column(EvilChipletCols::KEY),
+                        b"key" as ChallengeLabel,
+                    ),
+                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                ],
+                EvilChipletCols::S_SEND_B,
+                EvilChipletCols::S_RECV_B,
+                BusKind::Permutation,
+            ),
+        ));
+
+        Ok(vec![def])
+    }
+}
+
+#[test]
+fn chiplet_paired_bus_without_mutex_root_rejected_at_verify() {
+    let num_vars = 4;
+    let num_rows = 1 << num_vars;
+
+    let air = MaliciousHost;
+
+    let main_trace = TraceBuilder::new(&[ColumnType::Bit], num_vars)
+        .unwrap()
+        .build();
+
+    let mut tb = TraceBuilder::new(&EvilChipletCols::build_layout(), num_vars).unwrap();
+
+    tb.set_bit(EvilChipletCols::S_SEND_B, 0, Bit::ONE).unwrap();
+    tb.set_bit(EvilChipletCols::S_RECV_B, 0, Bit::ONE).unwrap();
+
+    let chiplet_trace = tb.build();
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::new(main_trace).with_chiplets(vec![chiplet_trace]);
+
+    let config = Config {
+        num_queries: 4,
+        min_security_bits: 0,
+        sumcheck_blinding_factor: 2,
+        ldt_blinding_factor: 4,
+        ..Config::default()
+    };
+
+    let proof_res = prove(
+        b"EvilHost",
+        &air,
+        &instance,
+        &witness,
+        &config,
+        [0xC3; 32],
+        None,
+    );
+
+    let accepted = match proof_res {
+        Ok(proof) => {
+            let mut vt = Transcript::<H>::new(b"EvilHost");
+            HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut vt, &config)
+                .unwrap_or(false)
+        }
+        Err(_) => false,
+    };
+
+    assert!(
+        !accepted,
+        "SECURITY FAILURE: chiplet paired-bus spec without mutex root in AST accepted"
+    );
+}

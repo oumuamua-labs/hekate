@@ -93,6 +93,20 @@ where
             });
         }
 
+        if num_rows == 0 || !num_rows.is_power_of_two() {
+            return Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "num_rows must be a non-zero power of two",
+            });
+        }
+
+        if proof.trace_commitment.num_rows != num_rows {
+            return Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "trace_commitment.num_rows does not match instance.num_rows",
+            });
+        }
+
         let field_bits = size_of::<F>() * 8;
         let metrics = config.security_metrics(field_bits);
 
@@ -145,6 +159,8 @@ where
             for (bus_id, spec) in &def.permutation_checks {
                 spec.validate_clock_stitching(bus_id)?;
             }
+
+            chiplet::validate_paired_bus_mutex(&def.permutation_checks, &def.constraint_ast())?;
         }
 
         chiplet::validate_paired_bus_mutex(&main_perm, &program.constraint_ast())?;
@@ -172,6 +188,14 @@ where
                     message: "chiplet commitment count mismatch",
                 })?
                 .num_rows;
+
+            if c_num_rows == 0 || !c_num_rows.is_power_of_two() {
+                return Err(errors::Error::Protocol {
+                    protocol: "verifier",
+                    message: "chiplet_commitments[c].num_rows must be a non-zero power of two",
+                });
+            }
+
             let c_num_vars = c_num_rows.trailing_zeros() as usize;
 
             validate_lagrange_pins(
@@ -640,13 +664,23 @@ where
                 });
             }
 
-            for ((h_bus, _), (claim_bus, _)) in
-                logup_aux.h_evals.iter().zip(logup_aux.claimed_sums.iter())
+            for (i, ((h_bus, _), (claim_bus, _))) in logup_aux
+                .h_evals
+                .iter()
+                .zip(logup_aux.claimed_sums.iter())
+                .enumerate()
             {
                 if h_bus != claim_bus {
                     return Err(errors::Error::Protocol {
                         protocol: "verifier",
                         message: "logup_aux bus_id order diverges between h_evals and claimed_sums",
+                    });
+                }
+
+                if h_bus.as_str() != bus_specs[i].0.as_str() {
+                    return Err(errors::Error::Protocol {
+                        protocol: "verifier",
+                        message: "logup_aux bus_id does not match bus_specs ordering",
                     });
                 }
             }

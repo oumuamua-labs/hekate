@@ -31,6 +31,8 @@ use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use zk_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
 
 type F = Block128;
@@ -619,5 +621,150 @@ fn h_eval_corruption_after_sumcheck_rejected() {
     assert!(
         verify_rejects(&air, &instance, &config, &proof),
         "SECURITY FAILURE: corrupted h_evals accepted"
+    );
+}
+
+// =====================================================
+// bus_id label decoupled from bus_specs ordering
+// =====================================================
+
+const FAKE_BUS_ID: &str = "fake_bus_z";
+
+#[derive(Clone)]
+struct LabelFlipChiplet {
+    honest_bus_id: String,
+    mode_honest: Arc<AtomicBool>,
+}
+
+impl Air<F> for LabelFlipChiplet {
+    fn name(&self) -> String {
+        format!("flip_{}", self.honest_bus_id)
+    }
+
+    fn num_columns(&self) -> usize {
+        2
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        &[ColumnType::B32, ColumnType::Bit]
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        let bus_id = if self.mode_honest.load(Ordering::SeqCst) {
+            self.honest_bus_id.clone()
+        } else {
+            FAKE_BUS_ID.into()
+        };
+
+        vec![(
+            bus_id,
+            PermutationCheckSpec::new(
+                vec![
+                    (Source::Column(0), b"n9_key" as ChallengeLabel),
+                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                ],
+                Some(1),
+            ),
+        )]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+        cs.assert_boolean(cs.col(1));
+
+        cs.build()
+    }
+}
+
+#[derive(Clone)]
+struct LabelFlipHost {
+    mode_honest: Arc<AtomicBool>,
+}
+
+impl Air<F> for LabelFlipHost {
+    fn num_columns(&self) -> usize {
+        1
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        &[ColumnType::Bit]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+        cs.assert_boolean(cs.col(0));
+
+        cs.build()
+    }
+}
+
+impl Program<F> for LabelFlipHost {
+    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+        Ok(vec![
+            ChipletDef::from_air(&LabelFlipChiplet {
+                honest_bus_id: "honest_bus_a".to_string(),
+                mode_honest: self.mode_honest.clone(),
+            })?,
+            ChipletDef::from_air(&LabelFlipChiplet {
+                honest_bus_id: "honest_bus_b".to_string(),
+                mode_honest: self.mode_honest.clone(),
+            })?,
+        ])
+    }
+}
+
+fn n9_chiplet_trace(num_vars: usize, key: u32) -> ColumnTrace {
+    let mut tb = TraceBuilder::new(&[ColumnType::B32, ColumnType::Bit], num_vars).unwrap();
+
+    tb.set_b32(0, 0, Block32::from(key)).unwrap();
+    tb.set_bit(1, 0, Bit::ONE).unwrap();
+
+    tb.build()
+}
+
+#[test]
+fn logup_bus_id_proof_label_diverged_from_program_specs_rejected() {
+    let num_vars = 4;
+    let num_rows = 1 << num_vars;
+
+    let mode_honest = Arc::new(AtomicBool::new(false));
+    let air = LabelFlipHost {
+        mode_honest: mode_honest.clone(),
+    };
+
+    let main_trace = TraceBuilder::new(&[ColumnType::Bit], num_vars)
+        .unwrap()
+        .build();
+
+    let chiplet_a = n9_chiplet_trace(num_vars, 0xCAFEF00D);
+    let chiplet_b = n9_chiplet_trace(num_vars, 0xCAFEF00D);
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::new(main_trace).with_chiplets(vec![chiplet_a, chiplet_b]);
+    let config = cfg();
+
+    let proof = prove(
+        b"BusLabelFlip",
+        &air,
+        &instance,
+        &witness,
+        &config,
+        [0xC7; 32],
+        None,
+    )
+    .expect("prove under fake-label mode");
+
+    for aux in &proof.chiplet_logup_aux {
+        assert_eq!(aux.claimed_sums[0].0, FAKE_BUS_ID);
+    }
+
+    mode_honest.store(true, Ordering::SeqCst);
+
+    let mut vt = Transcript::<H>::new(b"BusLabelFlip");
+    let res = HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut vt, &config);
+
+    assert!(
+        res.is_err() || !res.unwrap(),
+        "SECURITY FAILURE: proof bus_id labels diverge from program bus_specs"
     );
 }
