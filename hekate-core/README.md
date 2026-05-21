@@ -4,15 +4,13 @@ Core primitives for the Hekate ZK proving system.
 
 ## Modules
 
-| Module       | Description                                                  |
-|--------------|--------------------------------------------------------------|
-| `merkle`     | Binary Merkle tree with subtree openings                     |
-| `transcript` | Fiat-Shamir transcript with wide-pipe squeeze                |
-| `poly`       | Zero-copy multilinear polynomial views and univariate rounds |
-| `tensor`     | Lazy `Eq(x, r)` with constant-time fold                      |
-| `trace`      | Typed trace-column storage and builder                       |
-| `proofs`     | Wire-level proof and commitment types                        |
-| `config`     | LDT security parameters and relative-distance estimate       |
+| Module   | Description                                                  |
+|----------|--------------------------------------------------------------|
+| `poly`   | Zero-copy multilinear polynomial views and univariate rounds |
+| `tensor` | Lazy `Eq(x, r)` with constant-time fold                      |
+| `trace`  | Typed trace-column storage and builder                       |
+| `proofs` | Wire-level proof and commitment types                        |
+| `config` | LDT security parameters and relative-distance estimate       |
 
 ## Features
 
