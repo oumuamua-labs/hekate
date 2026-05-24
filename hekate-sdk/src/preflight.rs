@@ -15,8 +15,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::string::String;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt;
 use hashbrown::HashMap;
 use hekate_core::errors;
 use hekate_core::trace::{Trace, TraceColumn, TraceCompatibleField};
@@ -32,7 +36,13 @@ use rayon::prelude::*;
 
 const MAX_REPORTED_MISMATCH_ROWS: usize = 32;
 
+const FMT_MAX_ROW_PREVIEW: usize = 8;
+const FMT_MAX_MISMATCH_PREVIEW: usize = 16;
+const FMT_MAX_MUTEX_PREVIEW: usize = 8;
+
 type AirViolations<F> = (Vec<ConstraintViolation<F>>, Vec<LagrangePinViolation<F>>);
+
+type GroupedConstraintRows = BTreeMap<(TableId, usize), (Option<&'static str>, Vec<usize>)>;
 
 pub struct ConstraintViolation<F> {
     pub table: TableId,
@@ -60,14 +70,25 @@ pub struct LagrangePinViolation<F> {
     pub expected: Flat<F>,
 }
 
+/// `bus_imbalance` mirrors runtime LogUp closure
+/// `Σ_e claimed_sum_e = 0` (char-2). `mismatching_rows`
+/// is the stricter Lookup pointwise check.
 pub struct BusDiagnostic<F> {
     pub bus_id: String,
     pub kind: BusKind,
     pub endpoints: Vec<BusEndpoint<F>>,
 
+    /// Bus closure failed:
+    /// `XOR_e claimed_sum_e != 0` across endpoints.
+    /// Topology-agnostic; correct for any N-endpoint
+    /// bus (1-SEND + N-1 RECVs, chiplet<>chiplet, etc.).
+    pub bus_imbalance: bool,
+
     /// Lookup-only:
-    /// row indices where endpoint `h`
-    /// values don't XOR to zero.
+    /// row indices where endpoint `h` values
+    /// fail the pointwise XOR-to-zero check.
+    /// Permutation buses leave this empty
+    /// and signal via `bus_imbalance` instead.
     pub mismatching_rows: Vec<usize>,
 
     /// Endpoints on this bus_id
@@ -79,17 +100,43 @@ pub struct BusDiagnostic<F> {
     pub selector_mutex_violations: Vec<(TableId, usize)>,
 }
 
+impl<F> BusDiagnostic<F> {
+    pub fn has_failures(&self) -> bool {
+        self.bus_imbalance
+            || self.kind_conflict
+            || !self.mismatching_rows.is_empty()
+            || !self.selector_mutex_violations.is_empty()
+    }
+}
+
 pub struct BusEndpoint<F> {
     pub source: TableId,
     pub row_count: usize,
     pub active_rows: usize,
+
+    /// `Π_{active row} (γ + key_row)`. Informational
+    /// only, pairwise equality of products across
+    /// endpoints is the wrong predicate for N ≥ 3.
     pub product: Flat<F>,
+
+    /// `XOR_{active row} 1 / (γ + key_row)` in char-2.
+    /// The bus closes iff `XOR_e claimed_sum_e == 0`.
+    pub claimed_sum: Flat<F>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TableId {
     Main,
     Chiplet(usize),
+}
+
+impl fmt::Display for TableId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TableId::Main => f.write_str("Main"),
+            TableId::Chiplet(i) => write!(f, "Chiplet {}", i),
+        }
+    }
 }
 
 pub struct PreflightReport<F> {
@@ -458,7 +505,7 @@ pub fn check_chiplet_constraints<F>(
 where
     F: TraceCompatibleField,
 {
-    let empty_instance = ProgramInstance::<F>::new(1, alloc::vec![]);
+    let empty_instance = ProgramInstance::<F>::new(1, vec![]);
 
     for (idx, (def, trace)) in chiplet_defs.iter().zip(chiplet_traces.iter()).enumerate() {
         check_boundary_constraints(def, &empty_instance, trace, TableId::Chiplet(idx), report)?;
@@ -500,6 +547,7 @@ struct BusEndpointAccum<F> {
     row_count: usize,
     active_rows: usize,
     product: Flat<F>,
+    claimed_sum: Flat<F>,
 
     /// Empty unless `kind == Lookup`.
     h_rows: Vec<Flat<F>>,
@@ -511,19 +559,15 @@ struct BusEndpointAccum<F> {
 
 struct EndpointStats<F> {
     product: Flat<F>,
+    claimed_sum: Flat<F>,
     row_count: usize,
     active_rows: usize,
     h_rows: Vec<Flat<F>>,
     mutex_violations: Vec<usize>,
 }
 
-/// Fixed non-cryptographic challenges for
-/// bus multiset detection. Equivalent to
-/// LogUp bus-matching at runtime:
-/// if two endpoints share a bus_id their
-/// selected row multisets must coincide,
-/// which makes their `Π (γ + key)` products
-/// equal by Schwartz-Zippel.
+/// Fixed γ, β for char-2 bus closure check;
+/// SZ collisions are 2^-128 rare.
 fn fixed_gamma<F: TraceCompatibleField>() -> Flat<F> {
     F::from(0x9e3779b97f4a7c15u128).to_hardware()
 }
@@ -581,9 +625,10 @@ fn resolve_source<F: TraceCompatibleField>(
     }
 }
 
-/// Compute `Π(γ + key)` over active rows,
-/// plus per-row `h[i] = s_eff[i] / (γ + key[i])`
-/// for `BusKind::Lookup` specs (empty otherwise).
+/// Compute `Π(γ + key)`, `claimed_sum = XOR
+/// 1/(γ + key)` over active rows, and per-row
+/// `h[i] = s_eff[i] / (γ + key[i])` for
+/// `BusKind::Lookup` specs (empty otherwise).
 /// `s_eff = s_send + s_recv` in char-2 when paired.
 fn compute_endpoint_product<F, A, T>(
     spec: &PermutationCheckSpec,
@@ -608,6 +653,7 @@ where
     let one = Flat::from_raw(F::ONE);
 
     let mut product = one;
+    let mut claimed_sum = zero;
     let mut active_rows = 0usize;
 
     let mut row_vec: Vec<Flat<F>> = Vec::with_capacity(num_virtual);
@@ -683,19 +729,24 @@ where
 
         product *= key;
 
+        // invert(0) = 0 by hekate-math convention.
+        // Preflight γ is fixed (not random), so a
+        // user trace engineered to land on `key = 0`
+        // will deterministically produce h = 0 here;
+        // caller responsibility to avoid that input.
+        let inv = key.to_tower().invert().to_hardware();
+        let h_row = selector_val * inv;
+
+        claimed_sum += h_row;
+
         if want_h {
-            // invert(0) = 0 by hekate-math convention.
-            // Preflight γ is fixed (not random), so a
-            // user trace engineered to land on `key = 0`
-            // will deterministically produce h = 0 here;
-            // caller responsibility to avoid that input.
-            let inv = key.to_tower().invert().to_hardware();
-            h_rows.push(selector_val * inv);
+            h_rows.push(h_row);
         }
     }
 
     Ok(EndpointStats {
         product,
+        claimed_sum,
         row_count: num_rows,
         active_rows,
         h_rows,
@@ -733,6 +784,7 @@ where
                     row_count: stats.row_count,
                     active_rows: stats.active_rows,
                     product: stats.product,
+                    claimed_sum: stats.claimed_sum,
                     h_rows: stats.h_rows,
                     mutex_violations: stats.mutex_violations,
                 },
@@ -753,6 +805,7 @@ where
                     row_count: stats.row_count,
                     active_rows: stats.active_rows,
                     product: stats.product,
+                    claimed_sum: stats.claimed_sum,
                     h_rows: stats.h_rows,
                     mutex_violations: stats.mutex_violations,
                 },
@@ -776,6 +829,7 @@ where
                         row_count: stats.row_count,
                         active_rows: stats.active_rows,
                         product: stats.product,
+                        claimed_sum: stats.claimed_sum,
                         h_rows: stats.h_rows,
                         mutex_violations: stats.mutex_violations,
                     },
@@ -800,6 +854,7 @@ where
                         row_count: stats.row_count,
                         active_rows: stats.active_rows,
                         product: stats.product,
+                        claimed_sum: stats.claimed_sum,
                         h_rows: stats.h_rows,
                         mutex_violations: stats.mutex_violations,
                     },
@@ -817,10 +872,13 @@ where
         bus_map.entry(bus_id).or_default().push(endpoint);
     }
 
+    let zero = Flat::from_raw(F::ZERO);
+
     for (bus_id, endpoints) in &bus_map {
-        // All endpoints sharing a bus_id must
-        // have identical Π(γ + key) products.
-        let product_mismatch = !endpoints.windows(2).all(|w| w[0].product == w[1].product);
+        // Runtime LogUp closure:
+        // `Σ_e claimed_sum_e = 0` (char-2).
+        // Topology-agnostic for any N ≥ 2.
+        let bus_imbalance = endpoints.iter().fold(zero, |acc, e| acc + e.claimed_sum) != zero;
 
         let kind_conflict = !endpoints.windows(2).all(|w| w[0].kind == w[1].kind);
 
@@ -841,27 +899,27 @@ where
             .take(MAX_REPORTED_MISMATCH_ROWS)
             .collect();
 
-        if product_mismatch
-            || kind_conflict
-            || !mismatching_rows.is_empty()
-            || !selector_mutex_violations.is_empty()
-        {
-            report.bus_diagnostics.push(BusDiagnostic {
-                bus_id: bus_id.clone(),
-                kind: bus_kind,
-                endpoints: endpoints
-                    .iter()
-                    .map(|e| BusEndpoint {
-                        source: e.source,
-                        row_count: e.row_count,
-                        active_rows: e.active_rows,
-                        product: e.product,
-                    })
-                    .collect(),
-                mismatching_rows,
-                kind_conflict,
-                selector_mutex_violations,
-            });
+        let diag = BusDiagnostic {
+            bus_id: bus_id.clone(),
+            kind: bus_kind,
+            endpoints: endpoints
+                .iter()
+                .map(|e| BusEndpoint {
+                    source: e.source,
+                    row_count: e.row_count,
+                    active_rows: e.active_rows,
+                    product: e.product,
+                    claimed_sum: e.claimed_sum,
+                })
+                .collect(),
+            bus_imbalance,
+            mismatching_rows,
+            kind_conflict,
+            selector_mutex_violations,
+        };
+
+        if diag.has_failures() {
+            report.bus_diagnostics.push(diag);
         }
     }
 
@@ -931,4 +989,150 @@ where
     check_bus_multisets(program, witness, &mut report)?;
 
     Ok(report)
+}
+
+// =================================================================
+// Formatted preflight report
+// =================================================================
+
+impl<F: TraceCompatibleField> fmt::Display for PreflightReport<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "PREFLIGHT: {} constraint, {} boundary, {} lagrange pin, {} bus",
+            self.constraint_violations.len(),
+            self.boundary_violations.len(),
+            self.lagrange_pin_violations.len(),
+            self.bus_diagnostics.len(),
+        )?;
+
+        write_grouped_constraint_violations(f, &self.constraint_violations)?;
+
+        for v in &self.boundary_violations {
+            writeln!(
+                f,
+                "  [{}] boundary #{}: col={} row={} actual={:?} expected={:?}",
+                v.table, v.bc_idx, v.col_idx, v.row_idx, v.actual, v.expected,
+            )?;
+        }
+
+        for v in &self.lagrange_pin_violations {
+            writeln!(
+                f,
+                "  [{}] lagrange pin #{}: col={} row={} actual={:?} expected={:?}",
+                v.table, v.pin_idx, v.col_idx, v.row_idx, v.actual, v.expected,
+            )?;
+        }
+
+        for d in &self.bus_diagnostics {
+            fmt::Display::fmt(d, f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<F: TraceCompatibleField> fmt::Display for BusDiagnostic<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            BusKind::Permutation => "Permutation",
+            BusKind::Lookup => "Lookup",
+        };
+
+        let mut failures: Vec<String> = Vec::new();
+
+        if self.bus_imbalance {
+            failures.push("bus_imbalance".to_string());
+        }
+
+        if self.kind_conflict {
+            failures.push("kind_conflict".to_string());
+        }
+
+        if !self.mismatching_rows.is_empty() {
+            failures.push(format!("mismatching_rows={}", self.mismatching_rows.len()));
+        }
+
+        if !self.selector_mutex_violations.is_empty() {
+            failures.push(format!(
+                "selector_mutex_violations={}",
+                self.selector_mutex_violations.len()
+            ));
+        }
+
+        writeln!(
+            f,
+            "  bus \"{}\" [{}] ({} endpoints) failures: {}",
+            self.bus_id,
+            kind,
+            self.endpoints.len(),
+            failures.join(", "),
+        )?;
+
+        for e in &self.endpoints {
+            writeln!(
+                f,
+                "    {}: {} rows, {} active, product={:?}, claimed_sum={:?}",
+                e.source, e.row_count, e.active_rows, e.product, e.claimed_sum,
+            )?;
+        }
+
+        if !self.mismatching_rows.is_empty() {
+            let total = self.mismatching_rows.len();
+            let shown = total.min(FMT_MAX_MISMATCH_PREVIEW);
+
+            writeln!(
+                f,
+                "    mismatching rows (first {} of {}): {:?}",
+                shown,
+                total,
+                &self.mismatching_rows[..shown],
+            )?;
+        }
+
+        for (table, row) in self
+            .selector_mutex_violations
+            .iter()
+            .take(FMT_MAX_MUTEX_PREVIEW)
+        {
+            writeln!(
+                f,
+                "    [{}] paired-bus mutex violation: row {} has s_send · s_recv = 1",
+                table, row,
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+fn write_grouped_constraint_violations<F>(
+    f: &mut fmt::Formatter<'_>,
+    violations: &[ConstraintViolation<F>],
+) -> fmt::Result {
+    let mut grouped: GroupedConstraintRows = BTreeMap::new();
+
+    for v in violations {
+        let entry = grouped
+            .entry((v.table, v.constraint_idx))
+            .or_insert_with(|| (v.label, Vec::new()));
+        entry.1.push(v.row_idx);
+    }
+
+    for ((table, ci), (label, rows)) in &grouped {
+        let label = label.unwrap_or("(unnamed)");
+        let shown = rows.len().min(FMT_MAX_ROW_PREVIEW);
+
+        writeln!(
+            f,
+            "  [{}] constraint #{} \"{}\" — {} rows: {:?}",
+            table,
+            ci,
+            label,
+            rows.len(),
+            &rows[..shown],
+        )?;
+    }
+
+    Ok(())
 }
