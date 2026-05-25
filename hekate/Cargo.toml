@@ -71,9 +71,5 @@ pqcrypto-mldsa = "0.1"
 pqcrypto-traits = "0.3"
 
 [[bench]]
-name = "keccak"
-harness = false
-
-[[bench]]
 name = "rom"
 harness = false

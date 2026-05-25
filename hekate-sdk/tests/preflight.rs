@@ -25,87 +25,9 @@ use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
 use hekate_program::{Air, LagrangePin, Program, ProgramInstance, ProgramWitness, define_columns};
 use hekate_sdk::preflight;
-use hekate_sdk::preflight::{PreflightReport, TableId};
+use hekate_sdk::preflight::TableId;
 
 type F = Block128;
-
-fn print_report(report: &PreflightReport<F>) {
-    let n_cv = report.constraint_violations.len();
-    let n_bv = report.boundary_violations.len();
-    let n_lp = report.lagrange_pin_violations.len();
-    let n_bus = report.bus_diagnostics.len();
-
-    eprintln!(
-        "\n  PREFLIGHT: {} constraint, {} boundary, {} lagrange pin, {} bus\n",
-        n_cv, n_bv, n_lp, n_bus
-    );
-
-    for v in &report.constraint_violations {
-        let table = match v.table {
-            TableId::Main => "Main".to_string(),
-            TableId::Chiplet(i) => format!("Chiplet {}", i),
-        };
-
-        let label = v.label.unwrap_or("(unnamed)");
-        eprintln!(
-            "    [{}] Constraint {} \"{}\" failed at row {}",
-            table, v.constraint_idx, label, v.row_idx,
-        );
-    }
-
-    for v in &report.boundary_violations {
-        eprintln!(
-            "    Boundary #{}: col={} row={} actual={:?} expected={:?}",
-            v.bc_idx, v.col_idx, v.row_idx, v.actual, v.expected,
-        );
-    }
-
-    for v in &report.lagrange_pin_violations {
-        let table = match v.table {
-            TableId::Main => "Main".to_string(),
-            TableId::Chiplet(i) => format!("Chiplet {}", i),
-        };
-
-        eprintln!(
-            "    [{}] LagrangePin #{} col={} row={} actual={:?} expected={:?}",
-            table, v.pin_idx, v.col_idx, v.row_idx, v.actual, v.expected,
-        );
-    }
-
-    for d in &report.bus_diagnostics {
-        eprintln!(
-            "    Bus \"{}\" ({} endpoints):",
-            d.bus_id,
-            d.endpoints.len()
-        );
-
-        for e in &d.endpoints {
-            let source = match e.source {
-                TableId::Main => "Main".to_string(),
-                TableId::Chiplet(i) => format!("Chiplet {}", i),
-            };
-
-            eprintln!(
-                "      {}: {} rows, {} active, product={:?}",
-                source, e.row_count, e.active_rows, e.product
-            );
-        }
-
-        for (table, row) in &d.selector_mutex_violations {
-            let src = match table {
-                TableId::Main => "Main".to_string(),
-                TableId::Chiplet(i) => format!("Chiplet {}", i),
-            };
-
-            eprintln!(
-                "      [{}] paired-bus mutex violation: row {} has s_send · s_recv = 1",
-                src, row,
-            );
-        }
-    }
-
-    eprintln!();
-}
 
 // =================================================================
 // COLUMN SCHEMAS
@@ -317,7 +239,7 @@ fn clean_trace_passes() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&FibAir, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(report.is_clean());
 }
@@ -337,7 +259,7 @@ fn detects_air_constraint_violation() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&FibAir, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
     assert!(!report.constraint_violations.is_empty());
@@ -354,7 +276,7 @@ fn detects_boundary_violation() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&FibAir, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
     assert_eq!(report.boundary_violations.len(), 2);
@@ -369,7 +291,7 @@ fn gpa_matching_buses_pass() {
     let witness = ProgramWitness::<F>::new(cpu_trace).with_chiplets(vec![mem_trace]);
 
     let report = preflight(&CpuWithBus, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(report.is_clean());
 }
@@ -387,12 +309,28 @@ fn detects_gpa_bus_mismatch() {
     let witness = ProgramWitness::<F>::new(cpu_trace).with_chiplets(vec![mem_trace]);
 
     let report = preflight(&CpuWithBus, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
     assert_eq!(report.bus_diagnostics.len(), 1);
-    assert_eq!(report.bus_diagnostics[0].bus_id, "test_bus");
-    assert_eq!(report.bus_diagnostics[0].endpoints.len(), 2);
+
+    let d = &report.bus_diagnostics[0];
+
+    assert_eq!(d.bus_id, "test_bus");
+    assert_eq!(d.endpoints.len(), 2);
+    assert!(
+        d.bus_imbalance,
+        "Permutation bus imbalance must surface as a named flag"
+    );
+    assert!(d.has_failures());
+    assert_ne!(
+        d.endpoints[0].claimed_sum, d.endpoints[1].claimed_sum,
+        "endpoints' claimed_sums must diverge under multiset mismatch",
+    );
+
+    // mismatching_rows is the Lookup pointwise signal;
+    // Permutation buses must leave it empty.
+    assert!(d.mismatching_rows.is_empty());
 }
 
 #[test]
@@ -408,7 +346,7 @@ fn detects_chiplet_constraint_violation() {
     let witness = ProgramWitness::<F>::new(cpu_trace).with_chiplets(vec![mem_trace]);
 
     let report = preflight(&CpuWithBus, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
 
@@ -508,7 +446,7 @@ fn virtual_expansion_clean_passes() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&BitUnpackChiplet, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(report.is_clean());
 }
@@ -522,7 +460,7 @@ fn virtual_expansion_detects_constraint_violation() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&BitUnpackChiplet, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
 
@@ -547,7 +485,7 @@ fn virtual_expansion_corrupt_physical_detected() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&BitUnpackChiplet, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
 
@@ -569,7 +507,7 @@ fn chiplet_virtual_expansion_clean() {
     let witness = ProgramWitness::<F>::new(host_trace).with_chiplets(vec![chiplet_trace]);
 
     let report = preflight(&HostForBitUnpack, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
     assert!(report.is_clean());
 }
 
@@ -583,7 +521,7 @@ fn chiplet_virtual_expansion_detects_violation() {
     let witness = ProgramWitness::<F>::new(host_trace).with_chiplets(vec![chiplet_trace]);
 
     let report = preflight(&HostForBitUnpack, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
 
@@ -746,7 +684,7 @@ fn lookup_aligned_buses_pass() {
     let witness = ProgramWitness::<F>::new(cpu_trace).with_chiplets(vec![mem_trace]);
 
     let report = preflight(&CpuWithLookupBus, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(
         report.is_clean(),
@@ -761,7 +699,7 @@ fn lookup_catches_row_shuffle() {
     let witness = ProgramWitness::<F>::new(cpu_trace).with_chiplets(vec![mem_trace]);
 
     let report = preflight(&CpuWithLookupBus, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert_eq!(report.bus_diagnostics.len(), 1);
     let d = &report.bus_diagnostics[0];
@@ -793,7 +731,7 @@ fn lookup_catches_parity_forgery() {
     let witness = ProgramWitness::<F>::new(cpu_trace).with_chiplets(vec![mem_trace]);
 
     let report = preflight(&CpuWithLookupBus, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert_eq!(report.bus_diagnostics.len(), 1);
     let d = &report.bus_diagnostics[0];
@@ -879,7 +817,7 @@ fn lagrange_pin_last_row_clean_passes() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&air, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(report.is_clean());
     assert!(report.lagrange_pin_violations.is_empty());
@@ -900,7 +838,7 @@ fn lagrange_pin_last_row_detects_corrupted_last_row() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&air, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
     assert_eq!(report.lagrange_pin_violations.len(), 1);
@@ -931,7 +869,7 @@ fn lagrange_pin_last_row_detects_corrupted_mid_row() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&air, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
     assert_eq!(report.lagrange_pin_violations.len(), 1);
@@ -953,7 +891,7 @@ fn lagrange_pin_first_row_clean_passes() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&air, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(report.is_clean());
 }
@@ -973,7 +911,7 @@ fn lagrange_pin_first_row_detects_violation() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&air, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert_eq!(report.lagrange_pin_violations.len(), 1);
     assert_eq!(report.lagrange_pin_violations[0].row_idx, 0);
@@ -1002,7 +940,7 @@ fn lagrange_pin_custom_clean_passes() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&air, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(report.is_clean());
 }
@@ -1025,7 +963,7 @@ fn lagrange_pin_custom_detects_violation_at_target_row() {
     let witness = ProgramWitness::<F>::new(trace);
 
     let report = preflight(&air, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert_eq!(report.lagrange_pin_violations.len(), 1);
     assert_eq!(report.lagrange_pin_violations[0].row_idx, target_row);
@@ -1051,7 +989,7 @@ fn lagrange_pin_out_of_range_col_idx_rejected_in_preflight() {
         Err(e) => eprintln!("\n  PREFLIGHT rejected out-of-range pin: {:?}\n", e),
         Ok(report) => {
             eprintln!("\n  PREFLIGHT unexpectedly returned Ok\n");
-            print_report(report);
+            eprintln!("{}", report);
         }
     }
 
@@ -1148,7 +1086,7 @@ fn detects_chiplet_boundary_violation() {
     let witness = ProgramWitness::<F>::new(main_trace).with_chiplets(vec![chiplet_trace]);
 
     let report = preflight(&BoundaryHost, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
     assert_eq!(report.boundary_violations.len(), 1);
@@ -1173,7 +1111,7 @@ fn chiplet_boundary_clean_passes() {
     let witness = ProgramWitness::<F>::new(main_trace).with_chiplets(vec![chiplet_trace]);
 
     let report = preflight(&BoundaryHost, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(report.is_clean());
     assert!(report.boundary_violations.is_empty());
@@ -1284,7 +1222,7 @@ fn exploit_preflight_misses_bidirectional_mutex_violation() {
     let witness = ProgramWitness::<F>::new(main).with_chiplets(vec![chip]);
 
     let report = preflight(&PairedBusHost, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     assert!(!report.is_clean());
 
@@ -1322,7 +1260,7 @@ fn preflight_bidirectional_aligned_witness_clean() {
     let witness = ProgramWitness::<F>::new(main).with_chiplets(vec![chip]);
 
     let report = preflight(&PairedBusHost, &instance, &witness).unwrap();
-    print_report(&report);
+    eprintln!("{}", report);
 
     let bus_with_mutex_violations = report
         .bus_diagnostics
@@ -1372,4 +1310,250 @@ fn chiplet_boundary_public_input_rejected_at_snapshot() {
             ..
         })
     ));
+}
+
+// Two Permutation specs on a SINGLE main trace
+// sharing one `bus_id` (both endpoints on main,
+// products diverge).
+define_columns! {
+    DualBusCols {
+        SEL_SEND: Bit,
+        SEL_RECV: Bit,
+        SEND_KEY: B32,
+        RECV_KEY: B32,
+    }
+}
+
+#[derive(Clone)]
+struct MainPairBus;
+
+impl Air<F> for MainPairBus {
+    fn num_columns(&self) -> usize {
+        DualBusCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(DualBusCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![
+            (
+                "main_pair_bus".to_string(),
+                PermutationCheckSpec::new(
+                    vec![
+                        (Source::Column(DualBusCols::SEND_KEY), b"k0"),
+                        (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    ],
+                    Some(DualBusCols::SEL_SEND),
+                ),
+            ),
+            (
+                "main_pair_bus".to_string(),
+                PermutationCheckSpec::new(
+                    vec![
+                        (Source::Column(DualBusCols::RECV_KEY), b"k0"),
+                        (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    ],
+                    Some(DualBusCols::SEL_RECV),
+                ),
+            ),
+        ]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+impl Program<F> for MainPairBus {}
+
+fn main_pair_trace(num_vars: usize, active: usize, recv_key_offset: u32) -> ColumnTrace {
+    let layout = DualBusCols::build_layout();
+
+    let mut tb = TraceBuilder::new(&layout, num_vars).unwrap();
+
+    for i in 0..active {
+        tb.set_bit(DualBusCols::SEL_SEND, i, Bit::ONE).unwrap();
+        tb.set_bit(DualBusCols::SEL_RECV, i, Bit::ONE).unwrap();
+        tb.set_b32(DualBusCols::SEND_KEY, i, Block32::from(i as u32))
+            .unwrap();
+        tb.set_b32(
+            DualBusCols::RECV_KEY,
+            i,
+            Block32::from(i as u32 + recv_key_offset),
+        )
+        .unwrap();
+    }
+
+    tb.build()
+}
+
+#[test]
+fn detects_main_main_permutation_bus_imbalance() {
+    let trace = main_pair_trace(3, 4, 100);
+    let instance = ProgramInstance::new(8, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+
+    let report = preflight(&MainPairBus, &instance, &witness).unwrap();
+    eprintln!("{}", report);
+
+    assert!(!report.is_clean());
+
+    let d = report
+        .bus_diagnostics
+        .iter()
+        .find(|d| d.bus_id == "main_pair_bus")
+        .expect("diagnostic for main_pair_bus must exist");
+
+    assert_eq!(d.kind, BusKind::Permutation);
+    assert_eq!(d.endpoints.len(), 2);
+    assert!(matches!(d.endpoints[0].source, TableId::Main));
+    assert!(matches!(d.endpoints[1].source, TableId::Main));
+    assert!(d.bus_imbalance);
+    assert!(d.has_failures());
+    assert_ne!(d.endpoints[0].claimed_sum, d.endpoints[1].claimed_sum);
+    assert!(d.mismatching_rows.is_empty());
+}
+
+#[test]
+fn main_main_permutation_matching_keys_pass() {
+    let trace = main_pair_trace(3, 4, 0);
+    let instance = ProgramInstance::new(8, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+
+    let report = preflight(&MainPairBus, &instance, &witness).unwrap();
+    eprintln!("{}", report);
+
+    assert!(report.is_clean());
+}
+
+// 1-SEND + 2-RECV partition on a single main trace.
+define_columns! {
+    PartitionCols {
+        SEL_SEND: Bit,
+        SEL_A: Bit,
+        SEL_B: Bit,
+        KEY_SEND: B32,
+        KEY_A: B32,
+        KEY_B: B32,
+    }
+}
+
+#[derive(Clone)]
+struct MainPartitionBus;
+
+impl Air<F> for MainPartitionBus {
+    fn num_columns(&self) -> usize {
+        PartitionCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(PartitionCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        let waiver =
+            "see preflight test: per-row uniqueness via disjoint AIR selectors on the partition";
+        vec![
+            (
+                "partition_bus".to_string(),
+                PermutationCheckSpec::new(
+                    vec![(Source::Column(PartitionCols::KEY_SEND), b"k0")],
+                    Some(PartitionCols::SEL_SEND),
+                )
+                .with_clock_waiver(waiver),
+            ),
+            (
+                "partition_bus".to_string(),
+                PermutationCheckSpec::new(
+                    vec![(Source::Column(PartitionCols::KEY_A), b"k0")],
+                    Some(PartitionCols::SEL_A),
+                )
+                .with_clock_waiver(waiver),
+            ),
+            (
+                "partition_bus".to_string(),
+                PermutationCheckSpec::new(
+                    vec![(Source::Column(PartitionCols::KEY_B), b"k0")],
+                    Some(PartitionCols::SEL_B),
+                )
+                .with_clock_waiver(waiver),
+            ),
+        ]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+impl Program<F> for MainPartitionBus {}
+
+fn partition_trace(
+    num_vars: usize,
+    send_keys: &[u32],
+    a_keys: &[u32],
+    b_keys: &[u32],
+) -> ColumnTrace {
+    let layout = PartitionCols::build_layout();
+
+    let mut tb = TraceBuilder::new(&layout, num_vars).unwrap();
+
+    for (i, &k) in send_keys.iter().enumerate() {
+        tb.set_bit(PartitionCols::SEL_SEND, i, Bit::ONE).unwrap();
+        tb.set_b32(PartitionCols::KEY_SEND, i, Block32::from(k))
+            .unwrap();
+    }
+
+    for (i, &k) in a_keys.iter().enumerate() {
+        tb.set_bit(PartitionCols::SEL_A, i, Bit::ONE).unwrap();
+        tb.set_b32(PartitionCols::KEY_A, i, Block32::from(k))
+            .unwrap();
+    }
+
+    for (i, &k) in b_keys.iter().enumerate() {
+        tb.set_bit(PartitionCols::SEL_B, i, Bit::ONE).unwrap();
+        tb.set_b32(PartitionCols::KEY_B, i, Block32::from(k))
+            .unwrap();
+    }
+
+    tb.build()
+}
+
+#[test]
+fn multi_endpoint_permutation_partition_passes_preflight() {
+    let trace = partition_trace(3, &[10, 11, 12, 13], &[10, 11], &[12, 13]);
+    let instance = ProgramInstance::new(8, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+
+    let report = preflight(&MainPartitionBus, &instance, &witness).unwrap();
+    eprintln!("{}", report);
+
+    assert!(report.is_clean());
+}
+
+#[test]
+fn multi_endpoint_permutation_partition_imbalance_detected() {
+    let trace = partition_trace(3, &[10, 11, 12, 13], &[10, 11], &[12, 99]);
+    let instance = ProgramInstance::new(8, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+
+    let report = preflight(&MainPartitionBus, &instance, &witness).unwrap();
+    eprintln!("{}", report);
+
+    assert!(!report.is_clean());
+
+    let d = report
+        .bus_diagnostics
+        .iter()
+        .find(|d| d.bus_id == "partition_bus")
+        .expect("diagnostic for partition_bus must exist");
+
+    assert_eq!(d.kind, BusKind::Permutation);
+    assert_eq!(d.endpoints.len(), 3);
+    assert!(d.bus_imbalance);
+    assert!(d.has_failures());
 }
