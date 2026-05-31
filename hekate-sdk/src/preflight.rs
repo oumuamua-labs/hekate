@@ -333,7 +333,6 @@ where
     let num_rows = trace.num_rows()?;
     let num_vars = num_rows.trailing_zeros() as usize;
     let num_virtual_cols = air.num_columns();
-    let num_physical_cols = trace.num_cols();
 
     let ast = air.constraint_ast();
     let pins = air.lagrange_pinned_columns();
@@ -344,7 +343,7 @@ where
         return Ok((Vec::new(), Vec::new()));
     }
 
-    let has_virtual_expansion = num_virtual_cols != num_physical_cols;
+    let has_virtual_expansion = air.virtual_expander().is_some();
     let phys_row_bytes: usize = if has_virtual_expansion {
         air.column_layout().iter().map(|c| c.byte_size()).sum()
     } else {
@@ -478,8 +477,53 @@ where
     P: Air<F>,
     T: Trace,
 {
-    for (bc_idx, bc) in air.boundary_constraints().iter().enumerate() {
-        let actual: Flat<F> = trace.get_element(bc.col_idx, bc.row_idx)?;
+    let bcs = air.boundary_constraints();
+    if bcs.is_empty() {
+        return Ok(());
+    }
+
+    let num_virtual = air.num_columns();
+    let num_rows = trace.num_rows()?;
+    let has_expansion = air.virtual_expander().is_some();
+    let columns = trace.columns();
+
+    let (mut row_bytes, mut virtual_row) = if has_expansion {
+        let phys_row_bytes: usize = air.column_layout().iter().map(|c| c.byte_size()).sum();
+        (
+            Vec::<u8>::with_capacity(phys_row_bytes),
+            Vec::<Flat<F>>::with_capacity(num_virtual),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    for (bc_idx, bc) in bcs.iter().enumerate() {
+        if bc.col_idx >= num_virtual {
+            return Err(errors::Error::Protocol {
+                protocol: "boundary",
+                message: "boundary col_idx out of range",
+            });
+        }
+
+        if bc.row_idx >= num_rows {
+            return Err(errors::Error::Protocol {
+                protocol: "boundary",
+                message: "boundary row_idx exceeds trace height",
+            });
+        }
+
+        let actual: Flat<F> = if has_expansion {
+            extract_row_bytes(columns, bc.row_idx, &mut row_bytes);
+
+            virtual_row.clear();
+
+            air.parse_virtual_row(&row_bytes, &mut virtual_row);
+
+            virtual_row[bc.col_idx]
+        } else {
+            trace.get_element(bc.col_idx, bc.row_idx)?
+        };
+
         let expected = bc.resolve_target(instance).unwrap_or(F::ZERO).to_hardware();
 
         if actual != expected {
@@ -644,9 +688,8 @@ where
 {
     let num_rows = trace.num_rows()?;
     let num_virtual = air.num_columns();
-    let num_physical = trace.num_cols();
 
-    let has_expansion = num_virtual != num_physical;
+    let has_expansion = air.virtual_expander().is_some();
     let want_h = spec.kind == BusKind::Lookup;
 
     let zero = Flat::from_raw(F::ZERO);
