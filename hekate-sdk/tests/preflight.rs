@@ -1557,3 +1557,109 @@ fn multi_endpoint_permutation_partition_imbalance_detected() {
     assert!(d.bus_imbalance);
     assert!(d.has_failures());
 }
+
+// =================================================================
+// BOUNDARY ON EXPANDED VIRTUAL COLUMN
+// =================================================================
+
+#[derive(Clone)]
+struct ExpBoundaryChiplet;
+
+impl Air<F> for ExpBoundaryChiplet {
+    fn boundary_constraints(&self) -> Vec<BoundaryConstraint<F>> {
+        // Virtual bit 31 sits past the single physical
+        // column; it resolves only through expansion,
+        // never physical indexing.
+        vec![BoundaryConstraint::with_constant(31, 0, F::ZERO)]
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        &[ColumnType::B32]
+    }
+
+    fn virtual_expander(&self) -> Option<&VirtualExpander> {
+        static E: std::sync::OnceLock<VirtualExpander> = std::sync::OnceLock::new();
+        Some(E.get_or_init(|| {
+            VirtualExpander::new()
+                .expand_bits(1, ColumnType::B32)
+                .build()
+                .expect("ExpBoundaryChiplet expander")
+        }))
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+#[derive(Clone)]
+struct ExpBoundaryHost;
+
+impl Air<F> for ExpBoundaryHost {
+    fn num_columns(&self) -> usize {
+        0
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        &[]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+impl Program<F> for ExpBoundaryHost {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
+        Ok(vec![ChipletDef::from_air(&ExpBoundaryChiplet)?])
+    }
+}
+
+#[test]
+fn boundary_on_expanded_bit_clean_passes() {
+    let num_vars = 2;
+    let num_rows = 1 << num_vars;
+
+    let main_trace = TraceBuilder::new(&[], num_vars).unwrap().build();
+
+    // Bit 31 is 0 on every row,
+    // matching the constant-0 boundary.
+    let chiplet_trace = bit_unpack_trace(num_vars, &[]);
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(main_trace).with_chiplets(vec![chiplet_trace]);
+
+    let report = preflight(&ExpBoundaryHost, &instance, &witness)
+        .expect("boundary on an expanded virtual column must not error");
+    eprintln!("{}", report);
+
+    assert!(report.is_clean());
+    assert!(report.boundary_violations.is_empty());
+}
+
+#[test]
+fn boundary_on_expanded_bit_detects_violation() {
+    let num_vars = 2;
+    let num_rows = 1 << num_vars;
+
+    let main_trace = TraceBuilder::new(&[], num_vars).unwrap().build();
+
+    // 0x8000_0000 raises bit 31 at row 0,
+    // diverging from the constant-0 boundary.
+    let chiplet_trace = bit_unpack_trace(num_vars, &[0x8000_0000]);
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(main_trace).with_chiplets(vec![chiplet_trace]);
+
+    let report = preflight(&ExpBoundaryHost, &instance, &witness)
+        .expect("boundary on an expanded virtual column must not error");
+    eprintln!("{}", report);
+
+    assert!(!report.is_clean());
+    assert_eq!(report.boundary_violations.len(), 1);
+
+    let v = &report.boundary_violations[0];
+    assert!(matches!(v.table, TableId::Chiplet(0)));
+    assert_eq!(v.col_idx, 31);
+    assert_eq!(v.row_idx, 0);
+}
