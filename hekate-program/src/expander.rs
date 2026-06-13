@@ -41,6 +41,11 @@ pub enum ExpansionEntry {
         count: usize,
         storage: ColumnType,
     },
+    ReuseExpandBits {
+        phy_col_start: usize,
+        count: usize,
+        storage: ColumnType,
+    },
 }
 
 /// Physical-to-virtual column mapping rule.
@@ -210,10 +215,9 @@ impl VirtualExpander {
         self
     }
 
-    /// Emit pass-through for columns
-    /// already declared by a prior
-    /// fresh entry. Does not advance
-    /// the physical cursor.
+    /// Emit pass-through for columns already
+    /// declared by a prior fresh entry.
+    /// Does not advance the physical cursor.
     pub fn reuse_pass_through(mut self, phy_col_start: usize, count: usize) -> Self {
         if self.error.is_some() {
             return self;
@@ -245,6 +249,54 @@ impl VirtualExpander {
         self.virtual_layout.extend(repeat_n(storage, count));
 
         self.num_virtual += count;
+
+        self
+    }
+
+    /// Emit bit-expansion for columns already
+    /// declared by a prior fresh entry.
+    /// Does not advance the physical cursor.
+    pub fn reuse_expand_bits(mut self, phy_col_start: usize, count: usize) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+
+        if phy_col_start + count > self.num_physical {
+            self.error = Some(Error::Protocol {
+                protocol: "virtual_expand",
+                message: "reuse_expand_bits: range exceeds declared physical columns",
+            });
+            return self;
+        }
+
+        let (byte_offset, storage) = match self.find_phy_source(phy_col_start, count) {
+            Ok(v) => v,
+            Err(e) => {
+                self.error = Some(e);
+                return self;
+            }
+        };
+
+        let bits_per = match expand_bit_width(storage) {
+            Ok(v) => v,
+            Err(e) => {
+                self.error = Some(e);
+                return self;
+            }
+        };
+
+        self.entries.push(CompiledEntry {
+            phy_col_start,
+            byte_offset,
+            kind: EntryKind::ExpandBits { count, storage },
+            reuse: true,
+        });
+
+        let virt_count = count * bits_per;
+        self.virtual_layout
+            .extend(repeat_n(ColumnType::Bit, virt_count));
+
+        self.num_virtual += virt_count;
 
         self
     }
@@ -391,7 +443,14 @@ impl VirtualExpander {
                         storage,
                     }
                 }
-                (EntryKind::ExpandBits { count, storage }, _) => {
+                (EntryKind::ExpandBits { count, storage }, true) => {
+                    ExpansionEntry::ReuseExpandBits {
+                        phy_col_start: e.phy_col_start,
+                        count,
+                        storage,
+                    }
+                }
+                (EntryKind::ExpandBits { count, storage }, false) => {
                     ExpansionEntry::ExpandBits { count, storage }
                 }
                 (EntryKind::PassThrough { count, storage }, false) => {
@@ -433,7 +492,7 @@ impl VirtualExpander {
 
         Err(Error::Protocol {
             protocol: "virtual_expand",
-            message: "reuse_pass_through: source columns not found in any fresh entry",
+            message: "reuse: source columns not found in any single fresh entry",
         })
     }
 }
@@ -653,6 +712,41 @@ mod tests {
         let result = VirtualExpander::new()
             .expand_bits(5, ColumnType::B32)
             .reuse_pass_through(3, 5)
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reuse_expand_bits_from_pass_through() {
+        let e = VirtualExpander::new()
+            .pass_through(4, ColumnType::B64)
+            .reuse_expand_bits(0, 4)
+            .build()
+            .unwrap();
+
+        assert_eq!(e.num_physical_columns(), 4);
+        assert_eq!(e.physical_row_bytes(), 32);
+        assert_eq!(e.num_virtual_columns(), 4 + 256);
+
+        let layout = e.virtual_layout();
+        assert!(layout[0..4].iter().all(|&t| t == ColumnType::B64));
+        assert!(layout[4..260].iter().all(|&t| t == ColumnType::Bit));
+    }
+
+    #[test]
+    fn reuse_expand_bits_exceeds_declared() {
+        let result = VirtualExpander::new()
+            .pass_through(4, ColumnType::B64)
+            .reuse_expand_bits(2, 4)
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reuse_expand_bits_rejects_b128_source() {
+        let result = VirtualExpander::new()
+            .pass_through(1, ColumnType::B128)
+            .reuse_expand_bits(0, 1)
             .build();
         assert!(result.is_err());
     }
