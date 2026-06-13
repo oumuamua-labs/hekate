@@ -295,6 +295,16 @@ where
     let mut by_bus: BTreeMap<&'a str, Vec<&'a PermutationCheckSpec>> = BTreeMap::new();
 
     for (bus_id, spec) in endpoints {
+        if !bus_id.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(errors::Error::Protocol {
+                protocol: "logup_bus",
+                message: "bus_id has a non-graphic byte; bus ids must be \
+                          graphic ASCII (0x21..=0x7E). A space, zero-width, \
+                          or homoglyph byte forges a visually identical \
+                          second bus that balances on its own",
+            });
+        }
+
         by_bus.entry(bus_id).or_default().push(spec);
     }
 
@@ -447,5 +457,29 @@ mod tests {
             Source::Columns(idxs) => assert_eq!(idxs, &vec![11, 12]),
             other => panic!("expected Columns, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_bus_set_rejects_homoglyph_split_bus() {
+        let clockless =
+            PermutationCheckSpec::new(vec![(Source::Column(0), b"k" as ChallengeLabel)], Some(1));
+        let other = clockless.clone();
+
+        assert!(validate_bus_set(vec![("ram_link", &clockless), ("ram_link", &other)]).is_err());
+
+        // A zero-width twin splits this into two
+        // single-endpoint buses that skip the
+        // clock gate; the ASCII check blocks it.
+        assert!(
+            validate_bus_set(vec![("ram_link", &clockless), ("ram_link\u{200b}", &other)]).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_bus_set_accepts_ascii_bus_id() {
+        let spec =
+            PermutationCheckSpec::new(vec![(Source::Column(0), b"k" as ChallengeLabel)], Some(1));
+
+        assert!(validate_bus_set(vec![("ram_link", &spec)]).is_ok());
     }
 }
