@@ -96,7 +96,8 @@ enum ExpansionKind : byte {
   ExpandBits,
   PassThrough,
   ControlBits,
-  ReusePassThrough
+  ReusePassThrough,
+  ReuseExpandBits
 }
 
 table ExpansionEntry {
