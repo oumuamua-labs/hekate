@@ -52,6 +52,16 @@ pub fn serialize_expander<'a>(
                     storage,
                     phy_col_start,
                 ),
+                ExpansionEntry::ReuseExpandBits {
+                    phy_col_start,
+                    count,
+                    storage,
+                } => (
+                    fb::ExpansionKind::ReuseExpandBits,
+                    count,
+                    storage,
+                    phy_col_start,
+                ),
             };
 
             fb::ExpansionEntry::create(
@@ -95,6 +105,9 @@ pub fn deserialize_expander(fb_exp: fb::VirtualExpander<'_>) -> Result<VirtualEx
             fb::ExpansionKind::ControlBits => builder.control_bits(count),
             fb::ExpansionKind::ReusePassThrough => {
                 builder.reuse_pass_through(entry.phy_col_start() as usize, count)
+            }
+            fb::ExpansionKind::ReuseExpandBits => {
+                builder.reuse_expand_bits(entry.phy_col_start() as usize, count)
             }
             _ => {
                 return Err(Error::Protocol {

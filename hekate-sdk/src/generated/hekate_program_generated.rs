@@ -522,17 +522,18 @@ pub mod hekate {
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
-        pub const ENUM_MAX_EXPANSION_KIND: i8 = 3;
+        pub const ENUM_MAX_EXPANSION_KIND: i8 = 4;
         #[deprecated(
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
         #[allow(non_camel_case_types)]
-        pub const ENUM_VALUES_EXPANSION_KIND: [ExpansionKind; 4] = [
+        pub const ENUM_VALUES_EXPANSION_KIND: [ExpansionKind; 5] = [
             ExpansionKind::ExpandBits,
             ExpansionKind::PassThrough,
             ExpansionKind::ControlBits,
             ExpansionKind::ReusePassThrough,
+            ExpansionKind::ReuseExpandBits,
         ];
 
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -544,14 +545,16 @@ pub mod hekate {
             pub const PassThrough: Self = Self(1);
             pub const ControlBits: Self = Self(2);
             pub const ReusePassThrough: Self = Self(3);
+            pub const ReuseExpandBits: Self = Self(4);
 
             pub const ENUM_MIN: i8 = 0;
-            pub const ENUM_MAX: i8 = 3;
+            pub const ENUM_MAX: i8 = 4;
             pub const ENUM_VALUES: &'static [Self] = &[
                 Self::ExpandBits,
                 Self::PassThrough,
                 Self::ControlBits,
                 Self::ReusePassThrough,
+                Self::ReuseExpandBits,
             ];
             /// Returns the variant's name or "" if unknown.
             pub fn variant_name(self) -> Option<&'static str> {
@@ -560,6 +563,7 @@ pub mod hekate {
                     Self::PassThrough => Some("PassThrough"),
                     Self::ControlBits => Some("ControlBits"),
                     Self::ReusePassThrough => Some("ReusePassThrough"),
+                    Self::ReuseExpandBits => Some("ReuseExpandBits"),
                     _ => None,
                 }
             }

@@ -399,6 +399,16 @@ fn absorb_expander(h: &mut DefaultHasher, exp: &hekate_program::expander::Virtua
                 h.update(&(count as u64).to_le_bytes());
                 h.update(&[column_type_tag(storage)]);
             }
+            ExpansionEntry::ReuseExpandBits {
+                phy_col_start,
+                count,
+                storage,
+            } => {
+                h.update(&[4]);
+                h.update(&(phy_col_start as u64).to_le_bytes());
+                h.update(&(count as u64).to_le_bytes());
+                h.update(&[column_type_tag(storage)]);
+            }
         }
     }
 }
