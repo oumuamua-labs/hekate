@@ -20,6 +20,11 @@ use crate::utils::compute_split_vars;
 use core::fmt;
 use tracing::warn;
 
+/// Production soundness floor:
+/// full GF(2^128) security. `security_bits` caps
+/// at the field size, 128 is the strongest attainable.
+pub const MIN_PRODUCTION_BITS: usize = 128;
+
 /// Failures produced by `Config::check_security`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -115,18 +120,36 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            expansion_degree: 16,
-            num_queries: 160,
-            matrix_seed: [42u8; 32],
-            min_security_bits: 99,
-            sumcheck_blinding_factor: 2,
-            ldt_blinding_factor: 200,
-        }
+        Self::prod()
     }
 }
 
 impl Config {
+    /// Production parameters: ≈128-bit soundness
+    /// with the `MIN_PRODUCTION_BITS` acceptance
+    /// threshold. The `Default`.
+    pub fn prod() -> Self {
+        Self {
+            expansion_degree: 16,
+            num_queries: 160,
+            matrix_seed: [42u8; 32],
+            min_security_bits: MIN_PRODUCTION_BITS,
+            sumcheck_blinding_factor: 2,
+            ldt_blinding_factor: 200,
+        }
+    }
+
+    /// Fast, low-soundness parameters for tests
+    /// and experiments; `min_security_bits = 0`
+    /// accepts weak grids. Never deploy.
+    pub fn dev() -> Self {
+        Self {
+            num_queries: 4,
+            min_security_bits: 0,
+            ..Self::prod()
+        }
+    }
+
     /// `min(-log₂((1 - δ)^q), field_bits)` where
     /// δ = relative distance, q = num_queries.
     ///
@@ -159,8 +182,8 @@ impl Config {
     }
 
     /// Rejects configs that can't meet
-    /// `min_security_bits` for the given
-    /// trace dimensions.
+    /// `min_security_bits` for the
+    /// given trace dimensions.
     pub fn check_security(&self, num_vars: usize, field_bits: usize) -> errors::Result<()> {
         if self.ldt_blinding_factor < self.num_queries {
             return Err(Error::InsufficientLdtBlinding {
@@ -230,5 +253,42 @@ impl Config {
         };
 
         (theoretical_delta * correction_factor).max(0.01)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_prod() {
+        assert_eq!(Config::default().min_security_bits, MIN_PRODUCTION_BITS);
+        assert_eq!(Config::default().num_queries, Config::prod().num_queries);
+    }
+
+    #[test]
+    fn prod_meets_production_floor() {
+        let prod = Config::prod();
+
+        assert!(prod.estimated_security_bits(128) >= MIN_PRODUCTION_BITS);
+        assert!(prod.check_security(10, 128).is_ok());
+    }
+
+    #[test]
+    fn dev_is_lenient_on_weak_params() {
+        let dev = Config::dev();
+
+        assert!(dev.estimated_security_bits(128) < MIN_PRODUCTION_BITS);
+        assert!(dev.check_security(10, 128).is_ok());
+    }
+
+    #[test]
+    fn prod_threshold_rejects_weak_queries() {
+        let weak = Config {
+            num_queries: 4,
+            ..Config::prod()
+        };
+
+        assert!(weak.check_security(10, 128).is_err());
     }
 }

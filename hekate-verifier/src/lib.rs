@@ -160,10 +160,37 @@ where
                 spec.validate_clock_stitching(bus_id)?;
             }
 
-            chiplet::validate_paired_bus_mutex(&def.permutation_checks, &def.constraint_ast())?;
+            let def_ast = def.constraint_ast();
+            chiplet::validate_paired_bus_mutex(&def.permutation_checks, &def_ast)?;
+
+            for (sel, bus) in chiplet::unconstrained_bit_selectors(
+                &def.permutation_checks,
+                &def_ast,
+                Air::<F>::virtual_column_layout(def),
+            ) {
+                warn!(
+                    chiplet = %def.name(),
+                    bus,
+                    selector = sel,
+                    "chiplet bus Bit selector lacks a boolean-assertion root"
+                );
+            }
         }
 
-        chiplet::validate_paired_bus_mutex(&main_perm, &program.constraint_ast())?;
+        let main_ast = program.constraint_ast();
+        chiplet::validate_paired_bus_mutex(&main_perm, &main_ast)?;
+
+        for (sel, bus) in chiplet::unconstrained_bit_selectors(
+            &main_perm,
+            &main_ast,
+            program.virtual_column_layout(),
+        ) {
+            warn!(
+                bus,
+                selector = sel,
+                "main bus Bit selector lacks a boolean-assertion root"
+            );
+        }
 
         let all_endpoints = main_perm.iter().map(|(id, s)| (id.as_str(), s)).chain(
             chiplet_defs_for_check

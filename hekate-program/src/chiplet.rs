@@ -555,6 +555,38 @@ fn validate_chiplet_boundaries<F>(
     Ok(())
 }
 
+/// Non-paired `Bit` selectors with no direct
+/// `s·s + s` boolean root, each tagged with the
+/// declaring `bus_id`. Advisory only: booleanness
+/// can hold indirectly (one-hot, disjoint
+/// products), callers warn rather than reject.
+pub fn unconstrained_bit_selectors<'a, F: TowerField>(
+    specs: &'a [(String, PermutationCheckSpec)],
+    ast: &ConstraintAst<F>,
+    virtual_layout: &[ColumnType],
+) -> Vec<(usize, &'a str)> {
+    let mut flagged: Vec<(usize, &str)> = Vec::new();
+    for (bus_id, spec) in specs {
+        if spec.recv_selector.is_some() {
+            continue;
+        }
+
+        let Some(sel) = spec.selector else {
+            continue;
+        };
+
+        if virtual_layout.get(sel) != Some(&ColumnType::Bit) {
+            continue;
+        }
+
+        if !ast_contains_boolean_root(ast, sel) && !flagged.iter().any(|(s, _)| *s == sel) {
+            flagged.push((sel, bus_id.as_str()));
+        }
+    }
+
+    flagged
+}
+
 fn ast_contains_mutex_root<F: TowerField>(
     ast: &ConstraintAst<F>,
     s_send: usize,
@@ -915,5 +947,36 @@ mod tests {
             &[("asym_bus".into(), spec)],
             &ast,
         ));
+    }
+
+    #[test]
+    fn flags_bit_selector_without_boolean_root() {
+        let ast = ConstraintSystem::<F>::new().build();
+        let layout = vec![ColumnType::B32, ColumnType::Bit];
+        let specs = vec![(
+            String::from("bus"),
+            PermutationCheckSpec::new(vec![(Source::Column(0), b"k" as ChallengeLabel)], Some(1)),
+        )];
+
+        assert_eq!(
+            unconstrained_bit_selectors(&specs, &ast, &layout),
+            vec![(1, "bus")]
+        );
+    }
+
+    #[test]
+    fn boolean_root_clears_bit_selector() {
+        let cs = ConstraintSystem::<F>::new();
+        let sel = cs.col(1);
+        cs.assert_boolean(sel);
+        let ast = cs.build();
+
+        let layout = vec![ColumnType::B32, ColumnType::Bit];
+        let specs = vec![(
+            String::from("bus"),
+            PermutationCheckSpec::new(vec![(Source::Column(0), b"k" as ChallengeLabel)], Some(1)),
+        )];
+
+        assert!(unconstrained_bit_selectors(&specs, &ast, &layout).is_empty());
     }
 }
