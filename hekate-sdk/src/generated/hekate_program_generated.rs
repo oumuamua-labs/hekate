@@ -623,46 +623,62 @@ pub mod hekate {
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
-        pub const ENUM_MIN_LAGRANGE_POINT_KIND: u8 = 0;
+        pub const ENUM_MIN_FIXED_SHAPE_KIND: u8 = 0;
         #[deprecated(
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
-        pub const ENUM_MAX_LAGRANGE_POINT_KIND: u8 = 2;
+        pub const ENUM_MAX_FIXED_SHAPE_KIND: u8 = 5;
         #[deprecated(
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
         #[allow(non_camel_case_types)]
-        pub const ENUM_VALUES_LAGRANGE_POINT_KIND: [LagrangePointKind; 3] = [
-            LagrangePointKind::LastRow,
-            LagrangePointKind::FirstRow,
-            LagrangePointKind::Custom,
+        pub const ENUM_VALUES_FIXED_SHAPE_KIND: [FixedShapeKind; 6] = [
+            FixedShapeKind::LastRow,
+            FixedShapeKind::FirstRow,
+            FixedShapeKind::Custom,
+            FixedShapeKind::Periodic,
+            FixedShapeKind::Sparse,
+            FixedShapeKind::Dense,
         ];
 
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
         #[repr(transparent)]
-        pub struct LagrangePointKind(pub u8);
+        pub struct FixedShapeKind(pub u8);
         #[allow(non_upper_case_globals)]
-        impl LagrangePointKind {
+        impl FixedShapeKind {
             pub const LastRow: Self = Self(0);
             pub const FirstRow: Self = Self(1);
             pub const Custom: Self = Self(2);
+            pub const Periodic: Self = Self(3);
+            pub const Sparse: Self = Self(4);
+            pub const Dense: Self = Self(5);
 
             pub const ENUM_MIN: u8 = 0;
-            pub const ENUM_MAX: u8 = 2;
-            pub const ENUM_VALUES: &'static [Self] = &[Self::LastRow, Self::FirstRow, Self::Custom];
+            pub const ENUM_MAX: u8 = 5;
+            pub const ENUM_VALUES: &'static [Self] = &[
+                Self::LastRow,
+                Self::FirstRow,
+                Self::Custom,
+                Self::Periodic,
+                Self::Sparse,
+                Self::Dense,
+            ];
             /// Returns the variant's name or "" if unknown.
             pub fn variant_name(self) -> Option<&'static str> {
                 match self {
                     Self::LastRow => Some("LastRow"),
                     Self::FirstRow => Some("FirstRow"),
                     Self::Custom => Some("Custom"),
+                    Self::Periodic => Some("Periodic"),
+                    Self::Sparse => Some("Sparse"),
+                    Self::Dense => Some("Dense"),
                     _ => None,
                 }
             }
         }
-        impl ::core::fmt::Debug for LagrangePointKind {
+        impl ::core::fmt::Debug for FixedShapeKind {
             fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
                 if let Some(name) = self.variant_name() {
                     f.write_str(name)
@@ -671,7 +687,7 @@ pub mod hekate {
                 }
             }
         }
-        impl<'a> ::flatbuffers::Follow<'a> for LagrangePointKind {
+        impl<'a> ::flatbuffers::Follow<'a> for FixedShapeKind {
             type Inner = Self;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
@@ -680,15 +696,15 @@ pub mod hekate {
             }
         }
 
-        impl ::flatbuffers::Push for LagrangePointKind {
-            type Output = LagrangePointKind;
+        impl ::flatbuffers::Push for FixedShapeKind {
+            type Output = FixedShapeKind;
             #[inline]
             unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
                 unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
             }
         }
 
-        impl ::flatbuffers::EndianScalar for LagrangePointKind {
+        impl ::flatbuffers::EndianScalar for FixedShapeKind {
             type Scalar = u8;
             #[inline]
             fn to_little_endian(self) -> u8 {
@@ -702,7 +718,7 @@ pub mod hekate {
             }
         }
 
-        impl<'a> ::flatbuffers::Verifiable for LagrangePointKind {
+        impl<'a> ::flatbuffers::Verifiable for FixedShapeKind {
             #[inline]
             fn run_verifier(
                 v: &mut ::flatbuffers::Verifier,
@@ -712,7 +728,7 @@ pub mod hekate {
             }
         }
 
-        impl ::flatbuffers::SimpleToVerifyInSlice for LagrangePointKind {}
+        impl ::flatbuffers::SimpleToVerifyInSlice for FixedShapeKind {}
         // struct Block128, aligned to 8
         #[repr(transparent)]
         #[derive(Clone, Copy, PartialEq)]
@@ -2628,15 +2644,15 @@ pub mod hekate {
                 ds.finish()
             }
         }
-        pub enum LagrangePinOffset {}
+        pub enum FixedColumnOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
-        pub struct LagrangePin<'a> {
+        pub struct FixedColumn<'a> {
             pub _tab: ::flatbuffers::Table<'a>,
         }
 
-        impl<'a> ::flatbuffers::Follow<'a> for LagrangePin<'a> {
-            type Inner = LagrangePin<'a>;
+        impl<'a> ::flatbuffers::Follow<'a> for FixedColumn<'a> {
+            type Inner = FixedColumn<'a>;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
                 Self {
@@ -2645,14 +2661,18 @@ pub mod hekate {
             }
         }
 
-        impl<'a> LagrangePin<'a> {
+        impl<'a> FixedColumn<'a> {
             pub const VT_COL_IDX: ::flatbuffers::VOffsetT = 4;
             pub const VT_KIND: ::flatbuffers::VOffsetT = 6;
             pub const VT_CUSTOM_BITS: ::flatbuffers::VOffsetT = 8;
+            pub const VT_PERIOD: ::flatbuffers::VOffsetT = 10;
+            pub const VT_VALUES: ::flatbuffers::VOffsetT = 12;
+            pub const VT_SPARSE_ROWS: ::flatbuffers::VOffsetT = 14;
+            pub const VT_SPARSE_VALUES: ::flatbuffers::VOffsetT = 16;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                LagrangePin { _tab: table }
+                FixedColumn { _tab: table }
             }
             #[allow(unused_mut)]
             pub fn create<
@@ -2662,9 +2682,19 @@ pub mod hekate {
                 A: ::flatbuffers::Allocator + 'bldr,
             >(
                 _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args LagrangePinArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<LagrangePin<'bldr>> {
-                let mut builder = LagrangePinBuilder::new(_fbb);
+                args: &'args FixedColumnArgs<'args>,
+            ) -> ::flatbuffers::WIPOffset<FixedColumn<'bldr>> {
+                let mut builder = FixedColumnBuilder::new(_fbb);
+                if let Some(x) = args.sparse_values {
+                    builder.add_sparse_values(x);
+                }
+                if let Some(x) = args.sparse_rows {
+                    builder.add_sparse_rows(x);
+                }
+                if let Some(x) = args.values {
+                    builder.add_values(x);
+                }
+                builder.add_period(args.period);
                 if let Some(x) = args.custom_bits {
                     builder.add_custom_bits(x);
                 }
@@ -2680,21 +2710,18 @@ pub mod hekate {
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<u32>(LagrangePin::VT_COL_IDX, Some(0))
+                        .get::<u32>(FixedColumn::VT_COL_IDX, Some(0))
                         .unwrap()
                 }
             }
             #[inline]
-            pub fn kind(&self) -> LagrangePointKind {
+            pub fn kind(&self) -> FixedShapeKind {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<LagrangePointKind>(
-                            LagrangePin::VT_KIND,
-                            Some(LagrangePointKind::LastRow),
-                        )
+                        .get::<FixedShapeKind>(FixedColumn::VT_KIND, Some(FixedShapeKind::LastRow))
                         .unwrap()
                 }
             }
@@ -2706,63 +2733,122 @@ pub mod hekate {
                 unsafe {
                     self._tab
                         .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
-                            LagrangePin::VT_CUSTOM_BITS,
+                            FixedColumn::VT_CUSTOM_BITS,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn period(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(FixedColumn::VT_PERIOD, Some(0))
+                        .unwrap()
+                }
+            }
+            #[inline]
+            pub fn values(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                            FixedColumn::VT_VALUES,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn sparse_rows(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(
+                            FixedColumn::VT_SPARSE_ROWS,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn sparse_values(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                            FixedColumn::VT_SPARSE_VALUES,
                             None,
                         )
                 }
             }
         }
 
-        impl ::flatbuffers::Verifiable for LagrangePin<'_> {
+        impl ::flatbuffers::Verifiable for FixedColumn<'_> {
             #[inline]
             fn run_verifier(
                 v: &mut ::flatbuffers::Verifier,
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-                    .visit_field::<u32>("col_idx", Self::VT_COL_IDX, false)?
-                    .visit_field::<LagrangePointKind>("kind", Self::VT_KIND, false)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
-                        "custom_bits",
-                        Self::VT_CUSTOM_BITS,
-                        false,
-                    )?
-                    .finish();
+     .visit_field::<u32>("col_idx", Self::VT_COL_IDX, false)?
+     .visit_field::<FixedShapeKind>("kind", Self::VT_KIND, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("custom_bits", Self::VT_CUSTOM_BITS, false)?
+     .visit_field::<u32>("period", Self::VT_PERIOD, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("values", Self::VT_VALUES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("sparse_rows", Self::VT_SPARSE_ROWS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("sparse_values", Self::VT_SPARSE_VALUES, false)?
+     .finish();
                 Ok(())
             }
         }
-        pub struct LagrangePinArgs<'a> {
+        pub struct FixedColumnArgs<'a> {
             pub col_idx: u32,
-            pub kind: LagrangePointKind,
+            pub kind: FixedShapeKind,
             pub custom_bits: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub period: u32,
+            pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub sparse_rows: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+            pub sparse_values:
+                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
         }
-        impl<'a> Default for LagrangePinArgs<'a> {
+        impl<'a> Default for FixedColumnArgs<'a> {
             #[inline]
             fn default() -> Self {
-                LagrangePinArgs {
+                FixedColumnArgs {
                     col_idx: 0,
-                    kind: LagrangePointKind::LastRow,
+                    kind: FixedShapeKind::LastRow,
                     custom_bits: None,
+                    period: 0,
+                    values: None,
+                    sparse_rows: None,
+                    sparse_values: None,
                 }
             }
         }
 
-        pub struct LagrangePinBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+        pub struct FixedColumnBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
             fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
         }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LagrangePinBuilder<'a, 'b, A> {
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FixedColumnBuilder<'a, 'b, A> {
             #[inline]
             pub fn add_col_idx(&mut self, col_idx: u32) {
                 self.fbb_
-                    .push_slot::<u32>(LagrangePin::VT_COL_IDX, col_idx, 0);
+                    .push_slot::<u32>(FixedColumn::VT_COL_IDX, col_idx, 0);
             }
             #[inline]
-            pub fn add_kind(&mut self, kind: LagrangePointKind) {
-                self.fbb_.push_slot::<LagrangePointKind>(
-                    LagrangePin::VT_KIND,
+            pub fn add_kind(&mut self, kind: FixedShapeKind) {
+                self.fbb_.push_slot::<FixedShapeKind>(
+                    FixedColumn::VT_KIND,
                     kind,
-                    LagrangePointKind::LastRow,
+                    FixedShapeKind::LastRow,
                 );
             }
             #[inline]
@@ -2771,33 +2857,72 @@ pub mod hekate {
                 custom_bits: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    LagrangePin::VT_CUSTOM_BITS,
+                    FixedColumn::VT_CUSTOM_BITS,
                     custom_bits,
+                );
+            }
+            #[inline]
+            pub fn add_period(&mut self, period: u32) {
+                self.fbb_
+                    .push_slot::<u32>(FixedColumn::VT_PERIOD, period, 0);
+            }
+            #[inline]
+            pub fn add_values(
+                &mut self,
+                values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FixedColumn::VT_VALUES,
+                    values,
+                );
+            }
+            #[inline]
+            pub fn add_sparse_rows(
+                &mut self,
+                sparse_rows: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u64>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FixedColumn::VT_SPARSE_ROWS,
+                    sparse_rows,
+                );
+            }
+            #[inline]
+            pub fn add_sparse_values(
+                &mut self,
+                sparse_values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FixedColumn::VT_SPARSE_VALUES,
+                    sparse_values,
                 );
             }
             #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> LagrangePinBuilder<'a, 'b, A> {
+            ) -> FixedColumnBuilder<'a, 'b, A> {
                 let start = _fbb.start_table();
-                LagrangePinBuilder {
+                FixedColumnBuilder {
                     fbb_: _fbb,
                     start_: start,
                 }
             }
             #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<LagrangePin<'a>> {
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<FixedColumn<'a>> {
                 let o = self.fbb_.end_table(self.start_);
                 ::flatbuffers::WIPOffset::new(o.value())
             }
         }
 
-        impl ::core::fmt::Debug for LagrangePin<'_> {
+        impl ::core::fmt::Debug for FixedColumn<'_> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("LagrangePin");
+                let mut ds = f.debug_struct("FixedColumn");
                 ds.field("col_idx", &self.col_idx());
                 ds.field("kind", &self.kind());
                 ds.field("custom_bits", &self.custom_bits());
+                ds.field("period", &self.period());
+                ds.field("values", &self.values());
+                ds.field("sparse_rows", &self.sparse_rows());
+                ds.field("sparse_values", &self.sparse_values());
                 ds.finish()
             }
         }
@@ -2981,7 +3106,7 @@ pub mod hekate {
             pub const VT_BOUNDARY_CONSTRAINTS: ::flatbuffers::VOffsetT = 14;
             pub const VT_PERMUTATION_CHECKS: ::flatbuffers::VOffsetT = 16;
             pub const VT_VIRTUAL_EXPANDER: ::flatbuffers::VOffsetT = 18;
-            pub const VT_LAGRANGE_PINS: ::flatbuffers::VOffsetT = 20;
+            pub const VT_FIXED_COLUMNS: ::flatbuffers::VOffsetT = 20;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2998,8 +3123,8 @@ pub mod hekate {
                 args: &'args ChipletDefArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<ChipletDef<'bldr>> {
                 let mut builder = ChipletDefBuilder::new(_fbb);
-                if let Some(x) = args.lagrange_pins {
-                    builder.add_lagrange_pins(x);
+                if let Some(x) = args.fixed_columns {
+                    builder.add_fixed_columns(x);
                 }
                 if let Some(x) = args.virtual_expander {
                     builder.add_virtual_expander(x);
@@ -3124,17 +3249,17 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn lagrange_pins(
+            pub fn fixed_columns(
                 &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LagrangePin<'a>>>>
+            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<FixedColumn<'a>>>>
             {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LagrangePin>>,
-                    >>(ChipletDef::VT_LAGRANGE_PINS, None)
+                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<FixedColumn>>,
+                    >>(ChipletDef::VT_FIXED_COLUMNS, None)
                 }
             }
         }
@@ -3154,7 +3279,7 @@ pub mod hekate {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<BoundaryConstraint>>>>("boundary_constraints", Self::VT_BOUNDARY_CONSTRAINTS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<BusEndpoint>>>>("permutation_checks", Self::VT_PERMUTATION_CHECKS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<VirtualExpander>>("virtual_expander", Self::VT_VIRTUAL_EXPANDER, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LagrangePin>>>>("lagrange_pins", Self::VT_LAGRANGE_PINS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<FixedColumn>>>>("fixed_columns", Self::VT_FIXED_COLUMNS, false)?
      .finish();
                 Ok(())
             }
@@ -3181,9 +3306,9 @@ pub mod hekate {
                 >,
             >,
             pub virtual_expander: Option<::flatbuffers::WIPOffset<VirtualExpander<'a>>>,
-            pub lagrange_pins: Option<
+            pub fixed_columns: Option<
                 ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LagrangePin<'a>>>,
+                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<FixedColumn<'a>>>,
                 >,
             >,
         }
@@ -3199,7 +3324,7 @@ pub mod hekate {
                     boundary_constraints: None,
                     permutation_checks: None,
                     virtual_expander: None,
-                    lagrange_pins: None,
+                    fixed_columns: None,
                 }
             }
         }
@@ -3291,15 +3416,15 @@ pub mod hekate {
                     );
             }
             #[inline]
-            pub fn add_lagrange_pins(
+            pub fn add_fixed_columns(
                 &mut self,
-                lagrange_pins: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<LagrangePin<'b>>>,
+                fixed_columns: ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<FixedColumn<'b>>>,
                 >,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    ChipletDef::VT_LAGRANGE_PINS,
-                    lagrange_pins,
+                    ChipletDef::VT_FIXED_COLUMNS,
+                    fixed_columns,
                 );
             }
             #[inline]
@@ -3330,7 +3455,7 @@ pub mod hekate {
                 ds.field("boundary_constraints", &self.boundary_constraints());
                 ds.field("permutation_checks", &self.permutation_checks());
                 ds.field("virtual_expander", &self.virtual_expander());
-                ds.field("lagrange_pins", &self.lagrange_pins());
+                ds.field("fixed_columns", &self.fixed_columns());
                 ds.finish()
             }
         }
@@ -3905,7 +4030,7 @@ pub mod hekate {
             pub const VT_MAIN_TRACE: ::flatbuffers::VOffsetT = 32;
             pub const VT_CHIPLET_TRACES: ::flatbuffers::VOffsetT = 34;
             pub const VT_CONFIG: ::flatbuffers::VOffsetT = 36;
-            pub const VT_LAGRANGE_PINS: ::flatbuffers::VOffsetT = 38;
+            pub const VT_FIXED_COLUMNS: ::flatbuffers::VOffsetT = 38;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3923,8 +4048,8 @@ pub mod hekate {
             ) -> ::flatbuffers::WIPOffset<ProgramBundle<'bldr>> {
                 let mut builder = ProgramBundleBuilder::new(_fbb);
                 builder.add_num_rows(args.num_rows);
-                if let Some(x) = args.lagrange_pins {
-                    builder.add_lagrange_pins(x);
+                if let Some(x) = args.fixed_columns {
+                    builder.add_fixed_columns(x);
                 }
                 if let Some(x) = args.config {
                     builder.add_config(x);
@@ -4187,17 +4312,17 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn lagrange_pins(
+            pub fn fixed_columns(
                 &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LagrangePin<'a>>>>
+            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<FixedColumn<'a>>>>
             {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LagrangePin>>,
-                    >>(ProgramBundle::VT_LAGRANGE_PINS, None)
+                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<FixedColumn>>,
+                    >>(ProgramBundle::VT_FIXED_COLUMNS, None)
                 }
             }
         }
@@ -4226,7 +4351,7 @@ pub mod hekate {
      .visit_field::<::flatbuffers::ForwardsUOffset<ColumnTrace>>("main_trace", Self::VT_MAIN_TRACE, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ColumnTrace>>>>("chiplet_traces", Self::VT_CHIPLET_TRACES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<Config>>("config", Self::VT_CONFIG, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LagrangePin>>>>("lagrange_pins", Self::VT_LAGRANGE_PINS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<FixedColumn>>>>("fixed_columns", Self::VT_FIXED_COLUMNS, false)?
      .finish();
                 Ok(())
             }
@@ -4279,9 +4404,9 @@ pub mod hekate {
                 >,
             >,
             pub config: Option<::flatbuffers::WIPOffset<Config<'a>>>,
-            pub lagrange_pins: Option<
+            pub fixed_columns: Option<
                 ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LagrangePin<'a>>>,
+                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<FixedColumn<'a>>>,
                 >,
             >,
         }
@@ -4306,7 +4431,7 @@ pub mod hekate {
                     main_trace: None,
                     chiplet_traces: None,
                     config: None,
-                    lagrange_pins: None,
+                    fixed_columns: None,
                 }
             }
         }
@@ -4488,15 +4613,15 @@ pub mod hekate {
                     );
             }
             #[inline]
-            pub fn add_lagrange_pins(
+            pub fn add_fixed_columns(
                 &mut self,
-                lagrange_pins: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<LagrangePin<'b>>>,
+                fixed_columns: ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<FixedColumn<'b>>>,
                 >,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    ProgramBundle::VT_LAGRANGE_PINS,
-                    lagrange_pins,
+                    ProgramBundle::VT_FIXED_COLUMNS,
+                    fixed_columns,
                 );
             }
             #[inline]
@@ -4536,7 +4661,7 @@ pub mod hekate {
                 ds.field("main_trace", &self.main_trace());
                 ds.field("chiplet_traces", &self.chiplet_traces());
                 ds.field("config", &self.config());
-                ds.field("lagrange_pins", &self.lagrange_pins());
+                ds.field("fixed_columns", &self.fixed_columns());
                 ds.finish()
             }
         }

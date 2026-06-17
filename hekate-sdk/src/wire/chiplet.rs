@@ -26,7 +26,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::BoundaryConstraint;
 
 use crate::generated::program as fb;
-use crate::wire::{ast, boundary, expander, lagrange, permutation, trace};
+use crate::wire::{ast, boundary, expander, fixed_column, permutation, trace};
 
 pub fn serialize_chiplet<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -52,8 +52,8 @@ pub fn serialize_chiplet<'a, F: TowerField>(
         .virtual_expander()
         .map(|e| expander::serialize_expander(fbb, e));
 
-    let pins = Air::<F>::lagrange_pinned_columns(chiplet);
-    let lagrange_pins = lagrange::serialize_pins(fbb, &pins);
+    let fixed = Air::<F>::fixed_columns(chiplet);
+    let fixed_columns = fixed_column::serialize_fixed_columns(fbb, &fixed);
 
     fb::ChipletDef::create(
         fbb,
@@ -66,7 +66,7 @@ pub fn serialize_chiplet<'a, F: TowerField>(
             boundary_constraints: Some(boundaries),
             permutation_checks: Some(perms),
             virtual_expander,
-            lagrange_pins: Some(lagrange_pins),
+            fixed_columns: Some(fixed_columns),
         },
     )
 }
@@ -119,8 +119,8 @@ pub fn deserialize_chiplet<F: TowerField>(fb_cd: fb::ChipletDef<'_>) -> Result<C
         .map(|e| expander::deserialize_expander(e))
         .transpose()?;
 
-    let lagrange_pins = match fb_cd.lagrange_pins() {
-        Some(v) => lagrange::deserialize_pins(v)?,
+    let fixed_columns = match fb_cd.fixed_columns() {
+        Some(v) => fixed_column::deserialize_fixed_columns(v)?,
         None => Vec::new(),
     };
 
@@ -131,7 +131,7 @@ pub fn deserialize_chiplet<F: TowerField>(fb_cd: fb::ChipletDef<'_>) -> Result<C
         column_layout,
         virtual_column_layout,
         boundary_constraints,
-        lagrange_pins,
+        fixed_columns,
         virtual_expander,
         permutation_checks,
     )
