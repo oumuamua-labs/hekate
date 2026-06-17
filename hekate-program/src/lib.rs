@@ -99,9 +99,10 @@ pub trait Air<F: TowerField>: Sized + Clone + Sync {
         Vec::new()
     }
 
-    /// Columns whose MLE evaluation must equal a fixed
-    /// Lagrange kernel at the verifier's r_final.
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
+    /// Columns pinned to a fixed shape, bound by MLE
+    /// equality at `r_final`. Each shape must be a pure
+    /// function of the row index, not the witness.
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
         Vec::new()
     }
 
@@ -296,31 +297,30 @@ pub struct InlineKernelHint {
 }
 
 // =================================================================
-// LAGRANGE-PINNED COLUMNS
+// FIXED COLUMNS
 // =================================================================
 
-/// Hypercube point at which a Lagrange MLE is anchored.
-///
-/// `Custom(bits)` carries the bit-decomposition of an arbitrary
-/// row index, LSB first, length must equal the trace's `num_vars`.
+/// Row-index-determined shape a fixed column is
+/// pinned to. `FirstRow`/`LastRow`/`Custom` are
+/// single-row indicators; `Periodic`/`Sparse`/`Dense`
+/// are arbitrary row-indexed patterns.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LagrangePoint {
+pub enum FixedShape<F> {
     LastRow,
     FirstRow,
     Custom(Vec<bool>),
+    Periodic { period: usize, values: Vec<F> },
+    Sparse(Vec<(usize, F)>),
+    Dense(Vec<F>),
 }
 
-impl LagrangePoint {
-    /// MLE evaluation of the pinned column
-    /// at point `r` (LSB-first bit order).
-    /// `r.len()` must equal `num_vars`.
-    pub fn evaluate<F>(&self, r: &[Flat<F>]) -> Flat<F>
-    where
-        F: HardwareField,
-    {
+impl<F: HardwareField> FixedShape<F> {
+    /// MLE of the shape at point `r` (LSB-first),
+    /// in flat basis. `r.len()` must equal `num_vars`.
+    pub fn evaluate(&self, r: &[Flat<F>]) -> Flat<F> {
         let one = Flat::from_raw(F::ONE);
         match self {
-            LagrangePoint::LastRow => {
+            FixedShape::LastRow => {
                 let mut prod = one;
                 for &r_k in r {
                     prod *= r_k;
@@ -328,7 +328,7 @@ impl LagrangePoint {
 
                 one - prod
             }
-            LagrangePoint::FirstRow => {
+            FixedShape::FirstRow => {
                 let mut prod = one;
                 for &r_k in r {
                     prod *= one - r_k;
@@ -336,7 +336,7 @@ impl LagrangePoint {
 
                 prod
             }
-            LagrangePoint::Custom(bits) => {
+            FixedShape::Custom(bits) => {
                 debug_assert_eq!(bits.len(), r.len(), "Custom point bit width != r.len()");
 
                 let mut prod = one;
@@ -347,73 +347,279 @@ impl LagrangePoint {
 
                 prod
             }
+            FixedShape::Periodic { period, values } => {
+                // Low p = log2(period) coords only;
+                // high coords each sum to 1.
+                let p = period.trailing_zeros() as usize;
+
+                let mut acc = Flat::from_raw(F::ZERO);
+                for (j, &v) in values.iter().enumerate() {
+                    acc += v.to_hardware() * eq_index(&r[..p], j);
+                }
+
+                acc
+            }
+            FixedShape::Sparse(entries) => {
+                let mut acc = Flat::from_raw(F::ZERO);
+                for &(row, v) in entries {
+                    acc += v.to_hardware() * eq_index(r, row);
+                }
+
+                acc
+            }
+            FixedShape::Dense(values) => {
+                let mut acc = Flat::from_raw(F::ZERO);
+                for (i, &v) in values.iter().enumerate() {
+                    acc += v.to_hardware() * eq_index(r, i);
+                }
+
+                acc
+            }
+        }
+    }
+
+    /// Shape value at integer row `row`. O(1);
+    /// prefer over `evaluate` at a vertex,
+    /// which is O(N) for `Dense`.
+    pub fn value_at_row(&self, row: usize, num_vars: usize) -> Flat<F> {
+        let one = Flat::from_raw(F::ONE);
+        let zero = Flat::from_raw(F::ZERO);
+
+        match self {
+            FixedShape::FirstRow => {
+                if row == 0 {
+                    one
+                } else {
+                    zero
+                }
+            }
+            FixedShape::LastRow => {
+                if row == (1usize << num_vars) - 1 {
+                    zero
+                } else {
+                    one
+                }
+            }
+            FixedShape::Custom(bits) => {
+                let target = bits
+                    .iter()
+                    .enumerate()
+                    .fold(0usize, |acc, (k, &b)| acc | ((b as usize) << k));
+
+                if row == target { one } else { zero }
+            }
+            FixedShape::Periodic { period, values } => values[row % period].to_hardware(),
+            FixedShape::Sparse(entries) => {
+                let mut acc = zero;
+                for &(r, v) in entries {
+                    if r == row {
+                        acc += v.to_hardware();
+                    }
+                }
+
+                acc
+            }
+            FixedShape::Dense(values) => values[row].to_hardware(),
         }
     }
 }
 
-/// Single binding:
-/// one virtual column pinned to a Lagrange MLE.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LagrangePin {
-    pub col_idx: usize,
-    pub point: LagrangePoint,
+fn eq_index<F: HardwareField>(r: &[Flat<F>], index: usize) -> Flat<F> {
+    let one = Flat::from_raw(F::ONE);
+
+    let mut prod = one;
+    for (k, &r_k) in r.iter().enumerate() {
+        let factor = if (index >> k) & 1 == 1 {
+            r_k
+        } else {
+            one - r_k
+        };
+        prod *= factor;
+    }
+
+    prod
 }
 
-impl LagrangePin {
+/// One committed column pinned to a fixed shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixedColumn<F> {
+    pub col_idx: usize,
+    pub shape: FixedShape<F>,
+}
+
+impl<F> FixedColumn<F> {
     pub fn last_row(col_idx: usize) -> Self {
         Self {
             col_idx,
-            point: LagrangePoint::LastRow,
+            shape: FixedShape::LastRow,
         }
     }
 
     pub fn first_row(col_idx: usize) -> Self {
         Self {
             col_idx,
-            point: LagrangePoint::FirstRow,
+            shape: FixedShape::FirstRow,
         }
     }
 
     pub fn custom(col_idx: usize, bits: Vec<bool>) -> Self {
         Self {
             col_idx,
-            point: LagrangePoint::Custom(bits),
+            shape: FixedShape::Custom(bits),
+        }
+    }
+
+    pub fn periodic(col_idx: usize, period: usize, values: Vec<F>) -> Self {
+        Self {
+            col_idx,
+            shape: FixedShape::Periodic { period, values },
+        }
+    }
+
+    pub fn sparse(col_idx: usize, entries: Vec<(usize, F)>) -> Self {
+        Self {
+            col_idx,
+            shape: FixedShape::Sparse(entries),
+        }
+    }
+
+    pub fn dense(col_idx: usize, values: Vec<F>) -> Self {
+        Self {
+            col_idx,
+            shape: FixedShape::Dense(values),
         }
     }
 }
 
-/// Rejects out-of-range `col_idx`, mis-sized `Custom`
-/// bit vectors, and duplicate pins on the same column
-/// (a column anchored to two distinct points is unsatisfiable).
-pub fn validate_lagrange_pins(
-    pins: &[LagrangePin],
-    num_columns: usize,
+/// Declares a fixed column from a shape.
+pub fn fix<F>(col_idx: usize, shape: FixedShape<F>) -> FixedColumn<F> {
+    FixedColumn { col_idx, shape }
+}
+
+/// Rejects out-of-range `col_idx`, duplicate pins,
+/// malformed shapes, and out-of-domain values
+/// (`Bit` columns require values in {0, 1}).
+pub fn validate_fixed_columns<F: TowerField>(
+    fixed: &[FixedColumn<F>],
+    layout: &[ColumnType],
     num_vars: Option<usize>,
 ) -> errors::Result<()> {
-    for (i, pin) in pins.iter().enumerate() {
-        if pin.col_idx >= num_columns {
+    for (i, fc) in fixed.iter().enumerate() {
+        if fc.col_idx >= layout.len() {
             return Err(errors::Error::Protocol {
-                protocol: "lagrange_pin",
+                protocol: "fixed_column",
                 message: "col_idx out of range",
             });
         }
 
-        if let (LagrangePoint::Custom(bits), Some(nv)) = (&pin.point, num_vars)
-            && bits.len() != nv
-        {
-            return Err(errors::Error::Protocol {
-                protocol: "lagrange_pin",
-                message: "Custom point bit width != num_vars",
-            });
-        }
+        validate_shape(&fc.shape, layout[fc.col_idx], num_vars)?;
 
-        for prior in &pins[..i] {
-            if prior.col_idx == pin.col_idx {
+        for prior in &fixed[..i] {
+            if prior.col_idx == fc.col_idx {
                 return Err(errors::Error::Protocol {
-                    protocol: "lagrange_pin",
+                    protocol: "fixed_column",
                     message: "duplicate pin on same column",
                 });
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_shape<F: TowerField>(
+    shape: &FixedShape<F>,
+    col_type: ColumnType,
+    num_vars: Option<usize>,
+) -> errors::Result<()> {
+    match shape {
+        FixedShape::LastRow | FixedShape::FirstRow => Ok(()),
+        FixedShape::Custom(bits) => match num_vars {
+            Some(nv) if bits.len() != nv => Err(errors::Error::Protocol {
+                protocol: "fixed_column",
+                message: "Custom point bit width != num_vars",
+            }),
+            _ => Ok(()),
+        },
+        FixedShape::Periodic { period, values } => {
+            if !period.is_power_of_two() {
+                return Err(errors::Error::Protocol {
+                    protocol: "fixed_column",
+                    message: "Periodic period must be a power of two",
+                });
+            }
+
+            if values.len() != *period {
+                return Err(errors::Error::Protocol {
+                    protocol: "fixed_column",
+                    message: "Periodic values length != period",
+                });
+            }
+
+            if let Some(nv) = num_vars
+                && *period > (1usize << nv)
+            {
+                return Err(errors::Error::Protocol {
+                    protocol: "fixed_column",
+                    message: "Periodic period exceeds trace height",
+                });
+            }
+
+            check_bit_domain(values.iter().copied(), col_type)
+        }
+        FixedShape::Sparse(entries) => {
+            if let Some(nv) = num_vars {
+                let n = 1usize << nv;
+                for &(row, _) in entries {
+                    if row >= n {
+                        return Err(errors::Error::Protocol {
+                            protocol: "fixed_column",
+                            message: "Sparse row index exceeds trace height",
+                        });
+                    }
+                }
+            }
+
+            for (i, &(row, _)) in entries.iter().enumerate() {
+                if entries[..i].iter().any(|&(prior, _)| prior == row) {
+                    return Err(errors::Error::Protocol {
+                        protocol: "fixed_column",
+                        message: "duplicate Sparse row",
+                    });
+                }
+            }
+
+            check_bit_domain(entries.iter().map(|&(_, v)| v), col_type)
+        }
+        FixedShape::Dense(values) => {
+            if let Some(nv) = num_vars
+                && values.len() != (1usize << nv)
+            {
+                return Err(errors::Error::Protocol {
+                    protocol: "fixed_column",
+                    message: "Dense values length != trace height",
+                });
+            }
+
+            check_bit_domain(values.iter().copied(), col_type)
+        }
+    }
+}
+
+fn check_bit_domain<F: TowerField>(
+    values: impl Iterator<Item = F>,
+    col_type: ColumnType,
+) -> errors::Result<()> {
+    if col_type != ColumnType::Bit {
+        return Ok(());
+    }
+
+    for v in values {
+        if v != F::ZERO && v != F::ONE {
+            return Err(errors::Error::Protocol {
+                protocol: "fixed_column",
+                message: "Bit fixed column value not in {0,1}",
+            });
         }
     }
 

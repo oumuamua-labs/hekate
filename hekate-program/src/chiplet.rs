@@ -27,7 +27,7 @@ use crate::constraint::{
 };
 use crate::expander::VirtualExpander;
 use crate::permutation::PermutationCheckSpec;
-use crate::{Air, LagrangePin, ProgramCell, validate_lagrange_pins};
+use crate::{Air, FixedColumn, ProgramCell, validate_fixed_columns};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -44,7 +44,7 @@ pub struct ChipletDef<F: TowerField> {
     column_layout: Vec<ColumnType>,
     virtual_column_layout: Vec<ColumnType>,
     boundary_constraints: Vec<BoundaryConstraint<F>>,
-    lagrange_pins: Vec<LagrangePin>,
+    fixed_columns: Vec<FixedColumn<F>>,
     expander: Option<VirtualExpander>,
     pub permutation_checks: Vec<(String, PermutationCheckSpec)>,
 }
@@ -69,8 +69,8 @@ impl<F: TowerField> ChipletDef<F> {
         let boundary_constraints = p.boundary_constraints();
         validate_chiplet_boundaries(&boundary_constraints, p.num_columns())?;
 
-        let lagrange_pins = p.lagrange_pinned_columns();
-        validate_lagrange_pins(&lagrange_pins, p.num_columns(), None)?;
+        let fixed_columns = p.fixed_columns();
+        validate_fixed_columns(&fixed_columns, p.virtual_column_layout(), None)?;
 
         Ok(Self {
             name: p.name(),
@@ -79,7 +79,7 @@ impl<F: TowerField> ChipletDef<F> {
             column_layout: p.column_layout().to_vec(),
             virtual_column_layout: p.virtual_column_layout().to_vec(),
             boundary_constraints,
-            lagrange_pins,
+            fixed_columns,
             expander: p.virtual_expander().cloned(),
             permutation_checks,
         })
@@ -125,7 +125,7 @@ impl<F: TowerField> ChipletDef<F> {
         column_layout: Vec<ColumnType>,
         virtual_column_layout: Vec<ColumnType>,
         boundary_constraints: Vec<BoundaryConstraint<F>>,
-        lagrange_pins: Vec<LagrangePin>,
+        fixed_columns: Vec<FixedColumn<F>>,
         expander: Option<VirtualExpander>,
         permutation_checks: Vec<(String, PermutationCheckSpec)>,
     ) -> errors::Result<Self> {
@@ -135,7 +135,13 @@ impl<F: TowerField> ChipletDef<F> {
 
         validate_paired_bus_mutex(&permutation_checks, &constraint_ast)?;
         validate_chiplet_boundaries(&boundary_constraints, num_columns)?;
-        validate_lagrange_pins(&lagrange_pins, num_columns, None)?;
+
+        let virt_layout = match &expander {
+            Some(e) => e.virtual_layout(),
+            None => virtual_column_layout.as_slice(),
+        };
+
+        validate_fixed_columns(&fixed_columns, virt_layout, None)?;
 
         Ok(Self {
             name,
@@ -144,7 +150,7 @@ impl<F: TowerField> ChipletDef<F> {
             column_layout,
             virtual_column_layout,
             boundary_constraints,
-            lagrange_pins,
+            fixed_columns,
             expander,
             permutation_checks,
         })
@@ -160,7 +166,7 @@ impl<F: TowerField> Clone for ChipletDef<F> {
             column_layout: self.column_layout.clone(),
             virtual_column_layout: self.virtual_column_layout.clone(),
             boundary_constraints: self.boundary_constraints.clone(),
-            lagrange_pins: self.lagrange_pins.clone(),
+            fixed_columns: self.fixed_columns.clone(),
             expander: self.expander.clone(),
             permutation_checks: self.permutation_checks.clone(),
         }
@@ -195,8 +201,8 @@ impl<F: TowerField> Air<F> for ChipletDef<F> {
         self.permutation_checks.clone()
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
-        self.lagrange_pins.clone()
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        self.fixed_columns.clone()
     }
 
     fn virtual_expander(&self) -> Option<&VirtualExpander> {
