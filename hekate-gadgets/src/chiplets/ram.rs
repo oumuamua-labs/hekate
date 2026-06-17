@@ -32,7 +32,7 @@ use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{PermutationCheckSpec, Source};
-use hekate_program::{Air, LagrangePin, define_columns};
+use hekate_program::{Air, FixedColumn, define_columns};
 use once_cell::race::OnceBox;
 
 // Physical layout constants.
@@ -430,10 +430,10 @@ impl<F: TowerField> Air<F> for RamChiplet {
 
     /// Closes the uniform `q_last ≡ 0` forgery the
     /// q_last/q_first relational chain admitted alone.
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
         vec![
-            LagrangePin::last_row(RamColumns::Q_STEP),
-            LagrangePin::first_row(RamColumns::Q_FIRST),
+            FixedColumn::last_row(RamColumns::Q_STEP),
+            FixedColumn::first_row(RamColumns::Q_FIRST),
         ]
     }
 
