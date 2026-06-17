@@ -29,7 +29,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
 use hekate_program::{
-    Air, LagrangePin, Program, ProgramInstance, ProgramWitness, validate_lagrange_pins,
+    Air, FixedColumn, Program, ProgramInstance, ProgramWitness, validate_fixed_columns,
 };
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -40,7 +40,7 @@ const FMT_MAX_ROW_PREVIEW: usize = 8;
 const FMT_MAX_MISMATCH_PREVIEW: usize = 16;
 const FMT_MAX_MUTEX_PREVIEW: usize = 8;
 
-type AirViolations<F> = (Vec<ConstraintViolation<F>>, Vec<LagrangePinViolation<F>>);
+type AirViolations<F> = (Vec<ConstraintViolation<F>>, Vec<FixedColumnViolation<F>>);
 
 type GroupedConstraintRows = BTreeMap<(TableId, usize), (Option<&'static str>, Vec<usize>)>;
 
@@ -61,7 +61,7 @@ pub struct BoundaryViolation<F> {
     pub expected: Flat<F>,
 }
 
-pub struct LagrangePinViolation<F> {
+pub struct FixedColumnViolation<F> {
     pub table: TableId,
     pub pin_idx: usize,
     pub col_idx: usize,
@@ -142,7 +142,7 @@ impl fmt::Display for TableId {
 pub struct PreflightReport<F> {
     pub constraint_violations: Vec<ConstraintViolation<F>>,
     pub boundary_violations: Vec<BoundaryViolation<F>>,
-    pub lagrange_pin_violations: Vec<LagrangePinViolation<F>>,
+    pub fixed_column_violations: Vec<FixedColumnViolation<F>>,
     pub bus_diagnostics: Vec<BusDiagnostic<F>>,
 }
 
@@ -151,7 +151,7 @@ impl<F> PreflightReport<F> {
         Self {
             constraint_violations: Vec::new(),
             boundary_violations: Vec::new(),
-            lagrange_pin_violations: Vec::new(),
+            fixed_column_violations: Vec::new(),
             bus_diagnostics: Vec::new(),
         }
     }
@@ -159,7 +159,7 @@ impl<F> PreflightReport<F> {
     pub fn is_clean(&self) -> bool {
         self.constraint_violations.is_empty()
             && self.boundary_violations.is_empty()
-            && self.lagrange_pin_violations.is_empty()
+            && self.fixed_column_violations.is_empty()
             && self.bus_diagnostics.is_empty()
     }
 }
@@ -183,7 +183,7 @@ where
 {
     let (mut constraints, mut pins) = collect_air_violations(air, trace, table)?;
     report.constraint_violations.append(&mut constraints);
-    report.lagrange_pin_violations.append(&mut pins);
+    report.fixed_column_violations.append(&mut pins);
 
     Ok(())
 }
@@ -193,39 +193,15 @@ struct RowScratch<F: TowerField> {
     next_row: Vec<Flat<F>>,
     eval_buf: Vec<Flat<F>>,
     row_bytes: Vec<u8>,
-    row_bits: Vec<Flat<F>>,
 }
 
 impl<F: TowerField> RowScratch<F> {
-    fn new(
-        num_virtual_cols: usize,
-        ast_arena_len: usize,
-        phys_row_bytes: usize,
-        num_vars: usize,
-    ) -> Self {
+    fn new(num_virtual_cols: usize, ast_arena_len: usize, phys_row_bytes: usize) -> Self {
         Self {
             current_row: Vec::with_capacity(num_virtual_cols),
             next_row: Vec::with_capacity(num_virtual_cols),
             eval_buf: Vec::with_capacity(ast_arena_len),
             row_bytes: Vec::with_capacity(phys_row_bytes),
-            row_bits: Vec::with_capacity(num_vars),
-        }
-    }
-}
-
-/// Fill `dst` with the LSB-first bit decomposition
-/// of `row_idx`, promoted to field elements.
-fn fill_row_bits<F: TowerField>(dst: &mut Vec<Flat<F>>, row_idx: usize, num_vars: usize) {
-    dst.clear();
-
-    let zero = Flat::from_raw(F::ZERO);
-    let one = Flat::from_raw(F::ONE);
-
-    for k in 0..num_vars {
-        if (row_idx >> k) & 1 == 1 {
-            dst.push(one);
-        } else {
-            dst.push(zero);
         }
     }
 }
@@ -236,15 +212,14 @@ fn evaluate_air_row<F, P, T>(
     trace: &T,
     table: TableId,
     ast: &ConstraintAst<F>,
-    pins: &[LagrangePin],
-    row_bits: &[Flat<F>],
+    pins: &[FixedColumn<F>],
     num_virtual_cols: usize,
     has_virtual_expansion: bool,
     num_rows: usize,
     row_idx: usize,
     scratch: &mut RowScratch<F>,
     constraints_out: &mut Vec<ConstraintViolation<F>>,
-    pins_out: &mut Vec<LagrangePinViolation<F>>,
+    pins_out: &mut Vec<FixedColumnViolation<F>>,
 ) -> errors::Result<()>
 where
     F: TraceCompatibleField,
@@ -279,12 +254,14 @@ where
         }
     }
 
+    let num_vars = num_rows.trailing_zeros() as usize;
+
     for (pin_idx, pin) in pins.iter().enumerate() {
         let actual = scratch.current_row[pin.col_idx];
-        let expected = pin.point.evaluate::<F>(row_bits);
+        let expected = pin.shape.value_at_row(row_idx, num_vars);
 
         if actual != expected {
-            pins_out.push(LagrangePinViolation {
+            pins_out.push(FixedColumnViolation {
                 table,
                 pin_idx,
                 col_idx: pin.col_idx,
@@ -335,9 +312,9 @@ where
     let num_virtual_cols = air.num_columns();
 
     let ast = air.constraint_ast();
-    let pins = air.lagrange_pinned_columns();
+    let pins = air.fixed_columns();
 
-    validate_lagrange_pins(&pins, num_virtual_cols, Some(num_vars))?;
+    validate_fixed_columns(&pins, air.virtual_column_layout(), Some(num_vars))?;
 
     if ast.roots.is_empty() && pins.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -354,25 +331,17 @@ where
 
     #[cfg(not(feature = "parallel"))]
     {
-        let mut scratch =
-            RowScratch::<F>::new(num_virtual_cols, ast_arena_len, phys_row_bytes, num_vars);
+        let mut scratch = RowScratch::<F>::new(num_virtual_cols, ast_arena_len, phys_row_bytes);
         let mut constraints: Vec<ConstraintViolation<F>> = Vec::new();
-        let mut pin_violations: Vec<LagrangePinViolation<F>> = Vec::new();
+        let mut pin_violations: Vec<FixedColumnViolation<F>> = Vec::new();
 
         for row_idx in 0..num_rows {
-            fill_row_bits::<F>(&mut scratch.row_bits, row_idx, num_vars);
-
-            // Borrow split:
-            // row_bits read, current_row written.
-            let row_bits = core::mem::take(&mut scratch.row_bits);
-
-            let res = evaluate_air_row(
+            evaluate_air_row(
                 air,
                 trace,
                 table,
                 &ast,
                 &pins,
-                &row_bits,
                 num_virtual_cols,
                 has_virtual_expansion,
                 num_rows,
@@ -380,11 +349,7 @@ where
                 &mut scratch,
                 &mut constraints,
                 &mut pin_violations,
-            );
-
-            scratch.row_bits = row_bits;
-
-            res?;
+            )?;
         }
 
         Ok((constraints, pin_violations))
@@ -397,28 +362,18 @@ where
             .try_fold(
                 || {
                     (
-                        RowScratch::<F>::new(
-                            num_virtual_cols,
-                            ast_arena_len,
-                            phys_row_bytes,
-                            num_vars,
-                        ),
+                        RowScratch::<F>::new(num_virtual_cols, ast_arena_len, phys_row_bytes),
                         Vec::<ConstraintViolation<F>>::new(),
-                        Vec::<LagrangePinViolation<F>>::new(),
+                        Vec::<FixedColumnViolation<F>>::new(),
                     )
                 },
                 |(mut scratch, mut cs, mut ps), row_idx| {
-                    fill_row_bits::<F>(&mut scratch.row_bits, row_idx, num_vars);
-
-                    let row_bits = core::mem::take(&mut scratch.row_bits);
-
-                    let res = evaluate_air_row(
+                    evaluate_air_row(
                         air,
                         trace,
                         table,
                         &ast,
                         &pins,
-                        &row_bits,
                         num_virtual_cols,
                         has_virtual_expansion,
                         num_rows,
@@ -426,11 +381,7 @@ where
                         &mut scratch,
                         &mut cs,
                         &mut ps,
-                    );
-
-                    scratch.row_bits = row_bits;
-
-                    res?;
+                    )?;
 
                     Ok((scratch, cs, ps))
                 },
@@ -439,7 +390,7 @@ where
             .collect();
 
         let mut constraints: Vec<ConstraintViolation<F>> = Vec::new();
-        let mut pin_violations: Vec<LagrangePinViolation<F>> = Vec::new();
+        let mut pin_violations: Vec<FixedColumnViolation<F>> = Vec::new();
 
         for (chunk_cs, chunk_ps) in chunks? {
             constraints.extend(chunk_cs);
@@ -574,7 +525,7 @@ where
         for result in per_chiplet {
             let (cs, ps) = result?;
             report.constraint_violations.extend(cs);
-            report.lagrange_pin_violations.extend(ps);
+            report.fixed_column_violations.extend(ps);
         }
     }
 
@@ -1042,10 +993,10 @@ impl<F: TraceCompatibleField> fmt::Display for PreflightReport<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "PREFLIGHT: {} constraint, {} boundary, {} lagrange pin, {} bus",
+            "PREFLIGHT: {} constraint, {} boundary, {} fixed column, {} bus",
             self.constraint_violations.len(),
             self.boundary_violations.len(),
-            self.lagrange_pin_violations.len(),
+            self.fixed_column_violations.len(),
             self.bus_diagnostics.len(),
         )?;
 
@@ -1059,10 +1010,10 @@ impl<F: TraceCompatibleField> fmt::Display for PreflightReport<F> {
             )?;
         }
 
-        for v in &self.lagrange_pin_violations {
+        for v in &self.fixed_column_violations {
             writeln!(
                 f,
-                "  [{}] lagrange pin #{}: col={} row={} actual={:?} expected={:?}",
+                "  [{}] fixed column #{}: col={} row={} actual={:?} expected={:?}",
                 v.table, v.pin_idx, v.col_idx, v.row_idx, v.actual, v.expected,
             )?;
         }
