@@ -24,7 +24,7 @@ use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{
     BusKind, ChallengeLabel, PermutationCheckSpec, REQUEST_IDX_LABEL, Source,
 };
-use hekate_program::{Air, InlineKernelHint, LagrangePin, LagrangePoint, Program};
+use hekate_program::{Air, FixedColumn, FixedShape, InlineKernelHint, Program};
 use hekate_sdk::program_id;
 
 type F = Block128;
@@ -36,7 +36,7 @@ struct TestChiplet {
     constraint_ast: ConstraintAst<F>,
     boundary_constraints: Vec<BoundaryConstraint<F>>,
     permutation_checks: Vec<(String, PermutationCheckSpec)>,
-    lagrange_pins: Vec<LagrangePin>,
+    fixed_columns: Vec<FixedColumn<F>>,
     expander: Option<VirtualExpander>,
 }
 
@@ -53,7 +53,7 @@ impl TestChiplet {
             constraint_ast: cs.build(),
             boundary_constraints: Vec::new(),
             permutation_checks: Vec::new(),
-            lagrange_pins: Vec::new(),
+            fixed_columns: Vec::new(),
             expander: None,
         }
     }
@@ -80,8 +80,8 @@ impl Air<F> for TestChiplet {
         self.permutation_checks.clone()
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
-        self.lagrange_pins.clone()
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        self.fixed_columns.clone()
     }
 
     fn virtual_expander(&self) -> Option<&VirtualExpander> {
@@ -100,7 +100,7 @@ struct TestProgram {
     constraint_ast: ConstraintAst<F>,
     boundary_constraints: Vec<BoundaryConstraint<F>>,
     permutation_checks: Vec<(String, PermutationCheckSpec)>,
-    lagrange_pins: Vec<LagrangePin>,
+    fixed_columns: Vec<FixedColumn<F>>,
     expander: Option<VirtualExpander>,
     chiplets: Vec<TestChiplet>,
     inline_chiplets: Vec<TestChiplet>,
@@ -123,7 +123,7 @@ impl TestProgram {
             constraint_ast: cs.build(),
             boundary_constraints: vec![BoundaryConstraint::with_public_input(1, 0, 0)],
             permutation_checks: vec![("test_bus".to_string(), paired_perm_spec(Some(2), 0, 1))],
-            lagrange_pins: vec![LagrangePin::last_row(0)],
+            fixed_columns: vec![FixedColumn::last_row(0)],
             expander: None,
             chiplets: vec![TestChiplet::baseline()],
             inline_chiplets: Vec::new(),
@@ -156,8 +156,8 @@ impl Air<F> for TestProgram {
         self.permutation_checks.clone()
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
-        self.lagrange_pins.clone()
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        self.fixed_columns.clone()
     }
 
     fn virtual_expander(&self) -> Option<&VirtualExpander> {
@@ -221,6 +221,7 @@ fn program_id_deterministic_across_calls() {
 fn program_id_equal_for_two_baseline_clones() {
     let p1 = TestProgram::baseline();
     let p2 = TestProgram::baseline();
+
     assert_eq!(id(&p1), id(&p2));
 }
 
@@ -228,7 +229,9 @@ fn program_id_equal_for_two_baseline_clones() {
 fn mutate_main_layout_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.column_layout[0] = ColumnType::B64;
+
     assert_ne!(h1, id(&p));
 }
 
@@ -238,8 +241,10 @@ fn mutate_main_constraint_ast_changes_hash() {
     let h1 = id(&p);
 
     let cs = ConstraintSystem::<F>::new();
+
     let a = cs.col(0);
     cs.constrain(a + a);
+
     p.constraint_ast = cs.build();
 
     assert_ne!(h1, id(&p));
@@ -249,7 +254,9 @@ fn mutate_main_constraint_ast_changes_hash() {
 fn mutate_main_boundary_col_idx_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.boundary_constraints = vec![BoundaryConstraint::with_public_input(2, 0, 0)];
+
     assert_ne!(h1, id(&p));
 }
 
@@ -257,7 +264,9 @@ fn mutate_main_boundary_col_idx_changes_hash() {
 fn mutate_main_boundary_target_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.boundary_constraints = vec![BoundaryConstraint::with_constant(1, 0, F::ONE)];
+
     assert_ne!(h1, id(&p));
 }
 
@@ -265,7 +274,9 @@ fn mutate_main_boundary_target_changes_hash() {
 fn mutate_main_perm_kind_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.permutation_checks[0].1.kind = BusKind::Lookup;
+
     assert_ne!(h1, id(&p));
 }
 
@@ -273,7 +284,9 @@ fn mutate_main_perm_kind_changes_hash() {
 fn mutate_main_perm_selector_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.permutation_checks[0].1.selector = Some(7);
+
     assert_ne!(h1, id(&p));
 }
 
@@ -281,8 +294,10 @@ fn mutate_main_perm_selector_changes_hash() {
 fn mutate_main_perm_clock_waiver_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.permutation_checks[0].1.clock_waiver =
         Some("see hekate-sdk/tests/program_structural_hash.rs: synthetic test waiver".to_string());
+
     assert_ne!(h1, id(&p));
 }
 
@@ -290,7 +305,9 @@ fn mutate_main_perm_clock_waiver_changes_hash() {
 fn mutate_main_perm_bus_id_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.permutation_checks[0].0 = "different_bus".to_string();
+
     assert_ne!(h1, id(&p));
 }
 
@@ -298,26 +315,32 @@ fn mutate_main_perm_bus_id_changes_hash() {
 fn mutate_main_perm_source_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.permutation_checks[0].1.sources[0].0 = Source::Column(99);
+
     assert_ne!(h1, id(&p));
 }
 
 #[test]
-fn mutate_main_lagrange_pin_col_changes_hash() {
+fn mutate_main_fixed_column_col_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
-    p.lagrange_pins = vec![LagrangePin::last_row(2)];
+
+    p.fixed_columns = vec![FixedColumn::last_row(2)];
+
     assert_ne!(h1, id(&p));
 }
 
 #[test]
-fn mutate_main_lagrange_pin_point_changes_hash() {
+fn mutate_main_fixed_column_shape_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
-    p.lagrange_pins = vec![LagrangePin {
+
+    p.fixed_columns = vec![FixedColumn {
         col_idx: 0,
-        point: LagrangePoint::FirstRow,
+        shape: FixedShape::FirstRow,
     }];
+
     assert_ne!(h1, id(&p));
 }
 
@@ -325,7 +348,9 @@ fn mutate_main_lagrange_pin_point_changes_hash() {
 fn mutate_main_num_columns_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.num_columns_override = Some(99);
+
     assert_ne!(h1, id(&p));
 }
 
@@ -333,6 +358,7 @@ fn mutate_main_num_columns_changes_hash() {
 fn mutate_main_num_public_inputs_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.num_public_inputs = 42;
     assert_ne!(h1, id(&p));
 }
@@ -341,6 +367,7 @@ fn mutate_main_num_public_inputs_changes_hash() {
 fn mutate_main_virtual_expander_toggle_changes_hash() {
     let mut p = TestProgram::baseline();
     p.column_layout = vec![ColumnType::B64];
+
     let h1 = id(&p);
 
     let exp = VirtualExpander::new()
@@ -356,7 +383,9 @@ fn mutate_main_virtual_expander_toggle_changes_hash() {
 fn mutate_chiplet_count_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.chiplets.push(TestChiplet::baseline());
+
     assert_ne!(h1, id(&p));
 }
 
@@ -364,7 +393,9 @@ fn mutate_chiplet_count_changes_hash() {
 fn mutate_chiplet_name_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.chiplets[0].name = "renamed_chiplet".to_string();
+
     assert_ne!(h1, id(&p));
 }
 
@@ -372,7 +403,9 @@ fn mutate_chiplet_name_changes_hash() {
 fn mutate_chiplet_layout_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.chiplets[0].column_layout[0] = ColumnType::B128;
+
     assert_ne!(h1, id(&p));
 }
 
@@ -380,7 +413,9 @@ fn mutate_chiplet_layout_changes_hash() {
 fn mutate_main_perm_recv_selector_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.permutation_checks[0].1.recv_selector = Some(99);
+
     assert_ne!(h1, id(&p));
 }
 
@@ -388,7 +423,9 @@ fn mutate_main_perm_recv_selector_changes_hash() {
 fn mutate_main_perm_recv_selector_some_to_none_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.permutation_checks[0].1.recv_selector = None;
+
     assert_ne!(h1, id(&p));
 }
 
@@ -396,7 +433,9 @@ fn mutate_main_perm_recv_selector_some_to_none_changes_hash() {
 fn mutate_main_inline_chiplets_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.inline_chiplets.push(TestChiplet::baseline());
+
     assert_ne!(h1, id(&p));
 }
 
@@ -404,8 +443,10 @@ fn mutate_main_inline_chiplets_changes_hash() {
 fn mutate_main_inline_chiplet_layout_changes_hash() {
     let mut p = TestProgram::baseline();
     p.inline_chiplets.push(TestChiplet::baseline());
+
     let h1 = id(&p);
     p.inline_chiplets[0].column_layout[0] = ColumnType::B128;
+
     assert_ne!(h1, id(&p));
 }
 
@@ -418,6 +459,7 @@ fn mutate_main_inline_kernels_changes_hash() {
         root_offset: 0,
         column_offset: 0,
     });
+
     assert_ne!(h1, id(&p));
 }
 
@@ -429,8 +471,10 @@ fn mutate_main_inline_kernel_hint_field_changes_hash() {
         root_offset: 0,
         column_offset: 0,
     });
+
     let h1 = id(&p);
     p.inline_kernel_hints[0].chiplet_idx = 7;
+
     assert_ne!(h1, id(&p));
 }
 
@@ -438,7 +482,9 @@ fn mutate_main_inline_kernel_hint_field_changes_hash() {
 fn mutate_main_name_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
+
     p.name = "renamed_program".to_string();
+
     assert_ne!(h1, id(&p));
 }
 
@@ -480,11 +526,11 @@ fn mutate_chiplet_perm_changes_hash() {
 }
 
 #[test]
-fn mutate_chiplet_lagrange_pin_changes_hash() {
+fn mutate_chiplet_fixed_column_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);
 
-    p.chiplets[0].lagrange_pins.push(LagrangePin::last_row(0));
+    p.chiplets[0].fixed_columns.push(FixedColumn::last_row(0));
 
     assert_ne!(h1, id(&p));
 }

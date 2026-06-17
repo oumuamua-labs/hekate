@@ -23,7 +23,7 @@ use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
-use hekate_program::{Air, LagrangePin, Program, ProgramInstance, ProgramWitness, define_columns};
+use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness, define_columns};
 use hekate_sdk::preflight;
 use hekate_sdk::preflight::TableId;
 
@@ -74,8 +74,8 @@ impl Air<F> for FibAir {
         LAYOUT.get_or_init(FibCols::build_layout)
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
-        vec![LagrangePin::last_row(FibCols::Q)]
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        vec![FixedColumn::last_row(FibCols::Q)]
     }
 
     fn constraint_ast(&self) -> ConstraintAst<F> {
@@ -749,7 +749,7 @@ fn lookup_catches_parity_forgery() {
 }
 
 // =================================================================
-// LAGRANGE PIN TESTS
+// FIXED COLUMN TESTS
 // =================================================================
 
 define_columns! {
@@ -760,7 +760,7 @@ define_columns! {
 
 #[derive(Clone)]
 struct PinAir {
-    pin: LagrangePin,
+    pin: FixedColumn<F>,
 }
 
 impl Air<F> for PinAir {
@@ -773,7 +773,7 @@ impl Air<F> for PinAir {
         LAYOUT.get_or_init(PinCols::build_layout)
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
         vec![self.pin.clone()]
     }
 
@@ -797,12 +797,12 @@ fn pin_trace(num_vars: usize, on_row: impl Fn(usize) -> Bit) -> ColumnTrace {
 }
 
 #[test]
-fn lagrange_pin_last_row_clean_passes() {
+fn fixed_column_last_row_clean_passes() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
 
     let air = PinAir {
-        pin: LagrangePin::last_row(PinCols::FLAG),
+        pin: FixedColumn::last_row(PinCols::FLAG),
     };
 
     let trace = pin_trace(num_vars, |i| {
@@ -820,16 +820,16 @@ fn lagrange_pin_last_row_clean_passes() {
     eprintln!("{}", report);
 
     assert!(report.is_clean());
-    assert!(report.lagrange_pin_violations.is_empty());
+    assert!(report.fixed_column_violations.is_empty());
 }
 
 #[test]
-fn lagrange_pin_last_row_detects_corrupted_last_row() {
+fn fixed_column_last_row_detects_corrupted_last_row() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
 
     let air = PinAir {
-        pin: LagrangePin::last_row(PinCols::FLAG),
+        pin: FixedColumn::last_row(PinCols::FLAG),
     };
 
     let trace = pin_trace(num_vars, |_| Bit::ONE);
@@ -841,20 +841,20 @@ fn lagrange_pin_last_row_detects_corrupted_last_row() {
     eprintln!("{}", report);
 
     assert!(!report.is_clean());
-    assert_eq!(report.lagrange_pin_violations.len(), 1);
+    assert_eq!(report.fixed_column_violations.len(), 1);
 
-    let v = &report.lagrange_pin_violations[0];
+    let v = &report.fixed_column_violations[0];
     assert_eq!(v.col_idx, PinCols::FLAG);
     assert_eq!(v.row_idx, num_rows - 1);
 }
 
 #[test]
-fn lagrange_pin_last_row_detects_corrupted_mid_row() {
+fn fixed_column_last_row_detects_corrupted_mid_row() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
 
     let air = PinAir {
-        pin: LagrangePin::last_row(PinCols::FLAG),
+        pin: FixedColumn::last_row(PinCols::FLAG),
     };
 
     let trace = pin_trace(num_vars, |i| {
@@ -872,17 +872,17 @@ fn lagrange_pin_last_row_detects_corrupted_mid_row() {
     eprintln!("{}", report);
 
     assert!(!report.is_clean());
-    assert_eq!(report.lagrange_pin_violations.len(), 1);
-    assert_eq!(report.lagrange_pin_violations[0].row_idx, 5);
+    assert_eq!(report.fixed_column_violations.len(), 1);
+    assert_eq!(report.fixed_column_violations[0].row_idx, 5);
 }
 
 #[test]
-fn lagrange_pin_first_row_clean_passes() {
+fn fixed_column_first_row_clean_passes() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
 
     let air = PinAir {
-        pin: LagrangePin::first_row(PinCols::FLAG),
+        pin: FixedColumn::first_row(PinCols::FLAG),
     };
 
     let trace = pin_trace(num_vars, |i| if i == 0 { Bit::ONE } else { Bit::ZERO });
@@ -897,12 +897,12 @@ fn lagrange_pin_first_row_clean_passes() {
 }
 
 #[test]
-fn lagrange_pin_first_row_detects_violation() {
+fn fixed_column_first_row_detects_violation() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
 
     let air = PinAir {
-        pin: LagrangePin::first_row(PinCols::FLAG),
+        pin: FixedColumn::first_row(PinCols::FLAG),
     };
 
     let trace = pin_trace(num_vars, |_| Bit::ZERO);
@@ -913,12 +913,12 @@ fn lagrange_pin_first_row_detects_violation() {
     let report = preflight(&air, &instance, &witness).unwrap();
     eprintln!("{}", report);
 
-    assert_eq!(report.lagrange_pin_violations.len(), 1);
-    assert_eq!(report.lagrange_pin_violations[0].row_idx, 0);
+    assert_eq!(report.fixed_column_violations.len(), 1);
+    assert_eq!(report.fixed_column_violations[0].row_idx, 0);
 }
 
 #[test]
-fn lagrange_pin_custom_clean_passes() {
+fn fixed_column_custom_clean_passes() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
     let target_row = 5;
@@ -926,7 +926,7 @@ fn lagrange_pin_custom_clean_passes() {
     let bits: Vec<bool> = (0..num_vars).map(|k| (target_row >> k) & 1 == 1).collect();
 
     let air = PinAir {
-        pin: LagrangePin::custom(PinCols::FLAG, bits),
+        pin: FixedColumn::custom(PinCols::FLAG, bits),
     };
 
     let trace = pin_trace(
@@ -946,7 +946,7 @@ fn lagrange_pin_custom_clean_passes() {
 }
 
 #[test]
-fn lagrange_pin_custom_detects_violation_at_target_row() {
+fn fixed_column_custom_detects_violation_at_target_row() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
     let target_row = 5;
@@ -954,7 +954,7 @@ fn lagrange_pin_custom_detects_violation_at_target_row() {
     let bits: Vec<bool> = (0..num_vars).map(|k| (target_row >> k) & 1 == 1).collect();
 
     let air = PinAir {
-        pin: LagrangePin::custom(PinCols::FLAG, bits),
+        pin: FixedColumn::custom(PinCols::FLAG, bits),
     };
 
     let trace = pin_trace(num_vars, |_| Bit::ZERO);
@@ -965,17 +965,17 @@ fn lagrange_pin_custom_detects_violation_at_target_row() {
     let report = preflight(&air, &instance, &witness).unwrap();
     eprintln!("{}", report);
 
-    assert_eq!(report.lagrange_pin_violations.len(), 1);
-    assert_eq!(report.lagrange_pin_violations[0].row_idx, target_row);
+    assert_eq!(report.fixed_column_violations.len(), 1);
+    assert_eq!(report.fixed_column_violations[0].row_idx, target_row);
 }
 
 #[test]
-fn lagrange_pin_out_of_range_col_idx_rejected_in_preflight() {
+fn fixed_column_out_of_range_col_idx_rejected_in_preflight() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
 
     let air = PinAir {
-        pin: LagrangePin::last_row(99),
+        pin: FixedColumn::last_row(99),
     };
 
     let trace = pin_trace(num_vars, |_| Bit::ZERO);
@@ -996,7 +996,124 @@ fn lagrange_pin_out_of_range_col_idx_rejected_in_preflight() {
     assert!(matches!(
         result,
         Err(errors::Error::Protocol {
-            protocol: "lagrange_pin",
+            protocol: "fixed_column",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn fixed_column_dense_clean_passes() {
+    let num_vars = 3;
+    let num_rows = 1 << num_vars;
+    let pattern = |i: usize| i < num_rows / 2;
+
+    let values: Vec<F> = (0..num_rows)
+        .map(|i| if pattern(i) { F::ONE } else { F::ZERO })
+        .collect();
+
+    let air = PinAir {
+        pin: FixedColumn::dense(PinCols::FLAG, values),
+    };
+
+    let trace = pin_trace(num_vars, |i| if pattern(i) { Bit::ONE } else { Bit::ZERO });
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+    let report = preflight(&air, &instance, &witness).unwrap();
+
+    assert!(report.is_clean());
+    assert!(report.fixed_column_violations.is_empty());
+}
+
+#[test]
+fn fixed_column_dense_detects_deviation() {
+    let num_vars = 3;
+    let num_rows = 1 << num_vars;
+    let pattern = |i: usize| i < num_rows / 2;
+
+    let values: Vec<F> = (0..num_rows)
+        .map(|i| if pattern(i) { F::ONE } else { F::ZERO })
+        .collect();
+
+    let air = PinAir {
+        pin: FixedColumn::dense(PinCols::FLAG, values),
+    };
+
+    let trace = pin_trace(num_vars, |i| {
+        if i == 2 || !pattern(i) {
+            Bit::ZERO
+        } else {
+            Bit::ONE
+        }
+    });
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+    let report = preflight(&air, &instance, &witness).unwrap();
+
+    assert!(!report.is_clean());
+    assert_eq!(report.fixed_column_violations.len(), 1);
+    assert_eq!(report.fixed_column_violations[0].row_idx, 2);
+}
+
+#[test]
+fn fixed_column_periodic_clean_passes() {
+    let num_vars = 3;
+    let num_rows = 1 << num_vars;
+
+    let air = PinAir {
+        pin: FixedColumn::periodic(PinCols::FLAG, 4, vec![F::ONE, F::ZERO, F::ZERO, F::ZERO]),
+    };
+
+    let trace = pin_trace(num_vars, |i| if i % 4 == 0 { Bit::ONE } else { Bit::ZERO });
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+    let report = preflight(&air, &instance, &witness).unwrap();
+
+    assert!(report.is_clean());
+}
+
+#[test]
+fn fixed_column_sparse_detects_deviation() {
+    let num_vars = 3;
+    let num_rows = 1 << num_vars;
+
+    let air = PinAir {
+        pin: FixedColumn::sparse(PinCols::FLAG, vec![(0, F::ONE), (3, F::ONE)]),
+    };
+
+    let trace = pin_trace(num_vars, |i| if i == 0 { Bit::ONE } else { Bit::ZERO });
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+    let report = preflight(&air, &instance, &witness).unwrap();
+
+    assert!(!report.is_clean());
+    assert_eq!(report.fixed_column_violations.len(), 1);
+    assert_eq!(report.fixed_column_violations[0].row_idx, 3);
+}
+
+#[test]
+fn fixed_column_non_boolean_bit_rejected() {
+    let num_vars = 3;
+    let num_rows = 1 << num_vars;
+
+    let values: Vec<F> = (0..num_rows).map(|_| F::from(2u128)).collect();
+    let air = PinAir {
+        pin: FixedColumn::dense(PinCols::FLAG, values),
+    };
+
+    let trace = pin_trace(num_vars, |_| Bit::ZERO);
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(trace);
+
+    assert!(matches!(
+        preflight(&air, &instance, &witness),
+        Err(errors::Error::Protocol {
+            protocol: "fixed_column",
             ..
         })
     ));
