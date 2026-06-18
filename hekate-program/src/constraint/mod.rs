@@ -357,49 +357,47 @@ impl<F: TowerField> ConstraintAst<F> {
             .unwrap_or(0)
     }
 
+    /// Hardware-basis `Const`/`Scale` coefficients
+    /// indexed by `ExprId`; other slots hold zero.
+    pub fn precompute_hardware_consts(&self) -> Vec<Flat<F>>
+    where
+        F: HardwareField,
+    {
+        let n = self.arena.len();
+
+        let mut consts: Vec<Flat<F>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let c = match self.arena.get(ExprId(i as u32)) {
+                ConstraintExpr::Const(k) => k.to_hardware(),
+                ConstraintExpr::Scale(k, _) => k.to_hardware(),
+                _ => Flat::from_raw(F::ZERO),
+            };
+
+            consts.push(c);
+        }
+
+        consts
+    }
+
     /// Evaluate each constraint
     /// root at a single point.
     pub fn evaluate(&self, current_row: &[Flat<F>], next_row: &[Flat<F>]) -> Vec<Flat<F>>
     where
         F: HardwareField,
     {
-        let n = self.arena.len();
-        let mut val: Vec<Flat<F>> = Vec::with_capacity(n);
+        let consts = self.precompute_hardware_consts();
+        let mut buf: Vec<Flat<F>> = Vec::with_capacity(self.arena.len());
 
-        for i in 0..n {
-            let v = match self.arena.get(ExprId(i as u32)) {
-                ConstraintExpr::Cell(cell) => {
-                    if cell.next_row {
-                        next_row[cell.col_idx]
-                    } else {
-                        current_row[cell.col_idx]
-                    }
-                }
-                ConstraintExpr::Const(k) => k.to_hardware(),
-                ConstraintExpr::Add(a, b) => val[a.0 as usize] + val[b.0 as usize],
-                ConstraintExpr::Mul(a, b) => val[a.0 as usize] * val[b.0 as usize],
-                ConstraintExpr::Scale(k, a) => k.to_hardware() * val[a.0 as usize],
-                ConstraintExpr::Sum(children) => {
-                    let mut s = Flat::from_raw(F::ZERO);
-                    for c in children {
-                        s += val[c.0 as usize];
-                    }
+        self.evaluate_into(&consts, current_row, next_row, &mut buf);
 
-                    s
-                }
-            };
-
-            val.push(v);
-        }
-
-        self.roots.iter().map(|r| val[r.0 as usize]).collect()
+        self.roots.iter().map(|r| buf[r.0 as usize]).collect()
     }
 
-    /// Buffer-reuse variant of `evaluate()`.
-    /// Caller owns `buf`; reused across
-    /// rows to avoid per-row allocation.
+    /// `consts` must come from the same arena
+    /// `self.precompute_hardware_consts()`.
     pub fn evaluate_into(
         &self,
+        consts: &[Flat<F>],
         current_row: &[Flat<F>],
         next_row: &[Flat<F>],
         buf: &mut Vec<Flat<F>>,
@@ -408,8 +406,7 @@ impl<F: TowerField> ConstraintAst<F> {
     {
         buf.clear();
 
-        let n = self.arena.len();
-        for i in 0..n {
+        for (i, &coeff) in consts.iter().enumerate() {
             let v = match self.arena.get(ExprId(i as u32)) {
                 ConstraintExpr::Cell(cell) => {
                     if cell.next_row {
@@ -418,10 +415,10 @@ impl<F: TowerField> ConstraintAst<F> {
                         current_row[cell.col_idx]
                     }
                 }
-                ConstraintExpr::Const(k) => k.to_hardware(),
+                ConstraintExpr::Const(_) => coeff,
                 ConstraintExpr::Add(a, b) => buf[a.0 as usize] + buf[b.0 as usize],
                 ConstraintExpr::Mul(a, b) => buf[a.0 as usize] * buf[b.0 as usize],
-                ConstraintExpr::Scale(k, a) => k.to_hardware() * buf[a.0 as usize],
+                ConstraintExpr::Scale(_, a) => coeff * buf[a.0 as usize],
                 ConstraintExpr::Sum(children) => {
                     let mut s = Flat::from_raw(F::ZERO);
                     for c in children {
@@ -922,8 +919,10 @@ mod tests {
 
         let expected = ast.evaluate(&current, &next);
 
+        let consts = ast.precompute_hardware_consts();
+
         let mut buf = Vec::new();
-        ast.evaluate_into(&current, &next, &mut buf);
+        ast.evaluate_into(&consts, &current, &next, &mut buf);
 
         for (i, root) in ast.roots.iter().enumerate() {
             assert_eq!(buf[root.0 as usize], expected[i]);
