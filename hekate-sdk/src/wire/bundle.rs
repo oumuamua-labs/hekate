@@ -28,11 +28,11 @@ use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{
-    Air, InlineKernelHint, LagrangePin, Program, ProgramInstance, ProgramWitness,
+    Air, FixedColumn, InlineKernelHint, Program, ProgramInstance, ProgramWitness,
 };
 
 use crate::generated::program as fb;
-use crate::wire::{ast, boundary, chiplet, config, expander, lagrange, permutation, trace};
+use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
 const WIRE_FORMAT_VERSION: u32 = 1;
 
@@ -48,7 +48,7 @@ pub struct DeserializedBundle<F: TowerField> {
     pub inline_chiplet_kernels: Vec<InlineKernelHint>,
     pub num_columns: usize,
     pub num_public_inputs: usize,
-    pub lagrange_pins: Vec<LagrangePin>,
+    pub fixed_columns: Vec<FixedColumn<F>>,
     pub instance: ProgramInstance<F>,
     pub witness: ProgramWitness<F>,
     pub config: Config,
@@ -247,8 +247,8 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
         .transpose()?
         .ok_or(wire_err("missing config"))?;
 
-    let lagrange_pins = match bundle.lagrange_pins() {
-        Some(v) => lagrange::deserialize_pins(v)?,
+    let fixed_columns = match bundle.fixed_columns() {
+        Some(v) => fixed_column::deserialize_fixed_columns(v)?,
         None => Vec::new(),
     };
 
@@ -264,7 +264,7 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
         inline_chiplet_kernels,
         num_columns: bundle.num_columns() as usize,
         num_public_inputs: bundle.num_public_inputs() as usize,
-        lagrange_pins,
+        fixed_columns,
         instance,
         witness,
         config: cfg,
@@ -345,8 +345,8 @@ where
 
     let cfg_offset = config::serialize_config(&mut fbb, cfg);
 
-    let pins = program.lagrange_pinned_columns();
-    let lagrange_pins = lagrange::serialize_pins(&mut fbb, &pins);
+    let fixed = program.fixed_columns();
+    let fixed_columns = fixed_column::serialize_fixed_columns(&mut fbb, &fixed);
 
     let bundle = fb::ProgramBundle::create(
         &mut fbb,
@@ -368,7 +368,7 @@ where
             main_trace: Some(main_trace),
             chiplet_traces: Some(chiplet_traces),
             config: Some(cfg_offset),
-            lagrange_pins: Some(lagrange_pins),
+            fixed_columns: Some(fixed_columns),
         },
     );
 

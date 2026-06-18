@@ -42,7 +42,7 @@ use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{Flat, HardwareField, PackableField, TowerField};
 use hekate_program::permutation::{self, BusKind};
-use hekate_program::{Air, LagrangePin, Program, ProgramInstance, chiplet, validate_lagrange_pins};
+use hekate_program::{Air, FixedColumn, Program, ProgramInstance, chiplet, validate_fixed_columns};
 use tracing::{debug, info, instrument, warn};
 
 /// The main Hekate Verifier for AIR circuits.
@@ -200,9 +200,9 @@ where
 
         permutation::validate_bus_set(all_endpoints)?;
 
-        validate_lagrange_pins(
-            &program.lagrange_pinned_columns(),
-            program.num_columns(),
+        validate_fixed_columns(
+            &program.fixed_columns(),
+            program.virtual_column_layout(),
             Some(num_vars),
         )?;
 
@@ -225,9 +225,9 @@ where
 
             let c_num_vars = c_num_rows.trailing_zeros() as usize;
 
-            validate_lagrange_pins(
-                &Air::<F>::lagrange_pinned_columns(def),
-                def.num_columns(),
+            validate_fixed_columns(
+                &Air::<F>::fixed_columns(def),
+                Air::<F>::virtual_column_layout(def),
                 Some(c_num_vars),
             )?;
         }
@@ -789,38 +789,34 @@ where
         let current_row = &trace_values[0..trace_width];
         let next_row = &trace_values_next[0..trace_width];
 
-        // A. Enforce Lagrange-pinned columns:
-        // each pin's committed evaluation must equal
-        // the MLE eval of its Lagrange point at r_final.
-        // Builds an override row passed to ast.evaluate
-        // so constraints see the verified value,
-        // not the raw commit.
+        // A. Enforce fixed columns:
+        // each committed column's eval must equal its shape
+        // MLE at r_final, substituted into the row ast.evaluate
+        // sees so constraints use the verified value.
         let mut current_row_subst: Vec<Flat<F>> = current_row.to_vec();
 
-        let pins = air.lagrange_pinned_columns();
-        if !pins.is_empty() {
-            for pin in &pins {
-                let LagrangePin { col_idx, point } = pin;
+        let fixed = air.fixed_columns();
+        for fc in &fixed {
+            let FixedColumn { col_idx, shape } = fc;
 
-                if *col_idx >= trace_width {
-                    return Err(errors::Error::Protocol {
-                        protocol: "verifier",
-                        message: "lagrange pin col_idx out of trace_width",
-                    });
-                }
-
-                let expected = point.evaluate::<F>(&r_final);
-
-                if current_row[*col_idx] != expected {
-                    warn!(
-                        "Lagrange-pin forgery detected.\nCol: {}\nClaimed: {:?}\nExpected: {:?}",
-                        col_idx, current_row[*col_idx], expected
-                    );
-                    return Ok(None);
-                }
-
-                current_row_subst[*col_idx] = expected;
+            if *col_idx >= trace_width {
+                return Err(errors::Error::Protocol {
+                    protocol: "verifier",
+                    message: "fixed column col_idx out of trace_width",
+                });
             }
+
+            let expected = shape.evaluate(&r_final);
+
+            if current_row[*col_idx] != expected {
+                warn!(
+                    "Fixed-column forgery detected.\nCol: {}\nClaimed: {:?}\nExpected: {:?}",
+                    col_idx, current_row[*col_idx], expected
+                );
+                return Ok(None);
+            }
+
+            current_row_subst[*col_idx] = expected;
         }
 
         let mut expected_val = Flat::from_raw(F::ZERO);

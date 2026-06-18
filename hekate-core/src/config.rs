@@ -185,7 +185,9 @@ impl Config {
     /// `min_security_bits` for the
     /// given trace dimensions.
     pub fn check_security(&self, num_vars: usize, field_bits: usize) -> errors::Result<()> {
-        if self.ldt_blinding_factor < self.num_queries {
+        // ZK-privacy floor;
+        // dev (min_security_bits == 0) waives it.
+        if self.min_security_bits > 0 && self.ldt_blinding_factor < self.num_queries {
             return Err(Error::InsufficientLdtBlinding {
                 ldt_blinding_factor: self.ldt_blinding_factor,
                 num_queries: self.num_queries,

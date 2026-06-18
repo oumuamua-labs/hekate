@@ -27,7 +27,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::expander::VirtualExpander;
-use hekate_program::{Air, LagrangePin, Program, ProgramInstance, ProgramWitness};
+use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 
@@ -70,8 +70,8 @@ impl Air<F> for PackedBitChiplet {
         &[ColumnType::B32, ColumnType::Bit]
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
-        vec![LagrangePin::last_row(32)]
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        vec![FixedColumn::last_row(32)]
     }
 
     fn virtual_expander(&self) -> Option<&VirtualExpander> {

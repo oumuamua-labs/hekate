@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
-// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ use hekate_program::constraint::{BoundaryTarget, ConstraintAst, ConstraintExpr, 
 use hekate_program::expander::ExpansionEntry;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
 use hekate_program::{
-    Air, InlineKernelHint, LagrangePin, LagrangePoint, Program, ProgramInstance, ProgramWitness,
+    Air, FixedColumn, FixedShape, InlineKernelHint, Program, ProgramInstance, ProgramWitness,
 };
 
 use crate::wire::bundle;
@@ -130,7 +130,7 @@ pub(crate) fn program_structural_hash<F: TowerField, P: Program<F>>(
         h.update(&[0]);
     }
 
-    absorb_lagrange_pins(&mut h, &program.lagrange_pinned_columns());
+    absorb_fixed_columns(&mut h, &program.fixed_columns());
 
     h.update(&(program.num_columns() as u64).to_le_bytes());
     h.update(&(program.num_public_inputs() as u64).to_le_bytes());
@@ -154,7 +154,7 @@ fn absorb_chiplet_def<F: TowerField>(h: &mut DefaultHasher, cd: &ChipletDef<F>) 
 
     absorb_boundaries(h, &cd.boundary_constraints());
     absorb_permutation_checks(h, &cd.permutation_checks());
-    absorb_lagrange_pins(h, &Air::<F>::lagrange_pinned_columns(cd));
+    absorb_fixed_columns(h, &Air::<F>::fixed_columns(cd));
 
     if let Some(exp) = cd.virtual_expander() {
         h.update(&[1]);
@@ -267,21 +267,47 @@ fn absorb_boundaries<F: TowerField>(
     }
 }
 
-fn absorb_lagrange_pins(h: &mut DefaultHasher, pins: &[LagrangePin]) {
-    h.update(&(pins.len() as u64).to_le_bytes());
+fn absorb_fixed_columns<F: TowerField>(h: &mut DefaultHasher, fixed: &[FixedColumn<F>]) {
+    h.update(&(fixed.len() as u64).to_le_bytes());
 
-    for pin in pins {
-        h.update(&(pin.col_idx as u64).to_le_bytes());
+    for fc in fixed {
+        h.update(&(fc.col_idx as u64).to_le_bytes());
 
-        match &pin.point {
-            LagrangePoint::LastRow => h.update(&[0]),
-            LagrangePoint::FirstRow => h.update(&[1]),
-            LagrangePoint::Custom(bits) => {
+        match &fc.shape {
+            FixedShape::LastRow => h.update(&[0]),
+            FixedShape::FirstRow => h.update(&[1]),
+            FixedShape::Custom(bits) => {
                 h.update(&[2]);
                 h.update(&(bits.len() as u64).to_le_bytes());
 
                 for &b in bits {
                     h.update(&[b as u8]);
+                }
+            }
+            FixedShape::Periodic { period, values } => {
+                h.update(&[3]);
+                h.update(&(*period as u64).to_le_bytes());
+                h.update(&(values.len() as u64).to_le_bytes());
+
+                for v in values {
+                    h.update(&v.to_bytes());
+                }
+            }
+            FixedShape::Sparse(entries) => {
+                h.update(&[4]);
+                h.update(&(entries.len() as u64).to_le_bytes());
+
+                for (row, v) in entries {
+                    h.update(&(*row as u64).to_le_bytes());
+                    h.update(&v.to_bytes());
+                }
+            }
+            FixedShape::Dense(values) => {
+                h.update(&[5]);
+                h.update(&(values.len() as u64).to_le_bytes());
+
+                for v in values {
+                    h.update(&v.to_bytes());
                 }
             }
         }

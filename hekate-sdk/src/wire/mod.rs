@@ -28,7 +28,7 @@ pub mod bundle;
 pub mod chiplet;
 pub mod config;
 pub mod expander;
-pub mod lagrange;
+pub mod fixed_column;
 pub mod permutation;
 pub mod proof;
 pub mod trace;

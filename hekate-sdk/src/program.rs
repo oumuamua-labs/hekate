@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
-// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::PermutationCheckSpec;
-use hekate_program::{Air, InlineKernelHint, LagrangePin, Program};
+use hekate_program::{Air, FixedColumn, InlineKernelHint, Program};
 
 use crate::wire::bundle::DeserializedBundle;
 
@@ -46,7 +46,7 @@ pub struct BundleProgram<F: TowerField> {
     inline_chiplet_kernels: Vec<InlineKernelHint>,
     num_columns: usize,
     num_public_inputs: usize,
-    lagrange_pins: Vec<LagrangePin>,
+    fixed_columns: Vec<FixedColumn<F>>,
 }
 
 impl<F: TowerField> BundleProgram<F> {
@@ -63,7 +63,7 @@ impl<F: TowerField> BundleProgram<F> {
             inline_chiplet_kernels: bundle.inline_chiplet_kernels.clone(),
             num_columns: bundle.num_columns,
             num_public_inputs: bundle.num_public_inputs,
-            lagrange_pins: bundle.lagrange_pins.clone(),
+            fixed_columns: bundle.fixed_columns.clone(),
         }
     }
 }
@@ -89,8 +89,8 @@ impl<F: TowerField> Air<F> for BundleProgram<F> {
         self.permutation_checks.clone()
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
-        self.lagrange_pins.clone()
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        self.fixed_columns.clone()
     }
 
     fn virtual_expander(&self) -> Option<&VirtualExpander> {

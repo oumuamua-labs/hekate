@@ -43,7 +43,7 @@ use hekate_program::constraint::{
 };
 use hekate_program::define_columns;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
-use hekate_program::{Air, LagrangePin, LagrangePoint, Program, ProgramInstance, ProgramWitness};
+use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_sdk::{DeserializedBundle, build_bundle, deserialize_bundle, serialize_bundle};
 
 type F = Block128;
@@ -753,6 +753,10 @@ fn assert_bundle_eq<P: Program<F>>(
     }
 }
 
+fn wide(i: u128) -> F {
+    F::from((i << 64) | (i.wrapping_mul(0x9E37_79B9) + 1))
+}
+
 // =================================================================
 // Tests
 // =================================================================
@@ -1133,7 +1137,7 @@ fn clock_waiver_round_trips_through_wire() {
 }
 
 // =================================================================
-// LAGRANGE PIN ROUND-TRIP
+// FIXED COLUMN ROUND-TRIP
 // =================================================================
 
 define_columns! {
@@ -1146,7 +1150,7 @@ define_columns! {
 
 #[derive(Clone)]
 struct PinProgram {
-    pins: Vec<LagrangePin>,
+    pins: Vec<FixedColumn<F>>,
 }
 
 impl Air<F> for PinProgram {
@@ -1158,7 +1162,7 @@ impl Air<F> for PinProgram {
         &[ColumnType::Bit, ColumnType::Bit, ColumnType::Bit]
     }
 
-    fn lagrange_pinned_columns(&self) -> Vec<LagrangePin> {
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
         self.pins.clone()
     }
 
@@ -1169,7 +1173,7 @@ impl Air<F> for PinProgram {
 
 impl Program<F> for PinProgram {}
 
-fn pin_bundle_roundtrip(pins: Vec<LagrangePin>) -> Vec<LagrangePin> {
+fn pin_bundle_roundtrip(pins: Vec<FixedColumn<F>>) -> Vec<FixedColumn<F>> {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
     let layout = PinCols::build_layout();
@@ -1183,47 +1187,47 @@ fn pin_bundle_roundtrip(pins: Vec<LagrangePin>) -> Vec<LagrangePin> {
     let bytes = serialize_bundle(&program, &instance, &witness, &config).unwrap();
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
-    restored.lagrange_pins
+    restored.fixed_columns
 }
 
 #[test]
-fn lagrange_pin_last_row_round_trips() {
-    let pins = vec![LagrangePin::last_row(PinCols::A)];
+fn fixed_column_last_row_round_trips() {
+    let pins = vec![FixedColumn::last_row(PinCols::A)];
     let restored = pin_bundle_roundtrip(pins.clone());
 
     assert_eq!(restored, pins);
 }
 
 #[test]
-fn lagrange_pin_first_row_round_trips() {
-    let pins = vec![LagrangePin::first_row(PinCols::B)];
+fn fixed_column_first_row_round_trips() {
+    let pins = vec![FixedColumn::first_row(PinCols::B)];
     let restored = pin_bundle_roundtrip(pins.clone());
 
     assert_eq!(restored, pins);
 }
 
 #[test]
-fn lagrange_pin_custom_round_trips() {
+fn fixed_column_custom_round_trips() {
     let bits = vec![true, false, true];
-    let pins = vec![LagrangePin::custom(PinCols::C, bits.clone())];
+    let pins = vec![FixedColumn::custom(PinCols::C, bits.clone())];
     let restored = pin_bundle_roundtrip(pins.clone());
 
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].col_idx, PinCols::C);
 
-    match &restored[0].point {
-        LagrangePoint::Custom(b) => assert_eq!(b, &bits),
+    match &restored[0].shape {
+        FixedShape::Custom(b) => assert_eq!(b, &bits),
         other => panic!("expected Custom, got {:?}", other),
     }
 }
 
 #[test]
-fn lagrange_pin_mixed_variants_round_trip_in_order() {
+fn fixed_column_mixed_variants_round_trip_in_order() {
     let bits = vec![false, true, false];
     let pins = vec![
-        LagrangePin::last_row(PinCols::A),
-        LagrangePin::first_row(PinCols::B),
-        LagrangePin::custom(PinCols::C, bits.clone()),
+        FixedColumn::last_row(PinCols::A),
+        FixedColumn::first_row(PinCols::B),
+        FixedColumn::custom(PinCols::C, bits.clone()),
     ];
 
     let restored = pin_bundle_roundtrip(pins.clone());
@@ -1231,9 +1235,36 @@ fn lagrange_pin_mixed_variants_round_trip_in_order() {
 }
 
 #[test]
-fn lagrange_pin_empty_round_trips() {
+fn fixed_column_empty_round_trips() {
     let restored = pin_bundle_roundtrip(Vec::new());
     assert!(restored.is_empty());
+}
+
+#[test]
+fn fixed_column_dense_round_trips() {
+    let cols = vec![FixedColumn::dense(PinCols::A, (0..8).map(wide).collect())];
+    assert_eq!(pin_bundle_roundtrip(cols.clone()), cols);
+}
+
+#[test]
+fn fixed_column_periodic_round_trips() {
+    let cols = vec![FixedColumn::periodic(
+        PinCols::B,
+        4,
+        vec![wide(1), wide(2), wide(3), wide(4)],
+    )];
+
+    assert_eq!(pin_bundle_roundtrip(cols.clone()), cols);
+}
+
+#[test]
+fn fixed_column_sparse_round_trips() {
+    let cols = vec![FixedColumn::sparse(
+        PinCols::C,
+        vec![(0, wide(7)), (3, wide(11)), (7, wide(13))],
+    )];
+
+    assert_eq!(pin_bundle_roundtrip(cols.clone()), cols);
 }
 
 // =================================================================

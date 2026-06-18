@@ -111,18 +111,25 @@ table VirtualExpander {
   entries: [ExpansionEntry];
 }
 
-// ===== Lagrange Pins =====
+// ===== Fixed Columns =====
 
-enum LagrangePointKind: ubyte {
+enum FixedShapeKind: ubyte {
   LastRow = 0,
   FirstRow = 1,
   Custom = 2,
+  Periodic = 3,
+  Sparse = 4,
+  Dense = 5,
 }
 
-table LagrangePin {
+table FixedColumn {
   col_idx: uint32;
-  kind: LagrangePointKind;
+  kind: FixedShapeKind;
   custom_bits: [ubyte];
+  period: uint32;
+  values: [Block128];
+  sparse_rows: [uint64];
+  sparse_values: [Block128];
 }
 
 // ===== Inline Kernel Hints =====
@@ -144,7 +151,7 @@ table ChipletDef {
   boundary_constraints: [BoundaryConstraint];
   permutation_checks: [BusEndpoint];
   virtual_expander: VirtualExpander;
-  lagrange_pins: [LagrangePin];
+  fixed_columns: [FixedColumn];
 }
 
 // ===== Trace Data =====
@@ -199,7 +206,7 @@ table ProgramBundle {
   // Config
   config: Config;
 
-  lagrange_pins: [LagrangePin];
+  fixed_columns: [FixedColumn];
 }
 
 root_type ProgramBundle;
