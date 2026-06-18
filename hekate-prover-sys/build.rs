@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
-// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -81,6 +81,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(path) = env::var_os("HEKATE_PROVER_UNSIGNED_DYLIB") {
+        return link_unsigned(Path::new(&path));
+    }
+
     let manifest_path = Path::new(&env::var("CARGO_MANIFEST_DIR")?).join("artifacts/manifest.toml");
     let manifest_str = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("read manifest at {}: {e}", manifest_path.display()))?;
@@ -124,6 +128,46 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let staged_dir = stage_into_outdir(&cdylib, &target.filename)?;
+
+    println!("cargo:rustc-link-search=native={}", staged_dir.display());
+    println!("cargo:rustc-link-lib=dylib=hekate_prover_cdylib");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", staged_dir.display());
+
+    Ok(())
+}
+
+/// Links a locally built, UNSIGNED cdylib, bypassing
+/// the manifest hash and signature checks. Local
+/// development only, refuse in release builds.
+fn link_unsigned(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        return Err(
+            "HEKATE_PROVER_UNSIGNED_DYLIB is refused in release builds; \
+                    build and sign a manifest for release"
+                .into(),
+        );
+    }
+
+    if !path.is_file() {
+        return Err(format!(
+            "HEKATE_PROVER_UNSIGNED_DYLIB set to {} but that file does not exist",
+            path.display()
+        )
+        .into());
+    }
+
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("HEKATE_PROVER_UNSIGNED_DYLIB filename is not valid UTF-8")?;
+
+    let staged_dir = stage_into_outdir(path, filename)?;
+
+    println!(
+        "cargo:warning=UNSIGNED prover cdylib in use ({}), local development only, \
+         NOT for production.",
+        path.display()
+    );
 
     println!("cargo:rustc-link-search=native={}", staged_dir.display());
     println!("cargo:rustc-link-lib=dylib=hekate_prover_cdylib");
@@ -314,6 +358,7 @@ fn main() {
     println!("cargo:rerun-if-changed=artifacts/manifest.toml");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=HEKATE_PROVER_DYLIB_DIR");
+    println!("cargo:rerun-if-env-changed=HEKATE_PROVER_UNSIGNED_DYLIB");
     println!("cargo:rerun-if-env-changed=HEKATE_PROVER_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=DOCS_RS");
 
