@@ -9,18 +9,26 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation and ML-DSA signature
 verification on a laptop and mobile.
 
+## ⚠️ Security Warning
+
+This crate has not been audited and may contain bugs and security flaws.
+
+USE AT YOUR OWN RISK!
+
 > [!IMPORTANT]  
-> **Hekate Core is now public.** We are currently building the native iOS and Android SDKs to bring ZK
-> proving directly to mobile edge devices.
+> **ZK proving already runs on mobile.**
+> [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed
+> iOS `.xcframework` and Android `.aar` behind a typed Swift / Kotlin API, one `await` per proof, zero ZK
+> terminology across the boundary. Shipping ZK to edge devices? Start there.
 
 > [!WARNING]  
 > **Alpha State.** This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
 > without notice. Do not deploy to mainnet.
 
 > [!NOTE]  
-> **Open Core Model.** The verifier, core SDK, and cryptographic chiplets are open-source. The high-performance prover
-> and recursive engine remain proprietary IP. However, compiled binaries of the prover are provided free of charge with
-> no license restrictions for developers.
+> **Open Core Model.** The verifier, core SDK, and cryptographic chiplets are open-source. The prover and
+> compression engine stay proprietary, shipped as free, unrestricted binaries for macOS (Apple Silicon),
+> Linux (ARM64, glibc), and Android (ARM64).
 
 ---
 
@@ -36,6 +44,26 @@ That floor kills client-side proving. No mobile device, no browser, no edge node
 Hekate eliminates the floor. The prover streams through the trace, folds in-place, and discards intermediate state. Peak
 memory is bounded per-table, not per-computation. A 2^24 Keccak proof runs in 29.7 GB on a consumer laptop where Binius
 and Plonky3 crash or thrash.
+
+---
+
+## The Hekate Ecosystem
+
+Hekate is not one crate. The prover is the engine; the math core, hardware chiplets, mobile toolchain,
+and fuzzer ship as independent crates you compose as needed.
+
+| Crate                                                                                      | Role                                                                                                        |
+|:-------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------------------|
+| [`hekate-math`](https://github.com/oumuamua-labs/hekate-math)                              | Binary tower field arithmetic, constant-time, PMULL / PCLMULQDQ. The mathematical core.                     |
+| [`hekate-prover-sys`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-prover-sys) | Open FFI shim. Links the signed prover cdylib over a stable C ABI; the only crate that can call the prover. |
+| [`hekate-keccak`](https://github.com/oumuamua-labs/hekate-keccak)                          | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~16x memory savings.                            |
+| [`hekate-aes`](https://github.com/oumuamua-labs/hekate-aes)                                | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
+| [`hekate-pqc`](https://github.com/oumuamua-labs/hekate-pqc)                                | ML-KEM decapsulation and ML-DSA verification (FIPS 203 / 204), with NTT, basemul, norm-check.               |
+| [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile)                          | Wraps a Rust prover into a signed iOS `.xcframework` / Android `.aar` with a typed Swift / Kotlin API.      |
+| [`zk-scribble`](https://github.com/yoozzeek/zk-scribble)                                   | Community trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.         |
+
+The in-workspace crates: `hekate-core`, `hekate-crypto`, `hekate-program`, `hekate-verifier`,
+`hekate-sdk` are shown in the stack above.
 
 ---
 
@@ -55,31 +83,6 @@ only (raw trace never hashed, true ZK).
 
 **Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) decapsulation, AES-128/256,
 all proven natively in binary fields without bit-decomposition overhead.
-
----
-
-## Architecture at a Glance
-
-```
-       you write here
-            │
-   ┌────────▼────────┐
-   │   hekate-sdk    │   author API, serialization, preflight
-   │ hekate-program  │   AIR + constraint DSL + chiplet composition
-   │ hekate-chiplets │   Keccak, AES, RAM, ROM, NTT, ML-KEM, ML-DSA
-   └────────┬────────┘
-            │
-   ┌────────▼────────┐
-   │   hekate-core   │   trace, transcript, Merkle, polys
-   │  hekate-crypto  │   Blake3, SHA3, SHA-256
-   │   hekate-math   │   tower fields (external, sealed)
-   └────────┬────────┘
-            │
-   ┌────────┴────────┐
-   ▼                 ▼
-hekate-prover   hekate-verifier
-(closed)        (open)
-```
 
 ---
 
@@ -195,17 +198,50 @@ fn generate_traces(num_rows: usize) -> errors::Result<(ColumnTrace, ColumnTrace,
 }
 ```
 
-Wiring it together for the prover:
-
-```rust
-let (cpu, arith, fib_n) = generate_traces(num_rows) ?;
-let instance = ProgramInstance::new(num_rows, vec![F::from(fib_n as u128)]);
-let witness  = ProgramWitness::new(cpu).with_chiplets(vec![arith]);
-```
-
 The chiplet enforces 32-bit ADD with carry, boolean-checks its own selectors, and zero-pins shadow
 columns when its row is idle. The CPU AIR only needs the two transition constraints above, the
 LogUp bus guarantees `val_res = a + b` for every row where `s = 1`.
+
+Wire up the program, instance, and witness, then prove with `hekate-prover-sys` and verify with
+`hekate-verifier`. The transcript label, `Config`, and matrix seed must match across both sides, the
+driver builds one `config` and reuses it. `verify` returns `true` only if every Sumcheck round, the
+LogUp bus sums, and the evaluation openings hold.
+
+```rust
+fn run(num_rows: usize) -> errors::Result<bool> {
+    let (cpu, arith, fib_n) = generate_traces(num_rows)?;
+
+    let program = FibProgram { num_rows };
+    let instance = ProgramInstance::new(num_rows, vec![F::from(fib_n as u128)]);
+    let witness = ProgramWitness::new(cpu).with_chiplets(vec![arith]);
+
+    let mut config = Config::default();
+    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
+
+    let mut blinding_seed = [0u8; 32];
+    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+
+    let proof = prove(
+        b"Fibonacci",
+        &program,
+        &instance,
+        &witness,
+        &config,
+        blinding_seed,
+        None,
+    )?;
+
+    let mut transcript = Transcript::<DefaultHasher>::new(b"Fibonacci");
+
+    HekateVerifier::<F, DefaultHasher>::verify(
+        &program,
+        &instance,
+        &proof,
+        &mut transcript,
+        &config,
+    )
+}
+```
 
 ---
 
@@ -214,12 +250,16 @@ LogUp bus guarantees `val_res = a + b` for every row where `s = 1`.
 End-to-end programs that prove and verify with `hekate-prover-sys` and `hekate-verifier`. Each file is a self-contained
 binary you can run with `cargo run --release --example <name>`.
 
-- [ML-DSA signature verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs) (FIPS 204; 44 / 65 / 87 levels)
+- [ML-DSA signature verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs) (FIPS 204;
+  44 / 65 / 87 levels)
 - [ML-KEM-768 decapsulation](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem.rs) (FIPS 203)
 - [AES-128 / AES-256 block proving](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs) (FIPS 197)
-- [Keccak inline kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak_inline.rs) (CPU AIR with embedded f1600 permutation)
-- [32-bit integer arithmetic](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/arith.rs) (add / sub / mul via `IntArithmeticChiplet`)
-- [RAM read/write proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/ram.rs) (offline-memory consistency via `RamChiplet`)
+- [Keccak inline kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak_inline.rs) (CPU AIR
+  with embedded f1600 permutation)
+- [32-bit integer arithmetic](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/arith.rs) (add / sub /
+  mul via `IntArithmeticChiplet`)
+- [RAM read/write proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/ram.rs) (offline-memory
+  consistency via `RamChiplet`)
 
 ---
 
@@ -306,19 +346,6 @@ explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns.
   Fiat-Shamir binding
 
 ---
-
-## Contact
-
-[info@oumuamua.dev](mailto:info@oumuamua.dev)
-
-## Security & Audits
-
-> [!WARNING]
-> This implementation is currently UNAUDITED.
->
-> It is provided "AS IS" with ABSOLUTELY NO WARRANTY under the terms
-> of the Apache 2.0 License. The authors assume zero liability for
-> any damages arising from its use in production environments.
 
 ## License
 
