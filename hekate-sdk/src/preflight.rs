@@ -212,6 +212,7 @@ fn evaluate_air_row<F, P, T>(
     trace: &T,
     table: TableId,
     ast: &ConstraintAst<F>,
+    consts: &[Flat<F>],
     pins: &[FixedColumn<F>],
     num_virtual_cols: usize,
     has_virtual_expansion: bool,
@@ -275,6 +276,7 @@ where
     }
 
     ast.evaluate_into(
+        consts,
         &scratch.current_row,
         &scratch.next_row,
         &mut scratch.eval_buf,
@@ -328,6 +330,7 @@ where
     };
 
     let ast_arena_len = ast.arena.len();
+    let consts = ast.precompute_hardware_consts();
 
     #[cfg(not(feature = "parallel"))]
     {
@@ -341,6 +344,7 @@ where
                 trace,
                 table,
                 &ast,
+                &consts,
                 &pins,
                 num_virtual_cols,
                 has_virtual_expansion,
@@ -373,6 +377,7 @@ where
                         trace,
                         table,
                         &ast,
+                        &consts,
                         &pins,
                         num_virtual_cols,
                         has_virtual_expansion,
