@@ -46,8 +46,10 @@ use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use pqcrypto_mlkem::mlkem768;
-use pqcrypto_traits::kem::{Ciphertext as _, SecretKey as _, SharedSecret as _};
+#[allow(deprecated)]
+use ml_kem::ExpandedKeyEncoding;
+use ml_kem::kem::Encapsulate;
+use ml_kem::{DecapsulationKey, MlKem768};
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 
@@ -122,34 +124,6 @@ impl Program<F> for MlKemDecapsProgram {
 fn main() {
     common::init("ML-KEM-768 Decapsulation");
 
-    // Trace sizes for ML-KEM-768 decapsulation:
-    //
-    // Forward NTTs:
-    // 6 × 1024 = 6144 butterfly ops
-    //
-    // INTT (GS→CT decomp):
-    // 5 × (2048+256) = 11520 ops
-    //
-    // Basemul:
-    // 15 × 256 = 3840 mul-only ops
-    //
-    // Total NTT ops:
-    // ~21504 → 32768
-    //
-    // Keccak:
-    // ~63 perms × 25 rows = 1575 → 2048
-    //
-    // Ctrl:
-    // NTT + Keccak dispatches → 32768
-    //
-    // Twiddle:
-    // 1 entry per NTT op → 32768
-    //
-    // Basemul:
-    // 15 poly muls × 256 ops = 3840 → 4096
-    //
-    // RAM:
-    // ~10 polys × 256 × 2 (write+read) = ~5120 → 8192
     let params = MlKemParams {
         ctrl_rows: 1 << 16,    // 65536 (NTT + Keccak + basemul + RAM dispatch)
         keccak_rows: 1 << 11,  // 2048
@@ -162,18 +136,29 @@ fn main() {
     let cpu_num_rows: usize = 1 << 10; // 1024
 
     // Phase 1:
-    // NIST reference keygen
-    let (nist_pk, nist_sk) = common::phase("Key Generation (NIST)", mlkem768::keypair);
+    // NIST reference keygen (RustCrypto ml-kem)
+    let dk = common::phase("Key Generation (NIST)", || {
+        let mut seed = [0u8; 64];
+        OsRng.try_fill_bytes(&mut seed).unwrap();
+
+        DecapsulationKey::<MlKem768>::from_seed(seed.into())
+    });
 
     // Phase 2:
     // NIST reference encapsulation
-    let (nist_ss, nist_ct) =
-        common::phase("Encapsulation (NIST)", || mlkem768::encapsulate(&nist_pk));
+    let (ct_enc, ss_enc) = common::phase("Encapsulation (NIST)", || {
+        dk.encapsulation_key().encapsulate()
+    });
 
-    let ct = nist_ct.as_bytes();
-    let sk = nist_sk.as_bytes();
+    // The chiplet consumes the expanded FIPS 203
+    // decapsulation key, not the 64-byte seed.
+    #[allow(deprecated)]
+    let dk_expanded = dk.to_expanded_bytes();
 
-    let expected_ss = nist_ss.as_bytes();
+    let ct = ct_enc.as_slice();
+    let sk = dk_expanded.as_slice();
+
+    let expected_ss = ss_enc.as_slice();
 
     println!("  Ciphertext:     {} bytes", ct.len());
 

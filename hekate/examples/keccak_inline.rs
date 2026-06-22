@@ -234,8 +234,8 @@ fn generate_combined_trace(
         assert!(row + 25 <= num_rows, "CPU trace overflow");
 
         // Input row
-        for i in 0..25 {
-            tb.set_b64(i, row, input[i])?;
+        for (i, &val) in input.iter().enumerate() {
+            tb.set_b64(i, row, val)?;
         }
 
         tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)?;
@@ -243,8 +243,8 @@ fn generate_combined_trace(
         row += 24;
 
         // Output row
-        for i in 0..25 {
-            tb.set_b64(i, row, output[i])?;
+        for (i, &val) in output.iter().enumerate() {
+            tb.set_b64(i, row, val)?;
         }
 
         tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)?;
