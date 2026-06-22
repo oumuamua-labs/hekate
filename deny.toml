@@ -9,10 +9,6 @@ ignore = [
     # development after a doxxing incident;
     # no CVE, no upgrade path.
     { id = "RUSTSEC-2025-0141", reason = "dev-only proof-size example; upstream archived, no security vulnerability" },
-    # paste 1.0.15, transitive dep of pqcrypto-mldsa.
-    # Repo archived; no CVE, no upgrade path
-    # until pqcrypto migrates.
-    { id = "RUSTSEC-2024-0436", reason = "transitive via pqcrypto-mldsa; upstream archived, no security vulnerability" },
 ]
 
 [licenses]

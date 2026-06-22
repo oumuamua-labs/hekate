@@ -66,9 +66,8 @@ bincode = { version = "2.0.1", features = ["serde", "alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.9"
 keccak = "0.2"
-pqcrypto-mlkem = "0.1"
-pqcrypto-mldsa = "0.1"
-pqcrypto-traits = "0.3"
+ml-kem = { version = "0.3", features = ["getrandom"] }
+ml-dsa = "0.1"
 
 [[bench]]
 name = "rom"

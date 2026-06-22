@@ -19,10 +19,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::{Signature as EdSignature, VerifyingKey as EdKey};
-use pqcrypto_mldsa::mldsa65;
-use pqcrypto_traits::sign::{
-    DetachedSignature as _, PublicKey as _, VerificationError as MlVerifyErr,
-};
+use ml_dsa::signature::Verifier as _;
+use ml_dsa::{EncodedVerifyingKey, MlDsa65, Signature, VerifyingKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use spki::{SubjectPublicKeyInfoOwned, der::Decode};
@@ -311,18 +309,18 @@ fn verify_mldsa65(
     pubkey_pem: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let raw_pub = spki_subject_public_key(pubkey_pem)?;
-    let key = mldsa65::PublicKey::from_bytes(&raw_pub)
-        .map_err(|e| format!("ML-DSA-65 pubkey from raw bytes: {e:?}"))?;
+    let enc_vk = <&EncodedVerifyingKey<MlDsa65>>::try_from(raw_pub.as_slice())
+        .map_err(|_| format!("ML-DSA-65 pubkey wrong length: {} bytes", raw_pub.len()))?;
+    let key = VerifyingKey::<MlDsa65>::decode(enc_vk);
 
     let sig_bytes = B64
         .decode(sig_b64.trim())
         .map_err(|e| format!("ML-DSA-65 sig base64: {e}"))?;
-    let sig = mldsa65::DetachedSignature::from_bytes(&sig_bytes)
-        .map_err(|e| format!("ML-DSA-65 sig from bytes: {e:?}"))?;
+    let signature = Signature::<MlDsa65>::try_from(sig_bytes.as_slice())
+        .map_err(|_| format!("ML-DSA-65 sig wrong length: {} bytes", sig_bytes.len()))?;
 
-    mldsa65::verify_detached_signature(&sig, msg, &key).map_err(|e: MlVerifyErr| {
-        Box::<dyn std::error::Error>::from(format!("ML-DSA-65 verification failed: {e:?}"))
-    })?;
+    key.verify(msg, &signature)
+        .map_err(|e| format!("ML-DSA-65 verification failed: {e}"))?;
 
     Ok(())
 }

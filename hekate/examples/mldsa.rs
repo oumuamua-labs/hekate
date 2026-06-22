@@ -48,8 +48,8 @@ use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use pqcrypto_mldsa::{mldsa44, mldsa65, mldsa87};
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+use ml_dsa::signature::{Keypair, Signer};
+use ml_dsa::{B32, MlDsa44, MlDsa65, MlDsa87, SigningKey};
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 
@@ -249,43 +249,52 @@ fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], 
 
 fn main() {
     let level_arg = std::env::args().nth(1).unwrap_or_else(|| "65".to_string());
+
+    let mut seed = [0u8; 32];
+    OsRng.try_fill_bytes(&mut seed).unwrap();
+
+    let xi = B32::from(seed);
+
     match level_arg.as_str() {
         "44" => {
-            let (pk, sk) = mldsa44::keypair();
+            let key = SigningKey::<MlDsa44>::from_seed(&xi);
             let msg = b"Hekate ML-DSA-44 verification example";
-            let sig = mldsa44::detached_sign(msg, &sk);
+            let pk = key.verifying_key().encode();
+            let sig = key.sign(msg).encode();
 
             run_mldsa(
                 "ML-DSA-44 Signature Verification",
                 MlDsaLevel::MLDSA_44,
-                pk.as_bytes(),
-                sig.as_bytes(),
+                &pk,
+                &sig,
                 msg,
             );
         }
         "65" => {
-            let (pk, sk) = mldsa65::keypair();
+            let key = SigningKey::<MlDsa65>::from_seed(&xi);
             let msg = b"Hekate ML-DSA-65 verification example";
-            let sig = mldsa65::detached_sign(msg, &sk);
+            let pk = key.verifying_key().encode();
+            let sig = key.sign(msg).encode();
 
             run_mldsa(
                 "ML-DSA-65 Signature Verification",
                 MlDsaLevel::MLDSA_65,
-                pk.as_bytes(),
-                sig.as_bytes(),
+                &pk,
+                &sig,
                 msg,
             );
         }
         "87" => {
-            let (pk, sk) = mldsa87::keypair();
+            let key = SigningKey::<MlDsa87>::from_seed(&xi);
             let msg = b"Hekate ML-DSA-87 verification example";
-            let sig = mldsa87::detached_sign(msg, &sk);
+            let pk = key.verifying_key().encode();
+            let sig = key.sign(msg).encode();
 
             run_mldsa(
                 "ML-DSA-87 Signature Verification",
                 MlDsaLevel::MLDSA_87,
-                pk.as_bytes(),
-                sig.as_bytes(),
+                &pk,
+                &sig,
                 msg,
             );
         }
