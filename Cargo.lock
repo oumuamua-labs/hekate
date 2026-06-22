@@ -736,6 +736,7 @@ version = "0.28.0"
 dependencies = [
  "bincode",
  "criterion",
+ "dhat",
  "hekate-aes",
  "hekate-core",
  "hekate-crypto",
@@ -904,6 +905,7 @@ dependencies = [
  "hekate-crypto",
  "hekate-math",
  "hekate-program",
+ "rayon",
  "tracing",
 ]
 

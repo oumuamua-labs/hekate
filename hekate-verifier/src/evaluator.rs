@@ -32,15 +32,30 @@ use hekate_math::matrix::ByteSparseMatrix;
 use hekate_math::{Flat, HardwareField, PackableField};
 use tracing::{debug, instrument, warn};
 
+#[cfg(feature = "parallel")]
+const PARALLEL_PROXIMITY_THRESHOLD: usize = 1 << 18;
+
+pub trait VirtualRowParser<F: HardwareField>: Sync {
+    fn parse(&self, row_bytes: &[u8], scratch: &mut RowParseScratch<F>, out: &mut Vec<Flat<F>>);
+}
+
 pub struct EvaluatorVerifier<F, H: Hasher> {
     _marker: PhantomData<(F, H)>,
 }
 
-pub struct EvalVerifyContext<'a, F, P: FnMut(&[u8], &mut Vec<Flat<F>>)> {
+#[derive(Default)]
+pub struct RowParseScratch<F: HardwareField> {
+    pub base_bytes: Vec<u8>,
+    pub shift_bytes: Vec<u8>,
+    pub virt_base: Vec<Flat<F>>,
+    pub virt_shift: Vec<Flat<F>>,
+}
+
+pub struct EvalVerifyContext<'a, F: HardwareField, RP: VirtualRowParser<F>> {
     pub points: Vec<&'a [Flat<F>]>,
     pub claimed_values_per_point: Vec<&'a [Flat<F>]>,
     pub num_vars: usize,
-    pub row_parser: P,
+    pub parser: &'a RP,
 }
 
 impl<F, H: Hasher> EvaluatorVerifier<F, H>
@@ -74,7 +89,7 @@ where
     ///    to a valid codeword.
     /// 5. **Virtual Unpacking & Proximity Check:**
     ///    Parses the raw physical bytes from the LDT leaves
-    ///    using the layout-aware `row_parser`. The physical
+    ///    using the layout-aware `VirtualRowParser`. The physical
     ///    bytes are expanded into virtual field elements,
     ///    linearly combined using interleaved `eta`
     ///    coefficients, and checked against `q_encoded`.
@@ -96,15 +111,15 @@ where
     /// Verifier asserts:           Result == q_encoded[2]
     /// ```
     #[instrument(skip_all, name = "Evaluator::verify")]
-    pub fn verify<P>(
+    pub fn verify<RP>(
         commitment: &BrakedownCommitment,
         proof: &EvalBatchProof<F>,
         transcript: &mut Transcript<H>,
-        mut ctx: EvalVerifyContext<'_, F, P>,
+        ctx: EvalVerifyContext<'_, F, RP>,
         config: &Config,
     ) -> errors::Result<bool>
     where
-        P: FnMut(&[u8], &mut Vec<Flat<F>>),
+        RP: VirtualRowParser<F>,
     {
         let points = ctx.points;
         let claimed_values_per_point = ctx.claimed_values_per_point;
@@ -197,12 +212,13 @@ where
         // Expander Matrix. Because the matrix is
         // binary, this algebraically mirrors the
         // Prover's actions natively.
-        let matrix = ByteSparseMatrix::generate_random(
-            encoded_width,
-            encoded_width,
-            config.expansion_degree,
-            config.matrix_seed,
-        );
+        let matrix =
+            cached_expander_matrix(encoded_width, config.expansion_degree, config.matrix_seed);
+
+        if q.len() != encoded_width {
+            warn!("tensor_q length mismatch");
+            return Ok(false);
+        }
 
         let q_flat = q
             .iter()
@@ -210,11 +226,6 @@ where
             .map(|value| value.to_hardware())
             .collect::<Vec<_>>();
         let q_encoded = matrix.spmv(q_flat.as_slice());
-
-        if q.len() != encoded_width || q_encoded.len() != encoded_width {
-            warn!("tensor_q length mismatch");
-            return Ok(false);
-        }
 
         let r_col_low = &r_row[..split_vars];
         let tensor_col = TensorProduct::<F>::new(r_col_low.to_vec());
@@ -316,9 +327,13 @@ where
             eta_pow *= eta;
         }
 
-        let mut virtual_row = Vec::with_capacity(num_cols);
+        let parser = ctx.parser;
 
-        for (q_idx, &col_idx) in random_indices.iter().enumerate() {
+        let check_query = |q_idx: usize,
+                           col_idx: usize,
+                           scratch: &mut RowParseScratch<F>,
+                           virtual_row: &mut Vec<Flat<F>>|
+         -> errors::Result<bool> {
             // Process LDT Openings:
             // Because Base and Shifted columns are
             // interleaved during matrix encoding, one
@@ -336,11 +351,11 @@ where
                 virtual_row.clear();
 
                 // Virtual Unpacking:
-                // The row_parser will slice the physical bytes
-                // using the strict physical layout and then
-                // invoke the parse_virtual_row to expand them
-                // into field elements.
-                (ctx.row_parser)(row_data, &mut virtual_row);
+                // The parser slices the physical bytes
+                // using the strict physical layout and
+                // then invokes parse_virtual_row to
+                // expand them into field elements.
+                parser.parse(row_data, scratch, virtual_row);
 
                 // SAFETY
                 if virtual_row.len() != num_cols {
@@ -366,12 +381,129 @@ where
             }
 
             // Compare against the encoded q vector
-            if calculated_q_val != q_encoded[col_idx] {
+            let matched = calculated_q_val == q_encoded[col_idx];
+            if !matched {
                 warn!("TensorPCS proximity check mismatch for column {}", col_idx);
-                return Ok(false);
             }
+
+            Ok(matched)
+        };
+
+        let run_sequential = |indices: &[usize]| -> errors::Result<bool> {
+            let mut scratch = RowParseScratch::<F>::default();
+            let mut virtual_row = Vec::with_capacity(num_cols);
+
+            for (q_idx, &col_idx) in indices.iter().enumerate() {
+                if !check_query(q_idx, col_idx, &mut scratch, &mut virtual_row)? {
+                    return Ok(false);
+                }
+            }
+
+            Ok(true)
+        };
+
+        #[cfg(feature = "parallel")]
+        let all_matched = {
+            let proximity_work = config.num_queries * grid_rows * num_cols;
+
+            if proximity_work >= PARALLEL_PROXIMITY_THRESHOLD {
+                use rayon::prelude::*;
+
+                random_indices
+                    .par_iter()
+                    .enumerate()
+                    .map_init(
+                        || {
+                            (
+                                RowParseScratch::<F>::default(),
+                                Vec::<Flat<F>>::with_capacity(num_cols),
+                            )
+                        },
+                        |(scratch, virtual_row), (q_idx, &col_idx)| {
+                            check_query(q_idx, col_idx, scratch, virtual_row)
+                        },
+                    )
+                    .try_reduce(|| true, |a, b| Ok(a && b))?
+            } else {
+                run_sequential(&random_indices)?
+            }
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let all_matched = run_sequential(&random_indices)?;
+
+        if !all_matched {
+            return Ok(false);
         }
 
         Ok(true)
+    }
+}
+
+#[cfg(feature = "std")]
+fn cached_expander_matrix(
+    encoded_width: usize,
+    degree: usize,
+    seed: [u8; 32],
+) -> alloc::sync::Arc<ByteSparseMatrix> {
+    use alloc::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{OnceLock, RwLock};
+
+    const MAX_CACHED_MATRICES: usize = 128;
+
+    type Cache = RwLock<HashMap<(usize, usize, [u8; 32]), Arc<ByteSparseMatrix>>>;
+
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let key = (encoded_width, degree, seed);
+
+    if let Some(matrix) = cache.read().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Arc::clone(matrix);
+    }
+
+    let matrix = Arc::new(ByteSparseMatrix::generate_random(
+        encoded_width,
+        encoded_width,
+        degree,
+        seed,
+    ));
+
+    let mut guard = cache.write().unwrap_or_else(|e| e.into_inner());
+
+    if guard.len() < MAX_CACHED_MATRICES || guard.contains_key(&key) {
+        guard.insert(key, Arc::clone(&matrix));
+    } else {
+        debug!(
+            encoded_width,
+            degree, "expander-matrix cache full; regenerating without caching"
+        );
+    }
+
+    matrix
+}
+
+#[cfg(not(feature = "std"))]
+fn cached_expander_matrix(encoded_width: usize, degree: usize, seed: [u8; 32]) -> ByteSparseMatrix {
+    ByteSparseMatrix::generate_random(encoded_width, encoded_width, degree, seed)
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::cached_expander_matrix;
+    use hekate_math::matrix::ByteSparseMatrix;
+
+    #[test]
+    fn cached_matrix_matches_fresh() {
+        let seed = [7u8; 32];
+
+        for &(width, degree) in &[(256usize, 16usize), (4296, 16), (256, 16)] {
+            let cached = cached_expander_matrix(width, degree, seed);
+            let fresh = ByteSparseMatrix::generate_random(width, width, degree, seed);
+
+            assert_eq!(cached.weights(), fresh.weights());
+            assert_eq!(cached.col_indices(), fresh.col_indices());
+        }
     }
 }

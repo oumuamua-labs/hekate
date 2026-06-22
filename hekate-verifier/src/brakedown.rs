@@ -89,27 +89,28 @@ where
             random_indices.push((rng_val % (encoded_width as u64)) as usize);
         }
 
-        let mut opened_consumed = 0;
-        for (ldt_proof_idx, &col_idx) in random_indices.iter().enumerate() {
-            // Verify Column Commitment
-            // One leaf contains both Base
-            // and Shifted encodings.
-            verify_single_column::<F, H>(
-                &commitment.root,
-                col_idx,
-                proof,
-                opened_consumed,
-                ldt_proof_idx,
-            )?;
-
-            opened_consumed += 1;
-        }
-
-        if opened_consumed != proof.opened_columns.len() {
+        if proof.opened_columns.len() != num_queries {
             return Err(errors::Error::Protocol {
                 protocol: "brakedown",
-                message: "unused opened columns detected",
+                message: "opened column count does not match num_queries",
             });
+        }
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+
+            random_indices
+                .par_iter()
+                .enumerate()
+                .try_for_each(|(idx, &col_idx)| {
+                    verify_single_column::<F, H>(&commitment.root, col_idx, proof, idx, idx)
+                })?;
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        for (idx, &col_idx) in random_indices.iter().enumerate() {
+            verify_single_column::<F, H>(&commitment.root, col_idx, proof, idx, idx)?;
         }
 
         Ok(&proof.opened_columns)

@@ -26,7 +26,7 @@ mod sumcheck;
 
 pub use sumcheck::verify;
 
-use crate::evaluator::{EvalVerifyContext, EvaluatorVerifier};
+use crate::evaluator::{EvalVerifyContext, EvaluatorVerifier, RowParseScratch, VirtualRowParser};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
@@ -70,7 +70,7 @@ where
     /// 6. Verify the main eval at `r_final`.
     /// 7. Check that LogUp `claimed_sum` totals cancel per `bus_id`.
     #[instrument(skip_all, name = "Hekate::verify")]
-    pub fn verify<P: Program<F>>(
+    pub fn verify<P: Program<F> + Sync>(
         program: &P,
         instance: &ProgramInstance<F>,
         proof: &InnerProof<F>,
@@ -145,8 +145,9 @@ where
             });
         }
 
-        let trace_values = canonical_slice_to_flat(&combined_vals[0..expected_trace_len]);
-        let trace_values_next = canonical_slice_to_flat(&combined_vals[expected_trace_len..]);
+        let combined_hw = canonical_slice_to_flat(combined_vals);
+        let trace_values = &combined_hw[0..expected_trace_len];
+        let trace_values_next = &combined_hw[expected_trace_len..];
 
         let main_perm = program.permutation_checks();
         let chiplet_defs_for_check = program.chiplet_defs()?;
@@ -243,8 +244,7 @@ where
         Self::verify_chiplet_commitments_only(program, proof, transcript)?;
 
         // =========================================================
-        // PHASE 3: DRAW GLOBAL γ, β,
-        // AND r_bus PER LOOKUP BUS
+        // PHASE 3: DRAW GLOBAL γ, β, AND r_bus PER LOOKUP BUS
         // =========================================================
         let gamma = transcript.challenge_field::<F>(b"bus_gamma")?.to_hardware();
         let beta = transcript.challenge_field::<F>(b"bus_beta")?.to_hardware();
@@ -275,8 +275,8 @@ where
             transcript,
             config,
             trace_width,
-            &trace_values,
-            &trace_values_next,
+            trace_values,
+            trace_values_next,
             &main_bus_specs,
             &proof.main_logup_aux,
             gamma,
@@ -309,24 +309,20 @@ where
             config,
             num_vars,
             &r_final,
-            &combined_vals
-                .iter()
-                .copied()
-                .map(|v| v.to_hardware())
-                .collect::<Vec<_>>(),
+            &combined_hw,
         )? {
             warn!("Main trace evaluation verification failed");
             return Ok(false);
         }
 
         // =========================================================
-        // PHASE 7: CROSS-BUS MATCHING
-        // (Σ claimed_sum = 0 per bus_id)
+        // PHASE 7: CROSS-BUS MATCHING (Σ claimed_sum = 0 per bus_id)
         // =========================================================
         let mut endpoints: Vec<(String, F)> = Vec::new();
         for (bus_id, claim) in &proof.main_logup_aux.claimed_sums {
             endpoints.push((bus_id.clone(), *claim));
         }
+
         for aux in &proof.chiplet_logup_aux {
             for (bus_id, claim) in &aux.claimed_sums {
                 endpoints.push((bus_id.clone(), *claim));
@@ -439,8 +435,9 @@ where
                 });
             }
 
-            let c_trace_values = canonical_slice_to_flat(&c_combined[0..c_trace_width]);
-            let c_trace_values_next = canonical_slice_to_flat(&c_combined[c_trace_width..]);
+            let c_combined_hw = canonical_slice_to_flat(c_combined);
+            let c_trace_values = &c_combined_hw[0..c_trace_width];
+            let c_trace_values_next = &c_combined_hw[c_trace_width..];
 
             let c_instance = ProgramInstance::new(c_num_rows, vec![]);
             let c_bus_specs = def.permutation_checks.clone();
@@ -452,8 +449,8 @@ where
                 transcript,
                 config,
                 c_num_cols,
-                &c_trace_values,
-                &c_trace_values_next,
+                c_trace_values,
+                c_trace_values_next,
                 &c_bus_specs,
                 c_logup_aux,
                 gamma,
@@ -478,12 +475,6 @@ where
                 });
             }
 
-            let combined_hw: Vec<Flat<F>> = c_combined
-                .iter()
-                .copied()
-                .map(|v| v.to_hardware())
-                .collect();
-
             if !Self::verify_eval_at_r_final(
                 def,
                 c_comm,
@@ -492,7 +483,7 @@ where
                 config,
                 c_num_vars,
                 &r_final,
-                &combined_hw,
+                &c_combined_hw,
             )? {
                 warn!(
                     chiplet_idx = c_idx,
@@ -519,7 +510,7 @@ where
     /// prover's prove_eval_at_r_final.
     #[instrument(skip_all, name = "verify_eval_at_r_final")]
     #[allow(clippy::too_many_arguments)]
-    fn verify_eval_at_r_final<A: Air<F>>(
+    fn verify_eval_at_r_final<A: Air<F> + Sync>(
         air: &A,
         commitment: &hekate_core::proofs::BrakedownCommitment,
         eval_proof: &hekate_core::proofs::EvalBatchProof<F>,
@@ -541,65 +532,19 @@ where
         // B128 base + shift per blinding column.
         expected_row_bytes += blinding_factor * 16 * 2;
 
-        let mut base_bytes: Vec<u8> = Vec::with_capacity(512);
-        let mut shift_bytes: Vec<u8> = Vec::with_capacity(512);
-        let mut virt_base: Vec<Flat<F>> = Vec::with_capacity(layout.len());
-        let mut virt_shift: Vec<Flat<F>> = Vec::with_capacity(layout.len());
-
-        let mut row_parser = |row_bytes: &[u8], buf: &mut Vec<Flat<F>>| {
-            if row_bytes.len() < expected_row_bytes {
-                return;
-            }
-
-            base_bytes.clear();
-            shift_bytes.clear();
-            virt_base.clear();
-            virt_shift.clear();
-
-            let mut ptr = 0;
-
-            // De-interleave Base + Shifted physical bytes.
-            for ct in &layout {
-                let size = ct.byte_size();
-                base_bytes.extend_from_slice(&row_bytes[ptr..ptr + size]);
-
-                ptr += size;
-
-                shift_bytes.extend_from_slice(&row_bytes[ptr..ptr + size]);
-
-                ptr += size;
-            }
-
-            // Virtual unpack via the AIR's row parser.
-            air.parse_virtual_row(&base_bytes, &mut virt_base);
-            air.parse_virtual_row(&shift_bytes, &mut virt_shift);
-
-            // Re-interleave virtual columns:
-            // [V0_base, V0_shift, V1_base, V1_shift, ...].
-            for i in 0..virt_base.len() {
-                buf.push(virt_base[i]);
-                buf.push(virt_shift[i]);
-            }
-
-            // Append ZK Noise (always B128).
-            for _ in 0..blinding_factor {
-                let v_base = ColumnType::B128.parse_from_bytes::<F>(&row_bytes[ptr..ptr + 16]);
-                buf.push(v_base);
-
-                ptr += 16;
-
-                let v_shift = ColumnType::B128.parse_from_bytes::<F>(&row_bytes[ptr..ptr + 16]);
-                buf.push(v_shift);
-
-                ptr += 16;
-            }
+        let parser = AirRowParser {
+            air,
+            layout: &layout,
+            blinding_factor,
+            expected_row_bytes,
+            _marker: PhantomData,
         };
 
         let ctx = EvalVerifyContext {
             points: vec![r_final],
             claimed_values_per_point: vec![claimed_values],
             num_vars,
-            row_parser: &mut row_parser,
+            parser: &parser,
         };
 
         EvaluatorVerifier::<F, H>::verify(commitment, eval_proof, transcript, ctx, config)
@@ -1012,6 +957,75 @@ where
             .into_iter()
             .map(|(id, v)| (id, v.into_iter().map(|x| x.to_hardware()).collect()))
             .collect())
+    }
+}
+
+struct AirRowParser<'a, F, A> {
+    air: &'a A,
+    layout: &'a [ColumnType],
+    blinding_factor: usize,
+    expected_row_bytes: usize,
+    _marker: PhantomData<F>,
+}
+
+impl<F, A> VirtualRowParser<F> for AirRowParser<'_, F, A>
+where
+    F: HardwareField + PackableField + TraceCompatibleField,
+    A: Air<F> + Sync,
+{
+    fn parse(&self, row_bytes: &[u8], scratch: &mut RowParseScratch<F>, out: &mut Vec<Flat<F>>) {
+        if row_bytes.len() < self.expected_row_bytes {
+            return;
+        }
+
+        scratch.base_bytes.clear();
+        scratch.shift_bytes.clear();
+        scratch.virt_base.clear();
+        scratch.virt_shift.clear();
+
+        let mut ptr = 0;
+
+        // De-interleave Base + Shifted physical bytes
+        for ct in self.layout {
+            let size = ct.byte_size();
+            scratch
+                .base_bytes
+                .extend_from_slice(&row_bytes[ptr..ptr + size]);
+
+            ptr += size;
+
+            scratch
+                .shift_bytes
+                .extend_from_slice(&row_bytes[ptr..ptr + size]);
+
+            ptr += size;
+        }
+
+        // Virtual unpack via the AIR's row parser
+        self.air
+            .parse_virtual_row(&scratch.base_bytes, &mut scratch.virt_base);
+        self.air
+            .parse_virtual_row(&scratch.shift_bytes, &mut scratch.virt_shift);
+
+        // Re-interleave virtual columns:
+        // [V0_base, V0_shift, V1_base, V1_shift, ...].
+        for i in 0..scratch.virt_base.len() {
+            out.push(scratch.virt_base[i]);
+            out.push(scratch.virt_shift[i]);
+        }
+
+        // Append ZK Noise (always B128)
+        for _ in 0..self.blinding_factor {
+            let v_base = ColumnType::B128.parse_from_bytes::<F>(&row_bytes[ptr..ptr + 16]);
+            out.push(v_base);
+
+            ptr += 16;
+
+            let v_shift = ColumnType::B128.parse_from_bytes::<F>(&row_bytes[ptr..ptr + 16]);
+            out.push(v_shift);
+
+            ptr += 16;
+        }
     }
 }
 
