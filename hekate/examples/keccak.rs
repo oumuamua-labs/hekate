@@ -161,8 +161,8 @@ fn generate_cpu_trace(calls: &[([Block64; 25], [Block64; 25])], num_rows: usize)
 
         // Input row:
         // write pre-permutation state
-        for i in 0..25 {
-            tb.set_b64(i, row, input[i]).unwrap();
+        for (i, &val) in input.iter().enumerate() {
+            tb.set_b64(i, row, val).unwrap();
         }
 
         tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)
@@ -173,8 +173,8 @@ fn generate_cpu_trace(calls: &[([Block64; 25], [Block64; 25])], num_rows: usize)
 
         // Output row:
         // write post-permutation state
-        for i in 0..25 {
-            tb.set_b64(i, row, output[i]).unwrap();
+        for (i, &val) in output.iter().enumerate() {
+            tb.set_b64(i, row, val).unwrap();
         }
 
         tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)
