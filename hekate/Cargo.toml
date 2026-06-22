@@ -23,6 +23,7 @@ parallel = [
     "hekate-core/parallel",
     "hekate-gadgets/parallel",
     "hekate-sdk/parallel",
+    "hekate-verifier/parallel",
 ]
 secure-memory = ["hekate-core/secure-memory"]
 blake3 = [
@@ -40,7 +41,8 @@ sha3 = [
     "hekate-gadgets/sha3",
     "hekate-sdk/sha3",
 ]
-table-math = ["hekate-math/table-math"]
+table-math = ["hekate-math/table-math", "hekate-verifier/table-math"]
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 hekate-core = { workspace = true }
@@ -50,6 +52,7 @@ hekate-program = { workspace = true }
 hekate-gadgets = { workspace = true }
 hekate-verifier = { workspace = true }
 rayon = { version = "1.11", optional = true }
+dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }

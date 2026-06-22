@@ -209,7 +209,7 @@ fn prove_and_verify<P: Program<F> + Air<F>>(
 
     // Phase 4:
     // Verify
-    let is_valid = common::phase("Verifying", || {
+    let is_valid = common::phase_with_mem("Verifying", || {
         let mut vt = Transcript::<H>::new(transcript_label);
         HekateVerifier::<F, H>::verify(air, &instance, &proof, &mut vt, &config)
             .expect("Verifier failed")

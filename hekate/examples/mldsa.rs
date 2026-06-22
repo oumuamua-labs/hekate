@@ -239,7 +239,7 @@ fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], 
     // Phase 3:
     // Verify
     let mut verifier_transcript = Transcript::<H>::new(domain);
-    let is_valid = common::phase("Verifying", || {
+    let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut verifier_transcript, &config)
             .expect("Verifier failed")
     });
