@@ -485,7 +485,7 @@ fn main() {
 
     let mut verifier_transcript = Transcript::<H>::new(b"Composite_Example");
 
-    let is_valid = common::phase("Verifying", || {
+    let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut verifier_transcript, &config)
             .expect("Verifier failed")
     });

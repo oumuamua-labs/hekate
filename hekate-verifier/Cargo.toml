@@ -12,7 +12,7 @@ categories = ["cryptography", "no-std"]
 readme = "README.md"
 
 [features]
-default = ["std", "blake3"]
+default = ["std", "blake3", "parallel"]
 std = [
     "hekate-core/std",
     "hekate-program/std",
@@ -23,6 +23,8 @@ blake3 = ["hekate-core/blake3"]
 sha2 = ["hekate-core/sha2"]
 sha3 = ["hekate-core/sha3"]
 transcript-trace = ["hekate-crypto/transcript-trace"]
+parallel = ["dep:rayon", "std"]
+table-math = ["hekate-math/table-math"]
 
 [dependencies]
 hekate-math = { workspace = true }
@@ -30,3 +32,4 @@ hekate-crypto = { workspace = true }
 hekate-core = { workspace = true }
 hekate-program = { workspace = true }
 tracing = { workspace = true }
+rayon = { workspace = true, optional = true }

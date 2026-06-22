@@ -235,7 +235,7 @@ fn main() {
 
     let mut verifier_transcript = Transcript::<H>::new(b"FibonacciIntChiplet");
 
-    let is_valid = common::phase("Verifying", || {
+    let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &program,
             &instance,

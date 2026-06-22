@@ -9,26 +9,27 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation and ML-DSA signature
 verification on a laptop and mobile.
 
+> [!WARNING]  
+> This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
+> without notice. Do not deploy to mainnet.
+
+> [!NOTE]  
+> The verifier, core SDK, and cryptographic chiplets are open-source. The prover and
+> compression engine stay proprietary, shipped as free, unrestricted binaries for macOS (Apple Silicon),
+> Linux (ARM64, glibc), and Android (ARM64).
+
+> [!IMPORTANT]  
+> [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed
+> iOS `.xcframework` and Android `.aar` behind a typed Swift / Kotlin API, one `await` per proof, zero ZK
+> terminology across the boundary. Shipping ZK to edge devices? Start there.
+
+---
+
 ## ⚠️ Security Warning
 
 This crate has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
-
-> [!IMPORTANT]  
-> **ZK proving already runs on mobile.**
-> [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed
-> iOS `.xcframework` and Android `.aar` behind a typed Swift / Kotlin API, one `await` per proof, zero ZK
-> terminology across the boundary. Shipping ZK to edge devices? Start there.
-
-> [!WARNING]  
-> **Alpha State.** This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
-> without notice. Do not deploy to mainnet.
-
-> [!NOTE]  
-> **Open Core Model.** The verifier, core SDK, and cryptographic chiplets are open-source. The prover and
-> compression engine stay proprietary, shipped as free, unrestricted binaries for macOS (Apple Silicon),
-> Linux (ARM64, glibc), and Android (ARM64).
 
 ---
 

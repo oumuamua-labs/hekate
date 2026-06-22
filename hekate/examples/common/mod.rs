@@ -20,6 +20,10 @@ use hekate_math::TowerField;
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 pub fn init(name: &str) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -40,6 +44,60 @@ pub fn phase<T>(label: &str, f: impl FnOnce() -> T) -> T {
     println!("\n-> {} done in {:.2?}\n", label, start.elapsed());
 
     result
+}
+
+/// Times a labelled phase; under `dhat-heap` also
+/// reports its isolated heap footprint. The dhat
+/// profiler is a per-run singleton, wrap exactly one phase.
+pub fn phase_with_mem<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "dhat-heap")]
+    {
+        let _profiler = dhat::Profiler::builder().testing().build();
+        let start = dhat::HeapStats::get();
+
+        println!("\n-> {}...\n", label);
+
+        let t = Instant::now();
+        let result = f();
+        let elapsed = t.elapsed();
+
+        let end = dhat::HeapStats::get();
+
+        println!("\n-> {} done in {:.2?}\n", label, elapsed);
+
+        report_phase_mem(label, &start, &end);
+
+        result
+    }
+
+    #[cfg(not(feature = "dhat-heap"))]
+    {
+        phase(label, f)
+    }
+}
+
+#[cfg(feature = "dhat-heap")]
+fn report_phase_mem(label: &str, start: &dhat::HeapStats, end: &dhat::HeapStats) {
+    println!("--------------------------------------------------");
+    println!("  {} MEMORY (dhat, this phase only)", label);
+    println!("--------------------------------------------------");
+    println!(
+        "  Peak live heap:   {:>10.2} KB",
+        end.max_bytes as f64 / 1024.0
+    );
+    println!(
+        "  Total allocated:  {:>10.2} KB",
+        (end.total_bytes - start.total_bytes) as f64 / 1024.0
+    );
+    println!(
+        "  Alloc count:      {:>10}",
+        end.total_blocks - start.total_blocks
+    );
+    println!(
+        "  Live at end:      {:>10.2} KB",
+        end.curr_bytes as f64 / 1024.0
+    );
+    println!("--------------------------------------------------");
 }
 
 /// Auto-detects chiplet and LogUp bus sections.
