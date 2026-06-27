@@ -11,22 +11,28 @@ NTT, basemul, high-bits, norm-check, and twiddle-ROM chiplets.
 
 ```
 Proving on Apple M3 Max:
-  ML-KEM-768  : 1.40 s,  331 MB peak, 4,232 KiB proof, 30.6 ms verify
-  ML-DSA-44   : 2.43 s,  294 MB peak, 5,139 KiB proof, 69.0 ms verify
-  ML-DSA-65   : 2.54 s,  294 MB peak, 5,156 KiB proof, 70.7 ms verify
-  ML-DSA-87   : 3.98 s,  580 MB peak, 8,620 KiB proof, 115.6 ms verify
+  ML-KEM-768  : 1.40 s,  331 MB peak, 4,244 KiB proof, 12.7 ms verify
+  ML-DSA-44   : 2.43 s,  294 MB peak, 5,151 KiB proof, 18.2 ms verify
+  ML-DSA-65   : 2.54 s,  294 MB peak, 5,169 KiB proof, 20.0 ms verify
+  ML-DSA-87   : 3.98 s,  580 MB peak, 8,645 KiB proof, 21.5 ms verify
 ```
 
-## Examples
-
-- [ML-KEM-768 decapsulation proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem.rs)
-- [ML-DSA signature verification proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs)
+---
 
 ## ⚠️ Security Warning
 
 This crate has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
+
+---
+
+## Examples
+
+- [ML-KEM-768 decapsulation proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem.rs)
+- [ML-DSA signature verification proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs)
+
+---
 
 ## License
 

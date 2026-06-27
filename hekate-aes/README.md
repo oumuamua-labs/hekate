@@ -20,11 +20,15 @@ Per-block proving cost (Apple M3 Max, 31,250 blocks per run):
 
 - [AES-128 / AES-256 proving and verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs)
 
+---
+
 ## ⚠️ Security Warning
 
 This crate has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
+
+---
 
 ## License
 
