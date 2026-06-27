@@ -29,7 +29,6 @@ use hekate_program::permutation::{
 };
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
 use std::sync::Arc;
@@ -289,61 +288,6 @@ fn preflight_flags_partial_zero_key_permutation() {
         "preflight Π(γ + key) products must differ between ghost-activated \
          CPU and honest chiplet (CPU has two extra γ factors)"
     );
-}
-
-// =================================================================
-// Per-chiplet ghost regression
-// =================================================================
-
-fn prove_verify_accepts<P>(
-    program: &P,
-    instance: &ProgramInstance<F>,
-    witness: &ProgramWitness<F>,
-) -> bool
-where
-    P: Program<F> + Sync,
-{
-    let seed = [0xC3u8; 32];
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        sumcheck_blinding_factor: 0,
-        ..Config::default()
-    };
-
-    let proof = match prove(
-        b"BUS_SECURITY_E2E",
-        program,
-        instance,
-        witness,
-        &config,
-        seed,
-        None,
-    ) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    let mut verifier_ts = Transcript::<H>::new(b"BUS_SECURITY_E2E");
-    HekateVerifier::<F, H>::verify(program, instance, &proof, &mut verifier_ts, &config)
-        .unwrap_or(false)
-}
-
-fn scribble_caught<P>(
-    program: &P,
-    instance: &ProgramInstance<F>,
-    witness: &ProgramWitness<F, ColumnTrace>,
-    target: Target,
-    cases: u32,
-) where
-    P: Program<F>,
-{
-    let config = ScribbleConfig::default()
-        .target(target)
-        .mutations([MutationKind::FlipSelector, MutationKind::DuplicateRow])
-        .cases(cases);
-
-    assert_all_caught(program, instance, witness, config);
 }
 
 // =================================================================

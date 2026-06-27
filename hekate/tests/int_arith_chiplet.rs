@@ -401,23 +401,11 @@ fn b32_cell(v: u32) -> Flat<Block32> {
     Block32::from(v).to_hardware()
 }
 
-fn b64_cell(v: u64) -> Flat<Block64> {
-    Block64::from(v).to_hardware()
-}
-
 fn tamper_b32(trace: &mut ColumnTrace, col: usize, row: usize, value: u32) {
     if let TraceColumn::B32(c) = &mut trace.columns[col] {
         c[row] = b32_cell(value);
     } else {
         panic!("tamper_b32: column {col} is not B32");
-    }
-}
-
-fn tamper_b64(trace: &mut ColumnTrace, col: usize, row: usize, value: u64) {
-    if let TraceColumn::B64(c) = &mut trace.columns[col] {
-        c[row] = b64_cell(value);
-    } else {
-        panic!("tamper_b64: column {col} is not B64");
     }
 }
 
