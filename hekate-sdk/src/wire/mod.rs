@@ -68,6 +68,18 @@ pub(crate) fn reset_leak_budget() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    static LEAK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn leak_test_guard() -> MutexGuard<'static, ()> {
+        let guard = LEAK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        reset_leak_budget();
+
+        guard
+    }
 
     pub(crate) fn leaked_bytes() -> usize {
         LEAKED_BYTES.load(Ordering::Relaxed)
@@ -75,50 +87,50 @@ mod tests {
 
     #[test]
     fn leak_str_basic() {
-        let before = leaked_bytes();
+        let _guard = leak_test_guard();
+
         let s = leak_str("hello").unwrap();
 
         assert_eq!(s, "hello");
-        assert_eq!(leaked_bytes(), before + 5);
+        assert_eq!(leaked_bytes(), 5);
     }
 
     #[test]
     fn leak_str_rejects_oversized_label() {
+        let _guard = leak_test_guard();
+
         let big = "x".repeat(MAX_LABEL_LEN + 1);
-        let before = leaked_bytes();
 
         assert!(leak_str(&big).is_err());
-        assert_eq!(leaked_bytes(), before);
+        assert_eq!(leaked_bytes(), 0);
     }
 
     #[test]
     fn leak_str_rejects_when_global_cap_exceeded() {
-        let before = leaked_bytes();
-        let remaining = MAX_TOTAL_LEAKED.saturating_sub(before);
-
-        if remaining < MAX_LABEL_LEN + 1 {
-            return;
-        }
+        let _guard = leak_test_guard();
 
         let label = "a".repeat(MAX_LABEL_LEN);
-        let fills_needed = remaining / MAX_LABEL_LEN;
+        let fills_needed = MAX_TOTAL_LEAKED / MAX_LABEL_LEN;
 
         for _ in 0..fills_needed {
             let _ = leak_str(&label);
         }
 
-        let result = leak_str(&label);
-        assert!(result.is_err());
+        assert!(leak_str(&label).is_err());
     }
 
     #[test]
     fn leak_str_empty_succeeds() {
+        let _guard = leak_test_guard();
+
         let s = leak_str("").unwrap();
         assert_eq!(s, "");
     }
 
     #[test]
     fn leak_str_exactly_max_label() {
+        let _guard = leak_test_guard();
+
         let label = "b".repeat(MAX_LABEL_LEN);
         let result = leak_str(&label);
 

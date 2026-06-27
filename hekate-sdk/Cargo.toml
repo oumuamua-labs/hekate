@@ -35,5 +35,5 @@ flatbuffers = "25.2"
 
 [dev-dependencies]
 hekate-gadgets = { workspace = true }
-hekate-keccak = { version = "0.1", default-features = false, features = ["std", "blake3"] }
+hekate-keccak = { workspace = true, features = ["std", "blake3"] }
 keccak = "0.2"
