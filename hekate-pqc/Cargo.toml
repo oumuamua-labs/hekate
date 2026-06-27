@@ -41,7 +41,6 @@ hekate-verifier = { workspace = true, features = ["std", "blake3"] }
 hekate-sdk = { workspace = true, features = ["std", "blake3"] }
 hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
 hekate-scribble = { workspace = true }
-pqcrypto-mlkem = { version = "0.1", default-features = false, features = ["std"] }
-pqcrypto-mldsa = { version = "0.1", default-features = false, features = ["std"] }
-pqcrypto-traits = { version = "0.3", default-features = false, features = ["std"] }
+ml-kem = { version = "0.3", features = ["getrandom"] }
+ml-dsa = "0.1"
 rand = "0.9"

@@ -1254,8 +1254,34 @@ mod tests {
     use super::*;
     use crate::mlkem::arithmetic::{ntt_forward, ntt_inverse, poly_basemul};
     use hekate_keccak::{sha3_256, sha3_512, shake256};
-    use pqcrypto_mlkem::mlkem768;
-    use pqcrypto_traits::kem::{Ciphertext as _, SecretKey as _, SharedSecret as _};
+    #[allow(deprecated)]
+    use ml_kem::ExpandedKeyEncoding;
+    use ml_kem::kem::Decapsulate;
+    use ml_kem::{B32, Ciphertext, DecapsulationKey, MlKem768};
+    use rand::{TryRngCore, rngs::OsRng};
+
+    #[allow(deprecated)]
+    fn nist_mlkem_768() -> (DecapsulationKey<MlKem768>, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut seed = [0u8; 64];
+        OsRng.try_fill_bytes(&mut seed).unwrap();
+
+        let dk = DecapsulationKey::<MlKem768>::from_seed(seed.into());
+
+        let mut m = [0u8; 32];
+        OsRng.try_fill_bytes(&mut m).unwrap();
+
+        let (ct, ss) = dk
+            .encapsulation_key()
+            .encapsulate_deterministic(&B32::from(m));
+        let sk = dk.to_expanded_bytes().as_slice().to_vec();
+
+        (dk, ct.as_slice().to_vec(), sk, ss.as_slice().to_vec())
+    }
+
+    fn nist_decapsulate_768(dk: &DecapsulationKey<MlKem768>, ct: &[u8]) -> Vec<u8> {
+        let ct = Ciphertext::<MlKem768>::try_from(ct).unwrap();
+        dk.decapsulate(&ct).as_slice().to_vec()
+    }
 
     /// Generate an ML-KEM keypair for
     /// testing. Uses a deterministic seed.
@@ -1668,11 +1694,10 @@ mod tests {
         // ct' must equal ct for valid ciphertexts.
         // This verifies NTT, basemul, decompress, compress.
         for _ in 0..10 {
-            let (pk, sk) = mlkem768::keypair();
-            let (_, ct) = mlkem768::encapsulate(&pk);
+            let (_nist_dk, ct, sk, _ss) = nist_mlkem_768();
 
-            let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, sk.as_bytes());
-            let ct_bytes = ct.as_bytes();
+            let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &sk);
+            let ct_bytes = ct.as_slice();
 
             // Decrypt
             let mut kc = Vec::new();
@@ -1750,8 +1775,8 @@ mod tests {
         // produces the same message as NIST reference.
         // This tests NTT + basemul + decompress but NOT
         // the G/H/KDF steps.
-        let (_, nist_sk) = mlkem768::keypair();
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, nist_sk.as_bytes());
+        let (_nist_dk, _ct, nist_sk, _ss) = nist_mlkem_768();
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &nist_sk);
 
         // Verify H(ek) matches what NIST would compute
         let (our_h, _) = sha3_256(&dk.ek);
@@ -1763,45 +1788,32 @@ mod tests {
 
     #[test]
     fn nist_decaps_matches_reference() {
-        // Generate keypair with NIST reference
-        let (nist_pk, nist_sk) = mlkem768::keypair();
+        let (nist_dk, nist_ct, nist_sk, nist_ss) = nist_mlkem_768();
 
-        // Encapsulate with NIST reference
-        let (nist_ss, nist_ct) = mlkem768::encapsulate(&nist_pk);
+        // NIST reference self-check.
+        let nist_ss2 = nist_decapsulate_768(&nist_dk, &nist_ct);
+        assert_eq!(nist_ss, nist_ss2, "NIST reference self-check failed");
 
-        // Decapsulate with NIST reference (sanity check)
-        let nist_ss2 = mlkem768::decapsulate(&nist_ct, &nist_sk);
-        assert_eq!(
-            nist_ss.as_bytes(),
-            nist_ss2.as_bytes(),
-            "NIST reference self-check failed",
-        );
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &nist_sk);
+        let our_result = ml_kem_decaps(&dk, &nist_ct);
 
-        // Parse NIST secret key into our format
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, nist_sk.as_bytes());
-
-        // Decapsulate with OUR implementation
-        let our_result = ml_kem_decaps(&dk, nist_ct.as_bytes());
-
-        // Compare shared secrets
         assert_eq!(
             our_result.shared_secret,
-            nist_ss.as_bytes(),
+            nist_ss.as_slice(),
             "OUR decaps does not match NIST reference",
         );
     }
 
     #[test]
     fn nist_decaps_traced_matches_reference() {
-        let (nist_pk, nist_sk) = mlkem768::keypair();
-        let (nist_ss, nist_ct) = mlkem768::encapsulate(&nist_pk);
+        let (_nist_dk, nist_ct, nist_sk, nist_ss) = nist_mlkem_768();
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, nist_sk.as_bytes());
-        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, nist_ct.as_bytes());
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &nist_sk);
+        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, &nist_ct);
 
         assert_eq!(
             result.shared_secret,
-            nist_ss.as_bytes(),
+            nist_ss.as_slice(),
             "TRACED decaps does not match NIST reference",
         );
         assert!(!ntt_ops.is_empty());
@@ -1812,15 +1824,14 @@ mod tests {
         // 100 random keypairs,
         // statistical confidence
         for i in 0..100 {
-            let (pk, sk) = mlkem768::keypair();
-            let (nist_ss, ct) = mlkem768::encapsulate(&pk);
+            let (_nist_dk, ct, sk, nist_ss) = nist_mlkem_768();
 
-            let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, sk.as_bytes());
-            let our = ml_kem_decaps(&dk, ct.as_bytes());
+            let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &sk);
+            let our = ml_kem_decaps(&dk, &ct);
 
             assert_eq!(
                 our.shared_secret,
-                nist_ss.as_bytes(),
+                nist_ss.as_slice(),
                 "Mismatch on keypair #{i}",
             );
         }
@@ -1835,13 +1846,12 @@ mod tests {
         // A modified ciphertext must produce J(z || c_mod),
         // NOT the original shared secret.
         // This tests the implicit rejection path.
-        let (pk, sk) = mlkem768::keypair();
-        let (nist_ss, ct) = mlkem768::encapsulate(&pk);
+        let (_nist_dk, ct, sk, nist_ss) = nist_mlkem_768();
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, sk.as_bytes());
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &sk);
 
         // Modify one byte of ciphertext
-        let mut ct_mod = ct.as_bytes().to_vec();
+        let mut ct_mod = ct.clone();
         ct_mod[0] ^= 0x01;
 
         // Our decaps on modified ciphertext
@@ -1850,7 +1860,7 @@ mod tests {
         // Must NOT equal original shared secret
         assert_ne!(
             our.shared_secret,
-            nist_ss.as_bytes(),
+            nist_ss.as_slice(),
             "Modified ciphertext should trigger rejection",
         );
 
@@ -1872,11 +1882,10 @@ mod tests {
     fn nist_implicit_rejection_various_modifications() {
         // Test rejection at multiple
         // positions in the ciphertext.
-        let (pk, sk) = mlkem768::keypair();
-        let (_, ct) = mlkem768::encapsulate(&pk);
+        let (_nist_dk, ct, sk, _ss) = nist_mlkem_768();
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, sk.as_bytes());
-        let ct_bytes = ct.as_bytes();
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &sk);
+        let ct_bytes = ct.as_slice();
 
         for &pos in &[0, 1, 100, 500, 960, 1087] {
             let mut ct_mod = ct_bytes.to_vec();
@@ -1904,25 +1913,21 @@ mod tests {
         // must also produce the rejection value.
         // Cross-check:
         // our rejection == NIST rejection.
-        use pqcrypto_traits::kem::Ciphertext as _;
+        let (nist_dk, ct, sk, _ss) = nist_mlkem_768();
 
-        let (pk, sk) = mlkem768::keypair();
-        let (_, ct) = mlkem768::encapsulate(&pk);
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &sk);
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, sk.as_bytes());
-
-        let mut ct_mod = ct.as_bytes().to_vec();
+        let mut ct_mod = ct.clone();
         ct_mod[42] ^= 0x01;
 
         let our = ml_kem_decaps(&dk, &ct_mod);
 
         // NIST decaps on modified ciphertext
-        let nist_ct_mod = mlkem768::Ciphertext::from_bytes(&ct_mod).unwrap();
-        let nist_reject = mlkem768::decapsulate(&nist_ct_mod, &sk);
+        let nist_reject = nist_decapsulate_768(&nist_dk, &ct_mod);
 
         assert_eq!(
             our.shared_secret,
-            nist_reject.as_bytes(),
+            nist_reject.as_slice(),
             "Rejection path: our output != NIST output",
         );
     }
@@ -1959,25 +1964,23 @@ mod tests {
         // test both success and rejection
         // paths against NIST reference.
         for _ in 0..100 {
-            let (pk, sk) = mlkem768::keypair();
-            let (nist_ss, ct) = mlkem768::encapsulate(&pk);
-            let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, sk.as_bytes());
+            let (nist_dk, ct, sk, nist_ss) = nist_mlkem_768();
+            let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &sk);
 
             // Success path
-            let our = ml_kem_decaps(&dk, ct.as_bytes());
-            assert_eq!(our.shared_secret, nist_ss.as_bytes());
+            let our = ml_kem_decaps(&dk, &ct);
+            assert_eq!(our.shared_secret, nist_ss.as_slice());
 
             // Rejection path
-            let mut ct_bad = ct.as_bytes().to_vec();
+            let mut ct_bad = ct.clone();
             ct_bad[0] ^= 0x01;
 
             let our_rej = ml_kem_decaps(&dk, &ct_bad);
-            let nist_ct_bad = mlkem768::Ciphertext::from_bytes(&ct_bad).unwrap();
-            let nist_rej = mlkem768::decapsulate(&nist_ct_bad, &sk);
+            let nist_rej = nist_decapsulate_768(&nist_dk, &ct_bad);
 
             assert_eq!(
                 our_rej.shared_secret,
-                nist_rej.as_bytes(),
+                nist_rej.as_slice(),
                 "Rejection path mismatch",
             );
         }
@@ -1989,12 +1992,11 @@ mod tests {
 
     #[test]
     fn ntt_ram_bindings_exist_and_values_match() {
-        let (nist_pk, nist_sk) = mlkem768::keypair();
-        let (_, nist_ct) = mlkem768::encapsulate(&nist_pk);
+        let (_nist_dk, nist_ct, nist_sk, _ss) = nist_mlkem_768();
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, nist_sk.as_bytes());
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &nist_sk);
 
-        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, nist_ct.as_bytes());
+        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, &nist_ct);
 
         // Bindings must be non-empty.
         assert!(
@@ -2027,12 +2029,11 @@ mod tests {
 
     #[test]
     fn ntt_ram_bindings_cover_all_basemul_blocks() {
-        let (nist_pk, nist_sk) = mlkem768::keypair();
-        let (_, nist_ct) = mlkem768::encapsulate(&nist_pk);
+        let (_nist_dk, nist_ct, nist_sk, _ss) = nist_mlkem_768();
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, nist_sk.as_bytes());
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &nist_sk);
 
-        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, nist_ct.as_bytes());
+        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, &nist_ct);
 
         // ML-KEM-768 (k=3):
         // Decrypt:
@@ -2060,12 +2061,11 @@ mod tests {
 
     #[test]
     fn ntt_ram_bindings_cover_every_non_flow_op() {
-        let (nist_pk, nist_sk) = mlkem768::keypair();
-        let (_, nist_ct) = mlkem768::encapsulate(&nist_pk);
+        let (_nist_dk, nist_ct, nist_sk, _ss) = nist_mlkem_768();
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, nist_sk.as_bytes());
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &nist_sk);
 
-        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, nist_ct.as_bytes());
+        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, &nist_ct);
 
         let butterfly_bindings = result
             .ntt_ram_bindings
@@ -2098,12 +2098,11 @@ mod tests {
 
     #[test]
     fn w_side_bindings_exist_and_values_match() {
-        let (nist_pk, nist_sk) = mlkem768::keypair();
-        let (_, nist_ct) = mlkem768::encapsulate(&nist_pk);
+        let (_nist_dk, nist_ct, nist_sk, _ss) = nist_mlkem_768();
 
-        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, nist_sk.as_bytes());
+        let dk = MlKemDecapsKey::from_nist_bytes(MlKemLevel::MLKEM_768, &nist_sk);
 
-        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, nist_ct.as_bytes());
+        let (result, ntt_ops) = ml_kem_decaps_traced(&dk, &nist_ct);
 
         let basemul_mulonly_count = ntt_ops
             .iter()

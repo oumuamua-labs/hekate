@@ -37,12 +37,41 @@ use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use pqcrypto_mlkem::{mlkem512, mlkem768, mlkem1024};
-use pqcrypto_traits::kem::{Ciphertext as _, SecretKey as _};
+#[allow(deprecated)]
+use ml_kem::ExpandedKeyEncoding;
+use ml_kem::{B32, DecapsulationKey, MlKem512, MlKem768, MlKem1024};
 use rand::{TryRngCore, rngs::OsRng};
 
 type F = Block128;
 type H = DefaultHasher;
+
+macro_rules! nist_mlkem {
+    ($fn:ident, $level:ty) => {
+        #[allow(deprecated)]
+        fn $fn() -> (Vec<u8>, Vec<u8>) {
+            let mut seed = [0u8; 64];
+            OsRng.try_fill_bytes(&mut seed).unwrap();
+
+            let dk = DecapsulationKey::<$level>::from_seed(seed.into());
+
+            let mut m = [0u8; 32];
+            OsRng.try_fill_bytes(&mut m).unwrap();
+
+            let (ct, _ss) = dk
+                .encapsulation_key()
+                .encapsulate_deterministic(&B32::from(m));
+
+            (
+                ct.as_slice().to_vec(),
+                dk.to_expanded_bytes().as_slice().to_vec(),
+            )
+        }
+    };
+}
+
+nist_mlkem!(nist_mlkem_512, MlKem512);
+nist_mlkem!(nist_mlkem_768, MlKem768);
+nist_mlkem!(nist_mlkem_1024, MlKem1024);
 
 #[derive(Clone)]
 struct MlKemTestProgram {
@@ -242,16 +271,13 @@ fn run_tampered_mlkem_768<T>(tamper: T) -> bool
 where
     T: FnOnce(&mut [ColumnTrace]),
 {
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
-    let ct_bytes = ct.as_bytes();
-    let sk_bytes = sk.as_bytes();
+    let (ct_bytes, sk_bytes) = nist_mlkem_768();
 
     let params = test_params();
     let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params);
 
     let (mut chiplet_traces, shared_secret) = mlkem_chiplet
-        .generate_traces(ct_bytes, sk_bytes)
+        .generate_traces(&ct_bytes, &sk_bytes)
         .expect("trace gen failed");
 
     tamper(&mut chiplet_traces);
@@ -349,17 +375,13 @@ fn run_tampered_mlkem_768_with_ss<T>(tamper: T) -> bool
 where
     T: FnOnce(&mut [ColumnTrace], &mut ColumnTrace),
 {
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
-
-    let ct_bytes = ct.as_bytes();
-    let sk_bytes = sk.as_bytes();
+    let (ct_bytes, sk_bytes) = nist_mlkem_768();
 
     let params = test_params();
     let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params);
 
     let (mut chiplet_traces, shared_secret) = mlkem_chiplet
-        .generate_traces(ct_bytes, sk_bytes)
+        .generate_traces(&ct_bytes, &sk_bytes)
         .expect("trace gen failed");
 
     let cpu_rows: usize = 1 << 10;
@@ -502,15 +524,9 @@ fn flip_b64(trace: &mut ColumnTrace, col: usize, row: usize, mask: u64) {
 #[cfg_attr(debug_assertions, ignore)]
 fn mlkem_512_e2e() {
     let level = MlKemLevel::MLKEM_512;
-    let (pk, sk) = mlkem512::keypair();
-    let (_, ct) = mlkem512::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_512();
 
-    let result = prove_and_verify_mlkem_level(
-        level,
-        ct.as_bytes(),
-        sk.as_bytes(),
-        &params_for_level(level),
-    );
+    let result = prove_and_verify_mlkem_level(level, &ct, &sk, &params_for_level(level));
 
     assert_eq!(result, Ok(true), "ML-KEM-512 E2E: {result:?}");
 }
@@ -519,15 +535,9 @@ fn mlkem_512_e2e() {
 #[cfg_attr(debug_assertions, ignore)]
 fn mlkem_768_e2e() {
     let level = MlKemLevel::MLKEM_768;
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_768();
 
-    let result = prove_and_verify_mlkem_level(
-        level,
-        ct.as_bytes(),
-        sk.as_bytes(),
-        &params_for_level(level),
-    );
+    let result = prove_and_verify_mlkem_level(level, &ct, &sk, &params_for_level(level));
 
     assert_eq!(result, Ok(true), "ML-KEM-768 E2E: {result:?}");
 }
@@ -536,15 +546,9 @@ fn mlkem_768_e2e() {
 #[cfg_attr(debug_assertions, ignore)]
 fn mlkem_1024_e2e() {
     let level = MlKemLevel::MLKEM_1024;
-    let (pk, sk) = mlkem1024::keypair();
-    let (_, ct) = mlkem1024::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_1024();
 
-    let result = prove_and_verify_mlkem_level(
-        level,
-        ct.as_bytes(),
-        sk.as_bytes(),
-        &params_for_level(level),
-    );
+    let result = prove_and_verify_mlkem_level(level, &ct, &sk, &params_for_level(level));
 
     assert_eq!(result, Ok(true), "ML-KEM-1024 E2E: {result:?}");
 }
@@ -557,10 +561,9 @@ fn mlkem_1024_e2e() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn honest_prover_succeeds() {
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_768();
 
-    let result = prove_and_verify_mlkem(ct.as_bytes(), sk.as_bytes(), &test_params());
+    let result = prove_and_verify_mlkem(&ct, &sk, &test_params());
     assert_eq!(result, Ok(true), "Honest prover must succeed: {result:?}",);
 }
 
@@ -573,11 +576,8 @@ fn honest_prover_succeeds() {
 #[cfg_attr(debug_assertions, ignore)]
 fn wrong_secret_key_rejected() {
     // Generate two different keypairs
-    let (pk1, _sk1) = mlkem768::keypair();
-    let (_, sk2) = mlkem768::keypair();
-
-    // Encapsulate with pk1
-    let (_, ct1) = mlkem768::encapsulate(&pk1);
+    let (ct1, _sk1) = nist_mlkem_768();
+    let (_ct2, sk2) = nist_mlkem_768();
 
     // Try to decapsulate ct1 with sk2 (WRONG key).
     // The decapsulation will take the implicit
@@ -585,7 +585,7 @@ fn wrong_secret_key_rejected() {
     // with wrong key differs). This should still
     // produce a VALID proof, implicit rejection
     // is a valid execution path.
-    let result = prove_and_verify_mlkem(ct1.as_bytes(), sk2.as_bytes(), &test_params());
+    let result = prove_and_verify_mlkem(&ct1, &sk2, &test_params());
 
     // This SHOULD succeed, implicit rejection
     // is valid behavior. The proof proves that
@@ -606,16 +606,15 @@ fn wrong_secret_key_rejected() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn tampered_ciphertext_valid_rejection() {
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_768();
 
     // Tamper with ciphertext
-    let mut ct_bad = ct.as_bytes().to_vec();
+    let mut ct_bad = ct.clone();
     ct_bad[0] ^= 0xff;
 
     // Decaps with tampered ct takes rejection path.
     // This is a VALID execution, proof should pass.
-    let result = prove_and_verify_mlkem(&ct_bad, sk.as_bytes(), &test_params());
+    let result = prove_and_verify_mlkem(&ct_bad, &sk, &test_params());
     assert_eq!(
         result,
         Ok(true),
@@ -639,11 +638,10 @@ fn ram_enforces_ct_comparison() {
     // With a valid keypair, decaps succeeds and
     // ct == ct' (written then read at same addresses).
     // The RAM chiplet verifies consistency.
-    let (pk, sk) = mlkem768::keypair();
-    let (_nist_ss, ct) = mlkem768::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_768();
 
     // Full prove/verify
-    let result = prove_and_verify_mlkem(ct.as_bytes(), sk.as_bytes(), &test_params());
+    let result = prove_and_verify_mlkem(&ct, &sk, &test_params());
     assert_eq!(
         result,
         Ok(true),
@@ -666,14 +664,13 @@ fn ram_enforces_ct_comparison() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn exploit_ntt_ram_binding_mismatch() {
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_768();
 
     let params = test_params();
     let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params.clone());
 
     let (mut chiplet_traces, _) = mlkem_chiplet
-        .generate_traces(ct.as_bytes(), sk.as_bytes())
+        .generate_traces(&ct, &sk)
         .expect("trace gen failed");
 
     // ctrl trace is chiplet_traces[0].
@@ -773,14 +770,13 @@ fn exploit_ntt_ram_binding_mismatch() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn exploit_ntt_flow_connectivity_scramble() {
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_768();
 
     let params = test_params();
     let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params.clone());
 
     let (mut chiplet_traces, _) = mlkem_chiplet
-        .generate_traces(ct.as_bytes(), sk.as_bytes())
+        .generate_traces(&ct, &sk)
         .expect("trace gen failed");
 
     // NTT trace is chiplet_traces[2].
@@ -883,14 +879,13 @@ fn exploit_ntt_flow_connectivity_scramble() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn exploit_keccak_input_unbound() {
-    let (pk, sk) = mlkem768::keypair();
-    let (_, ct) = mlkem768::encapsulate(&pk);
+    let (ct, sk) = nist_mlkem_768();
 
     let params = test_params();
     let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params.clone());
 
     let (mut chiplet_traces, _) = mlkem_chiplet
-        .generate_traces(ct.as_bytes(), sk.as_bytes())
+        .generate_traces(&ct, &sk)
         .expect("trace gen failed");
 
     // Identify the target Keccak call.

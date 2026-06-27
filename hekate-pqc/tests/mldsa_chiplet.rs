@@ -35,12 +35,31 @@ use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
-use pqcrypto_mldsa::{mldsa44, mldsa65, mldsa87};
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+use ml_dsa::signature::{Keypair, Signer};
+use ml_dsa::{B32, MlDsa44, MlDsa65, MlDsa87, SigningKey};
 use rand::{TryRngCore, rngs::OsRng};
 
 type F = Block128;
 type H = DefaultHasher;
+
+macro_rules! nist_mldsa {
+    ($fn:ident, $level:ty) => {
+        fn $fn(msg: &[u8]) -> (Vec<u8>, Vec<u8>) {
+            let mut xi = [0u8; 32];
+            OsRng.try_fill_bytes(&mut xi).unwrap();
+
+            let key = SigningKey::<$level>::from_seed(&B32::from(xi));
+            let pk = key.verifying_key().encode();
+            let sig = key.sign(msg).encode();
+
+            (pk.as_slice().to_vec(), sig.as_slice().to_vec())
+        }
+    };
+}
+
+nist_mldsa!(nist_mldsa_44, MlDsa44);
+nist_mldsa!(nist_mldsa_65, MlDsa65);
+nist_mldsa!(nist_mldsa_87, MlDsa87);
 
 #[derive(Clone)]
 struct MlDsaTestProgram {
@@ -241,16 +260,10 @@ fn prove_and_verify_mldsa(
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn mldsa_44_e2e() {
-    let (nist_pk, nist_sk) = mldsa44::keypair();
     let msg = b"Hekate ML-DSA-44 e2e test";
-    let nist_sig = mldsa44::detached_sign(msg, &nist_sk);
+    let (nist_pk, nist_sig) = nist_mldsa_44(msg);
 
-    let result = prove_and_verify_mldsa(
-        MlDsaLevel::MLDSA_44,
-        nist_pk.as_bytes(),
-        nist_sig.as_bytes(),
-        msg,
-    );
+    let result = prove_and_verify_mldsa(MlDsaLevel::MLDSA_44, &nist_pk, &nist_sig, msg);
 
     match result {
         Ok(true) => {}
@@ -262,16 +275,10 @@ fn mldsa_44_e2e() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn mldsa_65_e2e() {
-    let (nist_pk, nist_sk) = mldsa65::keypair();
     let msg = b"Hekate ML-DSA e2e test";
-    let nist_sig = mldsa65::detached_sign(msg, &nist_sk);
+    let (nist_pk, nist_sig) = nist_mldsa_65(msg);
 
-    let result = prove_and_verify_mldsa(
-        MlDsaLevel::MLDSA_65,
-        nist_pk.as_bytes(),
-        nist_sig.as_bytes(),
-        msg,
-    );
+    let result = prove_and_verify_mldsa(MlDsaLevel::MLDSA_65, &nist_pk, &nist_sig, msg);
 
     match result {
         Ok(true) => {}
@@ -283,16 +290,10 @@ fn mldsa_65_e2e() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn mldsa_87_e2e() {
-    let (nist_pk, nist_sk) = mldsa87::keypair();
     let msg = b"Hekate ML-DSA-87 e2e test";
-    let nist_sig = mldsa87::detached_sign(msg, &nist_sk);
+    let (nist_pk, nist_sig) = nist_mldsa_87(msg);
 
-    let result = prove_and_verify_mldsa(
-        MlDsaLevel::MLDSA_87,
-        nist_pk.as_bytes(),
-        nist_sig.as_bytes(),
-        msg,
-    );
+    let result = prove_and_verify_mldsa(MlDsaLevel::MLDSA_87, &nist_pk, &nist_sig, msg);
 
     match result {
         Ok(true) => {}
@@ -316,17 +317,15 @@ fn run_tampered_mldsa_65_with_cpu<T>(tamper: T) -> bool
 where
     T: FnOnce(&mut [ColumnTrace], &mut ColumnTrace),
 {
-    let (nist_pk, nist_sk) = mldsa65::keypair();
     let msg = b"adversarial test";
-    let nist_sig = mldsa65::detached_sign(msg, &nist_sk);
+    let (nist_pk, nist_sig) = nist_mldsa_65(msg);
 
     let level = MlDsaLevel::MLDSA_65;
     let params = test_params(&level);
     let mldsa_chiplet = MlDsaChiplet::<F>::new(level, params);
 
-    let pk = MlDsaPublicKey::from_bytes(level, nist_pk.as_bytes());
-    let sig =
-        MlDsaSignature::from_bytes(level, nist_sig.as_bytes()).expect("NIST signature must parse");
+    let pk = MlDsaPublicKey::from_bytes(level, &nist_pk);
+    let sig = MlDsaSignature::from_bytes(level, &nist_sig).expect("NIST signature must parse");
 
     let mut chiplet_traces = mldsa_chiplet
         .generate_traces(&pk, &sig, msg)

@@ -1106,8 +1106,20 @@ pub fn ml_dsa_verify(pk: &MlDsaPublicKey, sig: &MlDsaSignature, msg: &[u8]) -> b
 mod tests {
     use super::*;
     use crate::mldsa::MlDsaLevel;
-    use pqcrypto_mldsa::mldsa65;
-    use pqcrypto_traits::sign::{DetachedSignature, PublicKey, SecretKey};
+    use ml_dsa::signature::{Keypair, Signer};
+    use ml_dsa::{B32, MlDsa65, SigningKey};
+    use rand::{TryRngCore, rngs::OsRng};
+
+    fn nist_mldsa_65(msg: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut xi = [0u8; 32];
+        OsRng.try_fill_bytes(&mut xi).unwrap();
+
+        let key = SigningKey::<MlDsa65>::from_seed(&B32::from(xi));
+        let pk = key.verifying_key().encode();
+        let sig = key.sign(msg).encode();
+
+        (pk.as_slice().to_vec(), sig.as_slice().to_vec())
+    }
 
     #[test]
     fn verify_result_struct_populated() {
@@ -1144,13 +1156,11 @@ mod tests {
 
     #[test]
     fn nist_reference_mldsa65_verify() {
-        let (nist_pk, nist_sk) = mldsa65::keypair();
         let msg = b"Hekate ML-DSA test vector";
+        let (nist_pk, nist_sig) = nist_mldsa_65(msg);
 
-        let nist_sig = mldsa65::detached_sign(msg, &nist_sk);
-
-        let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, nist_pk.as_bytes());
-        let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, nist_sig.as_bytes())
+        let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, &nist_pk);
+        let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, &nist_sig)
             .expect("NIST signature should parse");
 
         let valid = ml_dsa_verify(&pk, &sig, msg);
@@ -1159,17 +1169,15 @@ mod tests {
 
     #[test]
     fn nist_reference_mldsa65_reject_tampered() {
-        let (nist_pk, nist_sk) = mldsa65::keypair();
         let msg = b"Hekate ML-DSA test vector";
+        let (nist_pk, nist_sig) = nist_mldsa_65(msg);
 
-        let nist_sig = mldsa65::detached_sign(msg, &nist_sk);
-
-        let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, nist_pk.as_bytes());
+        let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, &nist_pk);
 
         // Tamper with message
         let bad_msg = b"Hekate ML-DSA test vector TAMPERED";
 
-        let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, nist_sig.as_bytes())
+        let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, &nist_sig)
             .expect("NIST signature should parse");
 
         let valid = ml_dsa_verify(&pk, &sig, bad_msg);
@@ -1179,13 +1187,11 @@ mod tests {
     #[test]
     fn nist_reference_multiple_keypairs() {
         for i in 0..5 {
-            let (nist_pk, nist_sk) = mldsa65::keypair();
             let msg = format!("test message {i}");
+            let (nist_pk, nist_sig) = nist_mldsa_65(msg.as_bytes());
 
-            let nist_sig = mldsa65::detached_sign(msg.as_bytes(), &nist_sk);
-
-            let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, nist_pk.as_bytes());
-            let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, nist_sig.as_bytes())
+            let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, &nist_pk);
+            let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, &nist_sig)
                 .expect("NIST signature should parse");
 
             assert!(
@@ -1194,7 +1200,7 @@ mod tests {
             );
 
             // Tampered signature (flip first byte of c̃)
-            let mut bad_sig_bytes = nist_sig.as_bytes().to_vec();
+            let mut bad_sig_bytes = nist_sig.clone();
             bad_sig_bytes[0] ^= 0x01;
 
             if let Some(bad_sig) = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, &bad_sig_bytes)
@@ -1209,12 +1215,11 @@ mod tests {
 
     #[test]
     fn traced_ops_counts_reasonable() {
-        let (nist_pk, nist_sk) = mldsa65::keypair();
         let msg = b"counting ops";
-        let nist_sig = mldsa65::detached_sign(msg, &nist_sk);
+        let (nist_pk, nist_sig) = nist_mldsa_65(msg);
 
-        let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, nist_pk.as_bytes());
-        let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, nist_sig.as_bytes()).unwrap();
+        let pk = MlDsaPublicKey::from_bytes(MlDsaLevel::MLDSA_65, &nist_pk);
+        let sig = MlDsaSignature::from_bytes(MlDsaLevel::MLDSA_65, &nist_sig).unwrap();
 
         let (result, ntt_ops) = ml_dsa_verify_traced(&pk, &sig, msg);
 
@@ -1249,14 +1254,19 @@ mod tests {
     /// our SHAKE-256 matches PQClean's
     /// stored tr inside the sk.
     #[test]
+    #[allow(deprecated)]
     fn shake256_tr_matches_pqclean() {
-        let (nist_pk, nist_sk) = mldsa65::keypair();
+        let mut xi = [0u8; 32];
+        OsRng.try_fill_bytes(&mut xi).unwrap();
 
-        let (tr_out, _) = keccak::shake256(nist_pk.as_bytes(), 64);
+        let key = SigningKey::<MlDsa65>::from_seed(&B32::from(xi));
 
-        // PQClean sk layout:
+        let pk = key.verifying_key().encode();
+        let (tr_out, _) = keccak::shake256(pk.as_slice(), 64);
+
+        // FIPS-204 sk layout:
         // ρ(32) + K(32) + tr(64) + s1 + s2 + t0
-        let sk_bytes = nist_sk.as_bytes();
+        let sk_bytes = key.expanded_key().to_expanded();
         let nist_tr = &sk_bytes[64..128];
 
         assert_eq!(&tr_out[..64], nist_tr, "tr = H(pk) mismatch",);

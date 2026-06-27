@@ -1452,66 +1452,15 @@ mod tests {
     use crate::mlkem::{MLKEM_Q, MlKemChiplet, MlKemLevel, MlKemParams};
     use hekate_core::trace::TraceColumn;
     use hekate_math::{Bit, Block128};
-    use pqcrypto_mlkem::mlkem768;
-    use pqcrypto_traits::kem::{Ciphertext, SecretKey};
+    #[allow(deprecated)]
+    use ml_kem::ExpandedKeyEncoding;
+    use ml_kem::{B32, DecapsulationKey, MlKem768};
+    use rand::{TryRngCore, rngs::OsRng};
 
     type F = Block128;
 
     #[test]
     fn ctrl_chiplet_column_count() {
-        // 1 IO B32
-        //   + 1 IO Bit
-        //   + 1 PAD_SEL Bit
-        // + 25 Keccak B64 + 1 Keccak Bit
-        // + 17 RATE_REG B64
-        // + 1 KEC_IS_OUTPUT Bit
-        // + 1 SPONGE_INIT Bit
-        // + 1 SHA3_512 Bit
-        // + 7 NTT B32 + 1 NTT Bit
-        // + 4 BM B32 + 1 BM Bit
-        // + 4 RAM_ADDR B32
-        //   + 4 RAM_VAL B32
-        //   + 1 RAM_VAL_PACKED B32
-        //   + 1 RAM_IS_WRITE Bit
-        //   + 1 RAM Bit
-        // + 1 W_BIND_BFLY_IDX B32
-        // + 1 W_BIND_SELECTOR Bit
-        // + 1 BOUND_POS B32
-        // + 1 BOUND_IN_SEL Bit
-        // + 1 BOUND_OUT_SEL Bit
-        // + 17 KEC_LANE_ONE_HOT Bit
-        // + 1 KEC_LANE_DELTA B64
-        // + 1 KEC_INPUT_REF_SEL Bit
-        // + 1 KEC_BIND_LO_SEL Bit
-        // + 2 IO_LANE_{LO,HI} B32
-        //   + 1 IO_LANE_BIND_SEL Bit
-        //   + 1 H_CT_INPUT_SEL Bit
-        //   + 1 H_CT_ACTIVE Bit
-        //   + 2 PAD_FIRST/LAST Bit
-        // + 2 H_CT_{,PRIME_}BIND_SEL Bit
-        // + 4 HASH_CT_PRIME B64
-        // + 2 H_CT_{,PRIME_}BIND_SEEN Bit
-        // + 4 HASH_REF B64
-        //   + 1 CT_MATCH Bit
-        //   + 1 CMP Bit
-        // + 2 HASH_EQ Bit
-        //   + 2 HASH_DIFF_INV B128
-        // + 4 K_PRIME_LO B32
-        //   + 4 K_PRIME_HI B32
-        //   + 1 K_PRIME_BIND_SEL Bit
-        // + 4 K_BAR_LO B32
-        //   + 4 K_BAR_HI B32
-        //   + 1 K_BAR_BIND_SEL Bit
-        // + 1 K_PRIME_BIND_SEEN Bit
-        //   + 1 K_BAR_BIND_SEEN Bit
-        // + 4 SS_LO B32
-        //   + 4 SS_HI B32
-        //   + 1 SS_MUX_SEL Bit
-        //   + 1 SS_OUT_SEL Bit
-        // + 1 REQUEST_IDX_OUT B32
-        // + 1 S_ACTIVE Bit
-        // + 6 PH_* Bit (phase state machine)
-        // = 176
         assert_eq!(MlKemCtrlColumns::NUM_COLUMNS, 176);
     }
 
@@ -1612,9 +1561,22 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn sticky_rate_regs_satisfy_constraint() {
-        let (nist_pk, nist_sk) = mlkem768::keypair();
-        let (_, nist_ct) = mlkem768::encapsulate(&nist_pk);
+        let mut seed = [0u8; 64];
+        OsRng.try_fill_bytes(&mut seed).unwrap();
+
+        let dk = DecapsulationKey::<MlKem768>::from_seed(seed.into());
+
+        let mut m = [0u8; 32];
+        OsRng.try_fill_bytes(&mut m).unwrap();
+
+        let (nist_ct, _ss) = dk
+            .encapsulation_key()
+            .encapsulate_deterministic(&B32::from(m));
+
+        let nist_ct = nist_ct.as_slice().to_vec();
+        let nist_sk = dk.to_expanded_bytes().as_slice().to_vec();
 
         let params = MlKemParams {
             ctrl_rows: 1 << 16,
@@ -1625,9 +1587,7 @@ mod tests {
             ram_rows: 1 << 16,
         };
         let chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params);
-        let (traces, _) = chiplet
-            .generate_traces(nist_ct.as_bytes(), nist_sk.as_bytes())
-            .unwrap();
+        let (traces, _) = chiplet.generate_traces(&nist_ct, &nist_sk).unwrap();
 
         let ctrl = &traces[0];
         let num_rows = ctrl.columns[0].len();
