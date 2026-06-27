@@ -21,6 +21,10 @@ jobs:
       verifier: ${{ steps.f.outputs.verifier }}
       gadgets: ${{ steps.f.outputs.gadgets }}
       sdk: ${{ steps.f.outputs.sdk }}
+      scribble: ${{ steps.f.outputs.scribble }}
+      keccak: ${{ steps.f.outputs.keccak }}
+      aes: ${{ steps.f.outputs.aes }}
+      pqc: ${{ steps.f.outputs.pqc }}
       workspace: ${{ steps.f.outputs.workspace }}
     steps:
       - uses: actions/checkout@v5
@@ -70,6 +74,38 @@ jobs:
               - 'hekate-crypto/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+            scribble:
+              - 'hekate-scribble/**'
+              - 'hekate-sdk/**'
+              - 'hekate-gadgets/**'
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            keccak:
+              - 'hekate-keccak/**'
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            aes:
+              - 'hekate-aes/**'
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            pqc:
+              - 'hekate-pqc/**'
+              - 'hekate-keccak/**'
+              - 'hekate-gadgets/**'
+              - 'hekate-program/**'
+              - 'hekate-core/**'
+              - 'hekate-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
 
   fmt:
     name: Rustfmt
@@ -114,6 +150,14 @@ jobs:
             filter: gadgets
           - crate: hekate-sdk
             filter: sdk
+          - crate: hekate-scribble
+            filter: scribble
+          - crate: hekate-keccak
+            filter: keccak
+          - crate: hekate-aes
+            filter: aes
+          - crate: hekate-pqc
+            filter: pqc
     steps:
       - name: Should run
         id: run
