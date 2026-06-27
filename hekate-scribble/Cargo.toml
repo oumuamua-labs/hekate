@@ -1,0 +1,25 @@
+[package]
+name = "hekate-scribble"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+authors.workspace = true
+repository = "https://github.com/oumuamua-labs/hekate/tree/main/hekate-scribble"
+description = "Trace mutation fuzzer for Hekate ZK programs and chiplets. Tampers valid traces and asserts preflight catches every mutation."
+keywords = ["zk", "fuzzer", "proptest", "hekate", "trace"]
+categories = ["cryptography", "development-tools::testing"]
+
+[dependencies]
+hekate-math = { workspace = true, features = ["std"] }
+hekate-sdk = { workspace = true, default-features = false, features = ["std", "blake3"] }
+hekate-core = { workspace = true, default-features = false, features = ["std", "blake3"] }
+hekate-program = { workspace = true, default-features = false, features = ["std"] }
+proptest = "1.5"
+
+[dev-dependencies]
+hekate-gadgets = { workspace = true, features = ["std", "blake3"] }
+
+[lib]
+name = "hekate_scribble"
+path = "src/lib.rs"

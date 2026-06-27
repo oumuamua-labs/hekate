@@ -32,9 +32,9 @@ use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
-use zk_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
 
 type F = Block128;
 type H = DefaultHasher;

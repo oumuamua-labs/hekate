@@ -29,11 +29,11 @@ use hekate_program::permutation::{
 };
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use zk_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
 
 type F = Block128;
 type H = DefaultHasher;
