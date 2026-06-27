@@ -57,10 +57,10 @@ dhat = { version = "0.3", optional = true }
 [dev-dependencies]
 hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
 hekate-sdk = { workspace = true }
-hekate-keccak = { version = "0.1", default-features = false, features = ["std", "blake3"] }
-hekate-aes = { version = "0.1", default-features = false, features = ["std", "blake3"] }
-hekate-pqc = { version = "0.2", default-features = false, features = ["std", "blake3"] }
-zk-scribble = "0.1"
+hekate-keccak = { workspace = true, features = ["std", "blake3"] }
+hekate-aes = { workspace = true, features = ["std", "blake3"] }
+hekate-pqc = { workspace = true, features = ["std", "blake3"] }
+hekate-scribble = { workspace = true }
 criterion = "0.8"
 proptest = "1.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

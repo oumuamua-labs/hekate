@@ -27,7 +27,7 @@ verification on a laptop and mobile.
 
 ## ⚠️ Security Warning
 
-This crate has not been audited and may contain bugs and security flaws.
+This workspace has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
 
@@ -57,11 +57,11 @@ and fuzzer ship as independent crates you compose as needed.
 |:-------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------------------|
 | [`hekate-math`](https://github.com/oumuamua-labs/hekate-math)                              | Binary tower field arithmetic, constant-time, PMULL / PCLMULQDQ. The mathematical core.                     |
 | [`hekate-prover-sys`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-prover-sys) | Open FFI shim. Links the signed prover cdylib over a stable C ABI; the only crate that can call the prover. |
-| [`hekate-keccak`](https://github.com/oumuamua-labs/hekate-keccak)                          | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~16x memory savings.                            |
-| [`hekate-aes`](https://github.com/oumuamua-labs/hekate-aes)                                | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
-| [`hekate-pqc`](https://github.com/oumuamua-labs/hekate-pqc)                                | ML-KEM decapsulation and ML-DSA verification (FIPS 203 / 204), with NTT, basemul, norm-check.               |
+| [`hekate-keccak`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-keccak)         | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~16x memory savings.                            |
+| [`hekate-aes`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-aes)               | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
+| [`hekate-pqc`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-pqc)               | ML-KEM decapsulation and ML-DSA verification (FIPS 203 / 204), with NTT, basemul, norm-check.               |
 | [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile)                          | Wraps a Rust prover into a signed iOS `.xcframework` / Android `.aar` with a typed Swift / Kotlin API.      |
-| [`zk-scribble`](https://github.com/yoozzeek/zk-scribble)                                   | Community trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.         |
+| [`hekate-scribble`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-scribble)     | Trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.                   |
 
 The in-workspace crates: `hekate-core`, `hekate-crypto`, `hekate-program`, `hekate-verifier`,
 `hekate-sdk` are shown in the stack above.
@@ -303,11 +303,11 @@ AES-256).
 
 `hekate/examples/keccak_inline.rs <num_vars>`, default 20.
 
-| Scale (rows) | Permutations | Hashed  | Proving  | Verify   | Proof Size | Peak Heap | Total Alloc |
-|:-------------|:-------------|:--------|:---------|:---------|:-----------|:----------|:------------|
-| 2^15         | 1,310        | ~178 KB | 858 ms   | 4.1 ms   | 1,312 KiB  | 92 MB     | 255 MB      |
-| 2^20         | 41,943       | ~5.4 MB | 14.68 s  | 11.9 ms  | 5,156 KiB  | 2,278 MB  | 3,747 MB    |
-| 2^24         | 671,088      | ~91 MB  | 253.95 s | 44.3 ms  | 20,209 KiB | 31,088 MB | 51,535 MB   |
+| Scale (rows) | Permutations | Hashed  | Proving  | Verify  | Proof Size | Peak Heap | Total Alloc |
+|:-------------|:-------------|:--------|:---------|:--------|:-----------|:----------|:------------|
+| 2^15         | 1,310        | ~178 KB | 858 ms   | 4.1 ms  | 1,530 KiB  | 92 MB     | 255 MB      |
+| 2^20         | 41,943       | ~5.4 MB | 14.68 s  | 11.9 ms | 6,105 KiB  | 2,278 MB  | 3,747 MB    |
+| 2^24         | 671,088      | ~91 MB  | 253.95 s | 44.3 ms | 20,209 KiB | 31,088 MB | 51,535 MB   |
 
 ### Fibonacci (32-bit integer add), scaling
 

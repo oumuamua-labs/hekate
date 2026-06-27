@@ -32,9 +32,9 @@ use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
-use zk_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
 
 type F = Block128;
 type H = DefaultHasher;
@@ -401,23 +401,11 @@ fn b32_cell(v: u32) -> Flat<Block32> {
     Block32::from(v).to_hardware()
 }
 
-fn b64_cell(v: u64) -> Flat<Block64> {
-    Block64::from(v).to_hardware()
-}
-
 fn tamper_b32(trace: &mut ColumnTrace, col: usize, row: usize, value: u32) {
     if let TraceColumn::B32(c) = &mut trace.columns[col] {
         c[row] = b32_cell(value);
     } else {
         panic!("tamper_b32: column {col} is not B32");
-    }
-}
-
-fn tamper_b64(trace: &mut ColumnTrace, col: usize, row: usize, value: u64) {
-    if let TraceColumn::B64(c) = &mut trace.columns[col] {
-        c[row] = b64_cell(value);
-    } else {
-        panic!("tamper_b64: column {col} is not B64");
     }
 }
 
