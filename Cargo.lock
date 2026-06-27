@@ -933,10 +933,8 @@ dependencies = [
  "hekate-core",
  "hekate-crypto",
  "hekate-gadgets",
- "hekate-keccak",
  "hekate-math",
  "hekate-program",
- "keccak",
  "rayon",
 ]
 
