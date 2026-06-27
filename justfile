@@ -12,13 +12,17 @@ publish-all:
         hekate-verifier
         hekate-sdk
         hekate-prover-sys
-        hekate
+        hekate-scribble
+        hekate-keccak
+        hekate-aes
+        hekate-pqc
     )
     for c in "${crates[@]}"; do
-        if [ "$c" = "hekate-prover-sys" ]; then
-            cargo publish -p "$c" --features ct
-        else
-            cargo publish -p "$c"
-        fi
+        case "$c" in
+            hekate-prover-sys)
+                cargo publish -p "$c" --features ct ;;
+            *)
+                cargo publish -p "$c" ;;
+        esac
         cargo update
     done

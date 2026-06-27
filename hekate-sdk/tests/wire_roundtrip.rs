@@ -32,10 +32,7 @@ use hekate_gadgets::{
     IntArithmeticOp, MemoryEvent, RamChiplet, RomChiplet, generate_arithmetic_trace,
     generate_ram_trace, generate_rom_trace,
 };
-use hekate_keccak::{CpuKeccakColumns, CpuKeccakUnit, KeccakChiplet, generate_keccak_trace};
-use hekate_math::{
-    Bit, Block32, Block64, Block128, CanonicalDeserialize, CanonicalSerialize, TowerField,
-};
+use hekate_math::{Bit, Block32, Block128, CanonicalDeserialize, CanonicalSerialize, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{
@@ -127,112 +124,78 @@ fn fib_trace(num_vars: usize) -> ColumnTrace {
     tb.build()
 }
 
-// 2. Keccak isolated chiplet (virtual expansion + LogUp)
+// 2. RAM isolated chiplet (virtual expansion + LogUp)
 
 #[derive(Clone)]
-struct KeccakProgram {
-    keccak_num_rows: usize,
+struct RamProgram {
+    ram_num_rows: usize,
 }
 
-impl Air<F> for KeccakProgram {
+impl Air<F> for RamProgram {
     fn num_columns(&self) -> usize {
-        CpuKeccakColumns::NUM_COLUMNS
+        CpuMemColumns::NUM_COLUMNS
     }
 
     fn column_layout(&self) -> &[ColumnType] {
-        &[
-            // 25 × B64 lanes
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            ColumnType::B64,
-            // 1 × Bit selector
-            ColumnType::Bit,
-        ]
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(CpuMemColumns::build_layout)
     }
 
     fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        vec![(KeccakChiplet::BUS_ID.into(), CpuKeccakUnit::linking_spec())]
+        vec![(RamChiplet::BUS_ID.into(), CpuMemoryUnit::linking_spec())]
     }
 
     fn constraint_ast(&self) -> ConstraintAst<F> {
         let cs = ConstraintSystem::<F>::new();
-        cs.assert_boolean(cs.col(CpuKeccakColumns::SELECTOR));
+        cs.assert_boolean(cs.col(CpuMemColumns::SELECTOR));
+        cs.assert_boolean(cs.col(CpuMemColumns::IS_WRITE));
 
         cs.build()
     }
 }
 
-impl Program<F> for KeccakProgram {
+impl Program<F> for RamProgram {
     fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
-        let keccak = KeccakChiplet::new(self.keccak_num_rows);
-        Ok(vec![ChipletDef::from_air(&keccak)?])
+        let ram = RamChiplet::new(self.ram_num_rows);
+        Ok(vec![ChipletDef::from_air(&ram)?])
     }
 }
 
-fn keccak_traces(num_rows: usize) -> (ColumnTrace, ColumnTrace) {
+fn ram_traces(num_rows: usize) -> (ColumnTrace, ColumnTrace) {
     let num_vars = num_rows.trailing_zeros() as usize;
-    let layout = CpuKeccakColumns::build_layout();
+    let mut tb = TraceBuilder::new(&CpuMemColumns::build_layout(), num_vars).unwrap();
 
-    let mut tb = TraceBuilder::new(&layout, num_vars).unwrap();
+    let events = vec![
+        MemoryEvent::write(0x1000, 0, 42),
+        MemoryEvent::write(0x2000, 1, 99),
+        MemoryEvent::read(0x1000, 2, 42),
+        MemoryEvent::read(0x2000, 3, 99),
+    ];
 
-    let num_perms = num_rows / 25;
+    for (i, event) in events.iter().enumerate() {
+        let addr = event.addr_bytes();
+        let val = event.val_bytes();
 
-    let mut inputs = Vec::with_capacity(num_perms);
-    for p in 0..num_perms {
-        let mut state = [Block64::ZERO; 25];
-        for (i, s) in state.iter_mut().enumerate() {
-            *s = Block64::from((p * 25 + i) as u64);
+        for j in 0..4 {
+            tb.set_b32(CpuMemColumns::ADDR_B0 + j, i, Block32::from(addr[j] as u32))
+                .unwrap();
+            tb.set_b32(CpuMemColumns::VAL_B0 + j, i, Block32::from(val[j] as u32))
+                .unwrap();
         }
 
-        inputs.push(state);
-
-        let mut raw = [0u64; 25];
-        for (i, r) in raw.iter_mut().enumerate() {
-            *r = (p * 25 + i) as u64;
-        }
-
-        keccak::Keccak::new().with_f1600(|f| f(&mut raw));
-
-        let row_in = p * 25;
-        let row_out = row_in + 24;
-
-        for i in 0..25 {
-            tb.set_b64(i, row_in, state[i]).unwrap();
-            tb.set_b64(i, row_out, Block64::from(raw[i])).unwrap();
-        }
-
-        tb.set_bit(CpuKeccakColumns::SELECTOR, row_in, Bit::ONE)
-            .unwrap();
-        tb.set_bit(CpuKeccakColumns::SELECTOR, row_out, Bit::ONE)
-            .unwrap();
+        tb.set_bit(
+            CpuMemColumns::IS_WRITE,
+            i,
+            if event.is_write { Bit::ONE } else { Bit::ZERO },
+        )
+        .unwrap();
+        tb.set_bit(CpuMemColumns::SELECTOR, i, Bit::ONE).unwrap();
     }
 
     let cpu = tb.build();
-    let keccak = generate_keccak_trace(&inputs, None, num_rows).unwrap();
+    let ram = generate_ram_trace(&events, num_rows).unwrap();
 
-    (cpu, keccak)
+    (cpu, ram)
 }
 
 // 3. Many chiplets (ROM + Arithmetic + RAM)
@@ -788,27 +751,29 @@ fn roundtrip_fibonacci_main_trace_only() {
 }
 
 #[test]
-fn roundtrip_keccak_isolated_chiplet() {
+fn roundtrip_ram_isolated_chiplet() {
     let num_rows = 1 << 10;
 
-    let program = KeccakProgram {
-        keccak_num_rows: num_rows,
+    let program = RamProgram {
+        ram_num_rows: num_rows,
     };
 
-    let (cpu_trace, keccak_trace) = keccak_traces(num_rows);
+    let (cpu_trace, ram_trace) = ram_traces(num_rows);
+
     let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![keccak_trace]);
+    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![ram_trace]);
+
     let config = Config::default();
 
     let bytes = build_bundle(&program, &instance, &witness, &config).unwrap();
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
-    assert_bundle_eq(&program, &restored, &witness, "keccak");
+    assert_bundle_eq(&program, &restored, &witness, "ram");
 
     assert_eq!(restored.chiplet_defs.len(), 1);
     assert!(
         restored.chiplet_defs[0].virtual_expander().is_some(),
-        "keccak chiplet must have virtual expander"
+        "ram chiplet must have virtual expander"
     );
 }
 
