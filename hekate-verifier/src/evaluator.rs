@@ -27,6 +27,7 @@ use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::TraceCompatibleField;
 use hekate_core::utils;
 use hekate_crypto::Hasher;
+use hekate_crypto::expander_matrix::generate_expander_matrix;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::matrix::ByteSparseMatrix;
 use hekate_math::{Flat, HardwareField, PackableField};
@@ -463,7 +464,7 @@ fn cached_expander_matrix(
         return Arc::clone(matrix);
     }
 
-    let matrix = Arc::new(ByteSparseMatrix::generate_random(
+    let matrix = Arc::new(generate_expander_matrix(
         encoded_width,
         encoded_width,
         degree,
@@ -486,13 +487,13 @@ fn cached_expander_matrix(
 
 #[cfg(not(feature = "std"))]
 fn cached_expander_matrix(encoded_width: usize, degree: usize, seed: [u8; 32]) -> ByteSparseMatrix {
-    ByteSparseMatrix::generate_random(encoded_width, encoded_width, degree, seed)
+    generate_expander_matrix(encoded_width, encoded_width, degree, seed)
 }
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::cached_expander_matrix;
-    use hekate_math::matrix::ByteSparseMatrix;
+    use hekate_crypto::expander_matrix::generate_expander_matrix;
 
     #[test]
     fn cached_matrix_matches_fresh() {
@@ -500,7 +501,7 @@ mod tests {
 
         for &(width, degree) in &[(256usize, 16usize), (4296, 16), (256, 16)] {
             let cached = cached_expander_matrix(width, degree, seed);
-            let fresh = ByteSparseMatrix::generate_random(width, width, degree, seed);
+            let fresh = generate_expander_matrix(width, width, degree, seed);
 
             assert_eq!(cached.weights(), fresh.weights());
             assert_eq!(cached.col_indices(), fresh.col_indices());
