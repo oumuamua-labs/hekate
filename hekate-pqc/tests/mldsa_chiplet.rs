@@ -24,7 +24,7 @@ use hekate_keccak::{KeccakChiplet, KeccakWitness};
 use hekate_math::{Bit, Block32, Block64, Block128, Flat, HardwareField, TowerField};
 use hekate_pqc::high_bits::HighBitsLayout;
 use hekate_pqc::mldsa::{
-    self, CpuMlDsaColumns, CpuMlDsaUnit, MlDsaChiplet, MlDsaCtrlColumns, MlDsaLevel, MlDsaParams,
+    self, CpuMlDsaColumns, CpuMlDsaUnit, MlDsaChiplet, MlDsaCtrlColumns, MlDsaLevel,
     MlDsaPublicKey, MlDsaSignature,
 };
 use hekate_program::chiplet::ChipletDef;
@@ -107,37 +107,13 @@ impl Program<F> for MlDsaTestProgram {
     }
 }
 
-fn test_params(level: &MlDsaLevel) -> MlDsaParams {
-    match level.k() {
-        8 => MlDsaParams {
-            ctrl_rows: 1 << 17,
-            keccak_rows: 1 << 14,
-            ntt_rows: 1 << 17,
-            twiddle_rows: 1 << 17,
-            norm_rows: 1 << 12,
-            highbits_rows: 1 << 12,
-            ram_rows: 1 << 17,
-        },
-        _ => MlDsaParams {
-            ctrl_rows: 1 << 16,
-            keccak_rows: 1 << 13,
-            ntt_rows: 1 << 16,
-            twiddle_rows: 1 << 16,
-            norm_rows: 1 << 11,
-            highbits_rows: 1 << 11,
-            ram_rows: 1 << 16,
-        },
-    }
-}
-
 fn prove_and_verify_mldsa(
     level: MlDsaLevel,
     pk_bytes: &[u8],
     sig_bytes: &[u8],
     msg: &[u8],
 ) -> Result<bool, String> {
-    let params = test_params(&level);
-    let mldsa_chiplet = MlDsaChiplet::<F>::new(level, params);
+    let mldsa_chiplet = MlDsaChiplet::<F>::new(level);
 
     let pk = MlDsaPublicKey::from_bytes(level, pk_bytes);
     let sig = MlDsaSignature::from_bytes(level, sig_bytes).expect("NIST signature should parse");
@@ -321,8 +297,7 @@ where
     let (nist_pk, nist_sig) = nist_mldsa_65(msg);
 
     let level = MlDsaLevel::MLDSA_65;
-    let params = test_params(&level);
-    let mldsa_chiplet = MlDsaChiplet::<F>::new(level, params);
+    let mldsa_chiplet = MlDsaChiplet::<F>::new(level);
 
     let pk = MlDsaPublicKey::from_bytes(level, &nist_pk);
     let sig = MlDsaSignature::from_bytes(level, &nist_sig).expect("NIST signature must parse");

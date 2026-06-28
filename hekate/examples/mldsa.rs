@@ -38,8 +38,7 @@ use hekate::math::{Bit, Block32, Block128};
 use hekate_core::config::Config;
 use hekate_math::TowerField;
 use hekate_pqc::mldsa::{
-    self, CpuMlDsaColumns, CpuMlDsaUnit, MlDsaChiplet, MlDsaLevel, MlDsaParams, MlDsaPublicKey,
-    MlDsaSignature,
+    self, CpuMlDsaColumns, CpuMlDsaUnit, MlDsaChiplet, MlDsaLevel, MlDsaPublicKey, MlDsaSignature,
 };
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::builder::ConstraintSystem;
@@ -114,33 +113,9 @@ impl Program<F> for MlDsaVerifyProgram {
 // Main
 // =================================================================
 
-fn params_for_level(level: &MlDsaLevel) -> MlDsaParams {
-    match level.k() {
-        8 => MlDsaParams {
-            ctrl_rows: 1 << 17,
-            keccak_rows: 1 << 14,
-            ntt_rows: 1 << 17,
-            twiddle_rows: 1 << 17,
-            norm_rows: 1 << 12,
-            highbits_rows: 1 << 12,
-            ram_rows: 1 << 17,
-        },
-        _ => MlDsaParams {
-            ctrl_rows: 1 << 16,
-            keccak_rows: 1 << 13,
-            ntt_rows: 1 << 16,
-            twiddle_rows: 1 << 16,
-            norm_rows: 1 << 11,
-            highbits_rows: 1 << 11,
-            ram_rows: 1 << 16,
-        },
-    }
-}
-
 fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], msg: &[u8]) {
     common::init(label);
 
-    let params = params_for_level(&level);
     let cpu_num_rows: usize = 1 << 10;
     let domain = b"ML-DSA_Verify";
 
@@ -153,7 +128,7 @@ fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], 
 
     // Phase 1:
     // Generate traces.
-    let mldsa_chiplet = MlDsaChiplet::<F>::new(level, params);
+    let mldsa_chiplet = MlDsaChiplet::<F>::new(level);
 
     let (cpu_trace, chiplet_traces, io_public) = common::phase("Trace Generation", || {
         let chiplet_traces = mldsa_chiplet
