@@ -36,9 +36,7 @@ use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block32, Block128};
 use hekate_core::config::Config;
 use hekate_math::TowerField;
-use hekate_pqc::mlkem::{
-    self, CpuMlKemColumns, CpuMlKemUnit, MlKemChiplet, MlKemLevel, MlKemParams,
-};
+use hekate_pqc::mlkem::{self, CpuMlKemColumns, CpuMlKemUnit, MlKemChiplet, MlKemLevel};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
@@ -124,15 +122,6 @@ impl Program<F> for MlKemDecapsProgram {
 fn main() {
     common::init("ML-KEM-768 Decapsulation");
 
-    let params = MlKemParams {
-        ctrl_rows: 1 << 16,    // 65536 (NTT + Keccak + basemul + RAM dispatch)
-        keccak_rows: 1 << 11,  // 2048
-        ntt_rows: 1 << 15,     // 32768
-        twiddle_rows: 1 << 15, // 32768
-        basemul_rows: 1 << 12, // 4096
-        ram_rows: 1 << 16,     // 65536 (decrypt + encrypt + ct comparison)
-    };
-
     let cpu_num_rows: usize = 1 << 10; // 1024
 
     // Phase 1:
@@ -164,7 +153,7 @@ fn main() {
 
     // Phase 3:
     // Generate traces.
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params);
+    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
     let (cpu_trace, chiplet_traces, shared_secret) = common::phase("Trace Generation", || {
         let (chiplet_traces, shared_secret) = mlkem_chiplet

@@ -126,7 +126,7 @@ impl MlKemLevel {
 /// ML-KEM chiplet trace sizing.
 /// Internal sub-chiplet row counts.
 #[derive(Clone, Debug)]
-pub struct MlKemParams {
+pub(crate) struct MlKemParams {
     pub ctrl_rows: usize,
     pub keccak_rows: usize,
     pub ntt_rows: usize,
@@ -135,17 +135,20 @@ pub struct MlKemParams {
     pub ram_rows: usize,
 }
 
-impl Default for MlKemParams {
-    /// Use `Default` for ML-KEM-768 single-decaps.
-    /// Override for batched proofs or custom sizing.
-    fn default() -> Self {
+impl MlKemParams {
+    /// Sizes validated against the FIPS 203 KAT vectors.
+    pub(crate) fn for_level(level: MlKemLevel) -> Self {
+        let k = level.k;
+        let keccak_shift = if k >= 4 { 12 } else { 11 };
+        let ctrl_shift = if k >= 4 { 17 } else { 16 };
+
         Self {
-            ctrl_rows: 1 << 14,    // 16K
-            keccak_rows: 1 << 9,   // 512
-            ntt_rows: 1 << 15,     // 32K
-            twiddle_rows: 1 << 10, // 1K
-            basemul_rows: 1 << 12, // 4K
-            ram_rows: 1 << 15,     // 32K
+            ctrl_rows: 1 << ctrl_shift,
+            keccak_rows: 1 << keccak_shift,
+            ntt_rows: 1 << (14 + k.div_ceil(3)),
+            twiddle_rows: 1 << (14 + k.div_ceil(3)),
+            basemul_rows: 1 << (11 + k.div_ceil(2)),
+            ram_rows: 1 << (14 + k.div_ceil(2)),
         }
     }
 }
@@ -158,10 +161,7 @@ impl Default for MlKemParams {
 /// # Usage
 ///
 /// ```ignore
-/// let mlkem = MlKemChiplet::new(
-///     MlKemLevel::MLKEM_768,
-///     MlKemParams::default(),
-/// );
+/// let mlkem = MlKemChiplet::new(MlKemLevel::MLKEM_768);
 ///
 /// // In Program impl:
 /// fn chiplet_defs(&self) -> Vec<ChipletDef<F>> {
@@ -185,7 +185,9 @@ where
     <F as PackableField>::Packed: Copy + Send + Sync,
     Flat<F>: Send + Sync,
 {
-    pub fn new(level: MlKemLevel, params: MlKemParams) -> Self {
+    pub fn new(level: MlKemLevel) -> Self {
+        let params = MlKemParams::for_level(level);
+
         let ctrl = MlKemCtrlChiplet::new(params.ctrl_rows);
         let keccak = KeccakChiplet::new(params.keccak_rows);
         let ntt = NttChiplet::new(MLKEM_Q, params.ntt_rows);
@@ -218,10 +220,6 @@ where
 
     pub fn level(&self) -> MlKemLevel {
         self.level
-    }
-
-    pub fn params(&self) -> &MlKemParams {
-        &self.params
     }
 }
 
@@ -344,17 +342,7 @@ mod tests {
 
     #[test]
     fn composite_builds_six_chiplets() {
-        let mlkem = MlKemChiplet::<F>::new(
-            MlKemLevel::MLKEM_768,
-            MlKemParams {
-                ctrl_rows: 16,
-                keccak_rows: 32,
-                ntt_rows: 16,
-                twiddle_rows: 16,
-                basemul_rows: 16,
-                ram_rows: 16,
-            },
-        );
+        let mlkem = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
         assert_eq!(mlkem.composite().len(), 6);
         assert_eq!(mlkem.composite().name(), "mlkem");
@@ -362,17 +350,7 @@ mod tests {
 
     #[test]
     fn flatten_defs_produces_six_defs() {
-        let mlkem = MlKemChiplet::<F>::new(
-            MlKemLevel::MLKEM_768,
-            MlKemParams {
-                ctrl_rows: 16,
-                keccak_rows: 32,
-                ntt_rows: 16,
-                twiddle_rows: 16,
-                basemul_rows: 16,
-                ram_rows: 16,
-            },
-        );
+        let mlkem = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
         let defs: Vec<ChipletDef<F>> = mlkem.composite().flatten_defs().unwrap();
         assert_eq!(defs.len(), 6);
@@ -380,17 +358,7 @@ mod tests {
 
     #[test]
     fn internal_buses_namespaced() {
-        let mlkem = MlKemChiplet::<F>::new(
-            MlKemLevel::MLKEM_768,
-            MlKemParams {
-                ctrl_rows: 16,
-                keccak_rows: 32,
-                ntt_rows: 16,
-                twiddle_rows: 16,
-                basemul_rows: 16,
-                ram_rows: 16,
-            },
-        );
+        let mlkem = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
         let defs: Vec<ChipletDef<F>> = mlkem.composite().flatten_defs().unwrap();
 
@@ -441,17 +409,7 @@ mod tests {
 
     #[test]
     fn external_bus_spec_returned() {
-        let mlkem = MlKemChiplet::<F>::new(
-            MlKemLevel::MLKEM_768,
-            MlKemParams {
-                ctrl_rows: 16,
-                keccak_rows: 32,
-                ntt_rows: 16,
-                twiddle_rows: 16,
-                basemul_rows: 16,
-                ram_rows: 16,
-            },
-        );
+        let mlkem = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
         let ext = mlkem.composite().external_buses();
         assert_eq!(ext.len(), 2);

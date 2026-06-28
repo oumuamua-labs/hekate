@@ -179,7 +179,7 @@ impl MlDsaLevel {
 
 /// ML-DSA chiplet trace sizing.
 #[derive(Clone, Debug)]
-pub struct MlDsaParams {
+pub(crate) struct MlDsaParams {
     pub ctrl_rows: usize,
     pub keccak_rows: usize,
     pub ntt_rows: usize,
@@ -189,18 +189,28 @@ pub struct MlDsaParams {
     pub ram_rows: usize,
 }
 
-impl Default for MlDsaParams {
-    /// Default sizing for ML-DSA-65
-    /// single verification.
-    fn default() -> Self {
-        Self {
-            ctrl_rows: 1 << 15,     // 32K
-            keccak_rows: 1 << 11,   // 2K
-            ntt_rows: 1 << 16,      // 64K
-            twiddle_rows: 1 << 10,  // 1K
-            norm_rows: 1 << 11,     // 2K
-            highbits_rows: 1 << 11, // 2K
-            ram_rows: 1 << 15,      // 32K
+impl MlDsaParams {
+    /// Sizes validated against the FIPS 204 KAT vectors.
+    pub(crate) fn for_level(level: MlDsaLevel) -> Self {
+        match level.k() {
+            8 => Self {
+                ctrl_rows: 1 << 17,
+                keccak_rows: 1 << 14,
+                ntt_rows: 1 << 17,
+                twiddle_rows: 1 << 17,
+                norm_rows: 1 << 12,
+                highbits_rows: 1 << 12,
+                ram_rows: 1 << 17,
+            },
+            _ => Self {
+                ctrl_rows: 1 << 16,
+                keccak_rows: 1 << 13,
+                ntt_rows: 1 << 16,
+                twiddle_rows: 1 << 16,
+                norm_rows: 1 << 11,
+                highbits_rows: 1 << 11,
+                ram_rows: 1 << 16,
+            },
         }
     }
 }
@@ -222,7 +232,9 @@ where
     <F as PackableField>::Packed: Copy + Send + Sync,
     Flat<F>: Send + Sync,
 {
-    pub fn new(level: MlDsaLevel, params: MlDsaParams) -> Self {
+    pub fn new(level: MlDsaLevel) -> Self {
+        let params = MlDsaParams::for_level(level);
+
         let ctrl = MlDsaCtrlChiplet::new(params.ctrl_rows);
         let keccak = KeccakChiplet::new(params.keccak_rows);
         let ntt = NttChiplet::new(MLDSA_Q, params.ntt_rows);
@@ -257,10 +269,6 @@ where
 
     pub fn level(&self) -> MlDsaLevel {
         self.level
-    }
-
-    pub fn params(&self) -> &MlDsaParams {
-        &self.params
     }
 }
 
