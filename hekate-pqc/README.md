@@ -25,6 +25,13 @@ This crate has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
 
+### Proof soundness vs. PQC security level
+
+Soundness is field-capped at **≈128 bits**: a proof binds at ~2⁻¹²⁸ regardless of parameter set, for
+the higher levels (ML-KEM-768/1024, ML-DSA-65/87) the ZK proof is the weaker link, not the lattice scheme.
+ML-KEM-512 and ML-DSA-44 are matched. The proven decapsulation and verification are still the full
+FIPS 203 / 204 parameter sets.
+
 ---
 
 ## Examples
