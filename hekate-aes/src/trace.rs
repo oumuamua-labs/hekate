@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
-// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,12 @@
 //! xtime/mix_column use
 //! FIPS 197 GF(2^8) arithmetic
 //! with polynomial 0x11B.
+//!
+//! Constant-time by design: the S-box is `ct_sbox`
+//! (GF(2^8) inverse + affine), never a secret-indexed
+//! `SBOX[byte]` lookup. Zero-indicator bits are written
+//! unconditionally, gating a store on a secret byte
+//! leaks which key bytes are zero via cache timing.
 
 use alloc::vec::Vec;
 use hekate_core::errors::Error;
@@ -28,8 +34,8 @@ use hekate_math::{Bit, Block8, Block32, TowerField};
 
 use super::aes128::PhysAes128Columns as P128;
 use super::aes256::PhysAes256Columns as P256;
-use super::sbox_rom::gf256_inv;
-use super::{ROT_MAP, SBOX, SHIFT_MAP};
+use super::sbox_rom::{aes_affine, ct_sbox, gf256_inv};
+use super::{ROT_MAP, SHIFT_MAP};
 
 pub type Aes128Call = AesCall<16, 11>;
 pub type Aes256Call = AesCall<32, 15>;
@@ -340,9 +346,8 @@ fn write_128_row<const K: usize>(
         tb.set_b8_array(P128::P_K0_INV, i, &row.k0_inv.map(Block8))?;
 
         for j in 0..4 {
-            if row.k0_z[j] {
-                tb.set_bit(P128::P_K0_Z + j, i, Bit::ONE)?;
-            }
+            let z = if row.k0_z[j] { Bit::ONE } else { Bit::ZERO };
+            tb.set_bit(P128::P_K0_Z + j, i, z)?;
         }
     }
 
@@ -351,9 +356,8 @@ fn write_128_row<const K: usize>(
         tb.set_b8_array(P128::P_KS_INV, i, &row.ks_inv.map(Block8))?;
 
         for j in 0..4 {
-            if row.ks_z[j] {
-                tb.set_bit(P128::P_KS_Z + j, i, Bit::ONE)?;
-            }
+            let z = if row.ks_z[j] { Bit::ONE } else { Bit::ZERO };
+            tb.set_bit(P128::P_KS_Z + j, i, z)?;
         }
     }
 
@@ -429,9 +433,8 @@ fn write_256_row<const K: usize>(
         tb.set_b8_array(P256::P_KS_INV, i, &row.ks_inv.map(Block8))?;
 
         for j in 0..4 {
-            if row.ks_z[j] {
-                tb.set_bit(P256::P_KS_Z + j, i, Bit::ONE)?;
-            }
+            let z = if row.ks_z[j] { Bit::ONE } else { Bit::ZERO };
+            tb.set_bit(P256::P_KS_Z + j, i, z)?;
         }
     }
 
@@ -468,10 +471,10 @@ pub fn expand_key(key: &[u8; 16]) -> [[u8; 16]; 11] {
         // RotWord + SubWord + Rcon on last word
         let rot = [prev[13], prev[14], prev[15], prev[12]];
         let sub = [
-            SBOX[rot[0] as usize],
-            SBOX[rot[1] as usize],
-            SBOX[rot[2] as usize],
-            SBOX[rot[3] as usize],
+            ct_sbox(rot[0]),
+            ct_sbox(rot[1]),
+            ct_sbox(rot[2]),
+            ct_sbox(rot[3]),
         ];
 
         rk[r][0] = prev[0] ^ sub[0] ^ RCON[r - 1];
@@ -516,18 +519,18 @@ pub fn expand_key_256(key: &[u8; 32]) -> [[u8; 16]; 15] {
             // SubWord(RotWord(prev)) + Rcon
             let rot = [prev[1], prev[2], prev[3], prev[0]];
             [
-                back[0] ^ SBOX[rot[0] as usize] ^ RCON[i / 8 - 1],
-                back[1] ^ SBOX[rot[1] as usize],
-                back[2] ^ SBOX[rot[2] as usize],
-                back[3] ^ SBOX[rot[3] as usize],
+                back[0] ^ ct_sbox(rot[0]) ^ RCON[i / 8 - 1],
+                back[1] ^ ct_sbox(rot[1]),
+                back[2] ^ ct_sbox(rot[2]),
+                back[3] ^ ct_sbox(rot[3]),
             ]
         } else if i % 8 == 4 {
             // SubWord(prev), no RotWord, no Rcon
             [
-                back[0] ^ SBOX[prev[0] as usize],
-                back[1] ^ SBOX[prev[1] as usize],
-                back[2] ^ SBOX[prev[2] as usize],
-                back[3] ^ SBOX[prev[3] as usize],
+                back[0] ^ ct_sbox(prev[0]),
+                back[1] ^ ct_sbox(prev[1]),
+                back[2] ^ ct_sbox(prev[2]),
+                back[3] ^ ct_sbox(prev[3]),
             ]
         } else {
             [
@@ -571,13 +574,12 @@ pub fn aes256_encrypt_block(round_keys: &[[u8; 16]; 15], block: &[u8; 16]) -> [u
 /// multiply by 0x02 in GF(2^8)
 /// with irreducible polynomial 0x11B.
 fn xtime(b: u8) -> u8 {
-    let shifted = (b as u16) << 1;
-    (shifted ^ if b & 0x80 != 0 { 0x1B } else { 0 }) as u8
+    (b << 1) ^ (0x1B & 0u8.wrapping_sub(b >> 7))
 }
 
 fn sub_bytes(state: &mut [u8; 16]) {
     for b in state.iter_mut() {
-        *b = SBOX[*b as usize];
+        *b = ct_sbox(*b);
     }
 }
 
@@ -641,7 +643,7 @@ fn sbox_witness_bytes(input: [u8; 4]) -> ([u8; 4], [u8; 4], [bool; 4]) {
 
     for j in 0..4 {
         inv[j] = gf256_inv(input[j]);
-        sub[j] = SBOX[input[j] as usize];
+        sub[j] = aes_affine(inv[j]);
         z[j] = input[j] == 0;
     }
 
@@ -788,7 +790,7 @@ mod tests {
                     .to_tower()
                     .0;
 
-                assert_eq!(out, SBOX[inp as usize], "row {row} byte {j}");
+                assert_eq!(out, ct_sbox(inp), "row {row} byte {j}");
             }
         }
     }
