@@ -21,7 +21,7 @@ use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
 use hekate_core::trace::TraceBuilder;
-use hekate_math::matrix::ByteSparseMatrix;
+use hekate_crypto::expander_matrix::generate_expander_matrix;
 use hekate_math::{Bit, Block32, Flat, HardwareField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
@@ -220,7 +220,7 @@ fn brakedown_binary_weights_verified() {
         let seed = [seed_byte; 32];
 
         for &(dim, degree) in &[(20, 16), (36, 16), (64, 8), (128, 16)] {
-            let matrix = ByteSparseMatrix::generate_random(dim, dim, degree, seed);
+            let matrix = generate_expander_matrix(dim, dim, degree, seed);
 
             for c in 0..dim {
                 let mut unit_vec = vec![zero; dim];

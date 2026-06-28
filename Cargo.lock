@@ -794,9 +794,11 @@ dependencies = [
 name = "hekate-crypto"
 version = "0.29.0"
 dependencies = [
+ "aes",
  "blake3",
  "criterion",
  "hekate-math",
+ "proptest",
  "rand 0.10.1",
  "rayon",
  "sha2 0.11.0",
@@ -834,12 +836,10 @@ dependencies = [
 
 [[package]]
 name = "hekate-math"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2767f0836b1c294b1ac5efc2493a952069e9b9084bbbabbbcb2b895ca2c8bed"
+checksum = "79368419efbb6215ab68f36e0a0647bd3fd98978d2c58241c1e852e1c32723a7"
 dependencies = [
- "aes",
- "rand 0.10.1",
  "rayon",
  "serde",
  "zeroize",

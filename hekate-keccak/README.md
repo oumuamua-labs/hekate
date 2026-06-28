@@ -13,8 +13,8 @@ registers during evaluation. ~16x memory savings vs. naive bit-column layout.
 
 ```
 Scaling (Apple M3 Max):
-  2^15 trace rows (1,310 permutations): 919 ms, 92 MB peak, 1,530 KiB proof
-  2^20 trace rows (41,943 permutations): 14.16 s, 2.3 GB peak, 6,105 KiB proof
+  2^15 trace rows (1,310 permutations): 919 ms, 92 MB peak, 1,312 KiB proof
+  2^20 trace rows (41,943 permutations): 14.16 s, 2.3 GB peak, 5,156 KiB proof
   2^24 trace rows (671,088 permutations): 268 s, 31 GB peak, 20,209 KiB proof
 ```
 

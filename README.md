@@ -305,8 +305,8 @@ AES-256).
 
 | Scale (rows) | Permutations | Hashed  | Proving  | Verify  | Proof Size | Peak Heap | Total Alloc |
 |:-------------|:-------------|:--------|:---------|:--------|:-----------|:----------|:------------|
-| 2^15         | 1,310        | ~178 KB | 858 ms   | 4.1 ms  | 1,530 KiB  | 92 MB     | 255 MB      |
-| 2^20         | 41,943       | ~5.4 MB | 14.68 s  | 11.9 ms | 6,105 KiB  | 2,278 MB  | 3,747 MB    |
+| 2^15         | 1,310        | ~178 KB | 858 ms   | 4.1 ms  | 1,312 KiB  | 92 MB     | 255 MB      |
+| 2^20         | 41,943       | ~5.4 MB | 14.68 s  | 11.9 ms | 5,156 KiB  | 2,278 MB  | 3,747 MB    |
 | 2^24         | 671,088      | ~91 MB  | 253.95 s | 44.3 ms | 20,209 KiB | 31,088 MB | 51,535 MB   |
 
 ### Fibonacci (32-bit integer add), scaling
