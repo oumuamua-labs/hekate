@@ -803,17 +803,22 @@ pub fn ml_kem_decaps_traced(
     // in Compare phase yet.
     let _current_phase = Phase::Compare;
 
-    // Step 5:
-    // implicit rejection check
-    let ct_match = h_ct == h_ct_prime;
+    // FIPS 203 §6.3 steps 5-6:
+    // output K' on match, else the implicit-reject key K̄.
+    // The compare and select are branchless;
+    // a secret-dependent branch is an FO oracle.
+    let mut diff = 0u8;
+    for k in 0..32 {
+        diff |= h_ct[k] ^ h_ct_prime[k];
+    }
 
-    // Step 6:
-    // return K' (success) or K̄ (rejection)
+    // match_mask = 0xFF iff the hashes are equal, else 0x00
+    let differs = (diff | diff.wrapping_neg()) >> 7;
+    let match_mask = differs.wrapping_sub(1);
+
     let mut shared_secret = [0u8; 32];
-    if ct_match {
-        shared_secret.copy_from_slice(&k_bar);
-    } else {
-        shared_secret.copy_from_slice(&k_bar_reject);
+    for k in 0..32 {
+        shared_secret[k] = (k_bar[k] & match_mask) | (k_bar_reject[k] & !match_mask);
     }
 
     // Bind standalone NTT ops to RAM.
