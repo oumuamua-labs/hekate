@@ -22,6 +22,8 @@ extern crate core;
 
 mod hashers;
 
+#[cfg(feature = "expander")]
+pub mod expander_matrix;
 pub mod merkle;
 pub mod transcript;
 

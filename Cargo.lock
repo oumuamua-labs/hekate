@@ -794,9 +794,11 @@ dependencies = [
 name = "hekate-crypto"
 version = "0.29.0"
 dependencies = [
+ "aes",
  "blake3",
  "criterion",
  "hekate-math",
+ "proptest",
  "rand 0.10.1",
  "rayon",
  "sha2 0.11.0",
