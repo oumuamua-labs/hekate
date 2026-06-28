@@ -1449,7 +1449,7 @@ impl<F: TowerField> Air<F> for MlKemCtrlChiplet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mlkem::{MLKEM_Q, MlKemChiplet, MlKemLevel, MlKemParams};
+    use crate::mlkem::{MLKEM_Q, MlKemChiplet, MlKemLevel};
     use hekate_core::trace::TraceColumn;
     use hekate_math::{Bit, Block128};
     #[allow(deprecated)]
@@ -1578,15 +1578,7 @@ mod tests {
         let nist_ct = nist_ct.as_slice().to_vec();
         let nist_sk = dk.to_expanded_bytes().as_slice().to_vec();
 
-        let params = MlKemParams {
-            ctrl_rows: 1 << 16,
-            keccak_rows: 1 << 11,
-            ntt_rows: 1 << 15,
-            twiddle_rows: 1 << 15,
-            basemul_rows: 1 << 12,
-            ram_rows: 1 << 16,
-        };
-        let chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params);
+        let chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
         let (traces, _) = chiplet.generate_traces(&nist_ct, &nist_sk).unwrap();
 
         let ctrl = &traces[0];

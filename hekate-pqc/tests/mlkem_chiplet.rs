@@ -28,7 +28,7 @@ use hekate_crypto::transcript::Transcript;
 use hekate_keccak::{KeccakChiplet, KeccakWitness};
 use hekate_math::{Bit, Block32, Block64, Block128, Flat, HardwareField, TowerField};
 use hekate_pqc::mlkem::{
-    self, CpuMlKemColumns, CpuMlKemUnit, MlKemChiplet, MlKemCtrlColumns, MlKemLevel, MlKemParams,
+    self, CpuMlKemColumns, CpuMlKemUnit, MlKemChiplet, MlKemCtrlColumns, MlKemLevel,
 };
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::builder::ConstraintSystem;
@@ -126,42 +126,12 @@ impl Program<F> for MlKemTestProgram {
     }
 }
 
-fn params_for_level(level: MlKemLevel) -> MlKemParams {
-    // Scale trace sizes with k.
-    // Keccak:
-    // k^2 sample_ntt calls (each ~3 absorbs)
-    // plus CBD, G, H, J hashes.
-    //
-    // NTT:
-    // scales linearly with k.
-    //
-    // RAM:
-    // scales with k^2 (matrix-vector product).
-    let k = level.k;
-    let keccak_shift = if k >= 4 { 12 } else { 11 };
-    let ctrl_shift = if k >= 4 { 17 } else { 16 };
-
-    MlKemParams {
-        ctrl_rows: 1 << ctrl_shift,
-        keccak_rows: 1 << keccak_shift,
-        ntt_rows: 1 << (14 + k.div_ceil(3)),
-        twiddle_rows: 1 << (14 + k.div_ceil(3)),
-        basemul_rows: 1 << (11 + k.div_ceil(2)),
-        ram_rows: 1 << (14 + k.div_ceil(2)),
-    }
+fn prove_and_verify_mlkem(ct: &[u8], sk: &[u8]) -> Result<bool, String> {
+    prove_and_verify_mlkem_level(MlKemLevel::MLKEM_768, ct, sk)
 }
 
-fn prove_and_verify_mlkem(ct: &[u8], sk: &[u8], params: &MlKemParams) -> Result<bool, String> {
-    prove_and_verify_mlkem_level(MlKemLevel::MLKEM_768, ct, sk, params)
-}
-
-fn prove_and_verify_mlkem_level(
-    level: MlKemLevel,
-    ct: &[u8],
-    sk: &[u8],
-    params: &MlKemParams,
-) -> Result<bool, String> {
-    let mlkem_chiplet = MlKemChiplet::<F>::new(level, params.clone());
+fn prove_and_verify_mlkem_level(level: MlKemLevel, ct: &[u8], sk: &[u8]) -> Result<bool, String> {
+    let mlkem_chiplet = MlKemChiplet::<F>::new(level);
 
     let (chiplet_traces, shared_secret) = mlkem_chiplet
         .generate_traces(ct, sk)
@@ -251,17 +221,6 @@ fn prove_and_verify_mlkem_level(
         .map_err(|e| format!("verifier: {e:?}"))
 }
 
-fn test_params() -> MlKemParams {
-    MlKemParams {
-        ctrl_rows: 1 << 16,
-        keccak_rows: 1 << 11,
-        ntt_rows: 1 << 15,
-        twiddle_rows: 1 << 15,
-        basemul_rows: 1 << 12,
-        ram_rows: 1 << 16,
-    }
-}
-
 /// Builds an honest ML-KEM-768 trace,
 /// applies a tamper closure to the chiplet
 /// traces, runs the prover/verifier, and
@@ -273,8 +232,7 @@ where
 {
     let (ct_bytes, sk_bytes) = nist_mlkem_768();
 
-    let params = test_params();
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params);
+    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
     let (mut chiplet_traces, shared_secret) = mlkem_chiplet
         .generate_traces(&ct_bytes, &sk_bytes)
@@ -377,8 +335,7 @@ where
 {
     let (ct_bytes, sk_bytes) = nist_mlkem_768();
 
-    let params = test_params();
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params);
+    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
     let (mut chiplet_traces, shared_secret) = mlkem_chiplet
         .generate_traces(&ct_bytes, &sk_bytes)
@@ -526,7 +483,7 @@ fn mlkem_512_e2e() {
     let level = MlKemLevel::MLKEM_512;
     let (ct, sk) = nist_mlkem_512();
 
-    let result = prove_and_verify_mlkem_level(level, &ct, &sk, &params_for_level(level));
+    let result = prove_and_verify_mlkem_level(level, &ct, &sk);
 
     assert_eq!(result, Ok(true), "ML-KEM-512 E2E: {result:?}");
 }
@@ -537,7 +494,7 @@ fn mlkem_768_e2e() {
     let level = MlKemLevel::MLKEM_768;
     let (ct, sk) = nist_mlkem_768();
 
-    let result = prove_and_verify_mlkem_level(level, &ct, &sk, &params_for_level(level));
+    let result = prove_and_verify_mlkem_level(level, &ct, &sk);
 
     assert_eq!(result, Ok(true), "ML-KEM-768 E2E: {result:?}");
 }
@@ -548,7 +505,7 @@ fn mlkem_1024_e2e() {
     let level = MlKemLevel::MLKEM_1024;
     let (ct, sk) = nist_mlkem_1024();
 
-    let result = prove_and_verify_mlkem_level(level, &ct, &sk, &params_for_level(level));
+    let result = prove_and_verify_mlkem_level(level, &ct, &sk);
 
     assert_eq!(result, Ok(true), "ML-KEM-1024 E2E: {result:?}");
 }
@@ -563,7 +520,7 @@ fn mlkem_1024_e2e() {
 fn honest_prover_succeeds() {
     let (ct, sk) = nist_mlkem_768();
 
-    let result = prove_and_verify_mlkem(&ct, &sk, &test_params());
+    let result = prove_and_verify_mlkem(&ct, &sk);
     assert_eq!(result, Ok(true), "Honest prover must succeed: {result:?}",);
 }
 
@@ -585,7 +542,7 @@ fn wrong_secret_key_rejected() {
     // with wrong key differs). This should still
     // produce a VALID proof, implicit rejection
     // is a valid execution path.
-    let result = prove_and_verify_mlkem(&ct1, &sk2, &test_params());
+    let result = prove_and_verify_mlkem(&ct1, &sk2);
 
     // This SHOULD succeed, implicit rejection
     // is valid behavior. The proof proves that
@@ -614,7 +571,7 @@ fn tampered_ciphertext_valid_rejection() {
 
     // Decaps with tampered ct takes rejection path.
     // This is a VALID execution, proof should pass.
-    let result = prove_and_verify_mlkem(&ct_bad, &sk, &test_params());
+    let result = prove_and_verify_mlkem(&ct_bad, &sk);
     assert_eq!(
         result,
         Ok(true),
@@ -641,7 +598,7 @@ fn ram_enforces_ct_comparison() {
     let (ct, sk) = nist_mlkem_768();
 
     // Full prove/verify
-    let result = prove_and_verify_mlkem(&ct, &sk, &test_params());
+    let result = prove_and_verify_mlkem(&ct, &sk);
     assert_eq!(
         result,
         Ok(true),
@@ -666,8 +623,7 @@ fn ram_enforces_ct_comparison() {
 fn exploit_ntt_ram_binding_mismatch() {
     let (ct, sk) = nist_mlkem_768();
 
-    let params = test_params();
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params.clone());
+    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
     let (mut chiplet_traces, _) = mlkem_chiplet
         .generate_traces(&ct, &sk)
@@ -772,8 +728,7 @@ fn exploit_ntt_ram_binding_mismatch() {
 fn exploit_ntt_flow_connectivity_scramble() {
     let (ct, sk) = nist_mlkem_768();
 
-    let params = test_params();
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params.clone());
+    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
     let (mut chiplet_traces, _) = mlkem_chiplet
         .generate_traces(&ct, &sk)
@@ -881,8 +836,7 @@ fn exploit_ntt_flow_connectivity_scramble() {
 fn exploit_keccak_input_unbound() {
     let (ct, sk) = nist_mlkem_768();
 
-    let params = test_params();
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768, params.clone());
+    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
 
     let (mut chiplet_traces, _) = mlkem_chiplet
         .generate_traces(&ct, &sk)
