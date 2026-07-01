@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.29.0"
+version = "0.29.1"
 edition = "2024"
 rust-version = "1.87"
 license = "Apache-2.0"
@@ -30,14 +30,14 @@ authors = [
 
 [workspace.dependencies]
 hekate-math = { version = "0.8.0", default-features = false }
-hekate-crypto = { path = "hekate-crypto", version = "=0.29.0", default-features = false }
-hekate-core = { path = "hekate-core", version = "=0.29.0", default-features = false }
-hekate-program = { path = "hekate-program", version = "=0.29.0", default-features = false }
-hekate-verifier = { path = "hekate-verifier", version = "=0.29.0", default-features = false }
-hekate-sdk = { path = "hekate-sdk", version = "=0.29.0", default-features = false }
-hekate-gadgets = { path = "hekate-gadgets", version = "=0.29.0", default-features = false }
-hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.29.0", default-features = false }
-hekate-scribble = { path = "hekate-scribble", version = "=0.29.0", default-features = false }
+hekate-crypto = { path = "hekate-crypto", version = "=0.29.1", default-features = false }
+hekate-core = { path = "hekate-core", version = "=0.29.1", default-features = false }
+hekate-program = { path = "hekate-program", version = "=0.29.1", default-features = false }
+hekate-verifier = { path = "hekate-verifier", version = "=0.29.1", default-features = false }
+hekate-sdk = { path = "hekate-sdk", version = "=0.29.1", default-features = false }
+hekate-gadgets = { path = "hekate-gadgets", version = "=0.29.1", default-features = false }
+hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.29.1", default-features = false }
+hekate-scribble = { path = "hekate-scribble", version = "=0.29.1", default-features = false }
 hekate-keccak = { path = "hekate-keccak", version = "=0.2.0", default-features = false }
 hekate-aes = { path = "hekate-aes", version = "=0.2.0", default-features = false }
 hekate-pqc = { path = "hekate-pqc", version = "=0.3.0", default-features = false }

@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "hekate"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "bincode",
  "criterion",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-core"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "criterion",
  "dhat",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-crypto"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "aes",
  "blake3",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-gadgets"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "hekate-core",
  "hekate-math",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-program"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "hashbrown",
  "hekate-core",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-prover-sys"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-scribble"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "hekate-core",
  "hekate-gadgets",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-sdk"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "flatbuffers",
  "hashbrown",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-verifier"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
