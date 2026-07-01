@@ -85,6 +85,14 @@ only (raw trace never hashed, true ZK).
 **Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) decapsulation, AES-128/256,
 all proven natively in binary fields without bit-decomposition overhead.
 
+### Hardware Support
+
+| Architecture | Status     | Instructions                          |
+|:-------------|:-----------|:--------------------------------------|
+| aarch64      | Production | PMULL, NEON                           |
+| x86_64       | Fallback   | Software fallback (PCLMULQDQ roadmap) |
+| WASM         | Planned    | Software multiply                     |
+
 ---
 
 ## Quick Example
@@ -322,17 +330,7 @@ explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns.
 
 ---
 
-## Hardware Support
-
-| Architecture | Status      | Instructions                          |
-|:-------------|:------------|:--------------------------------------|
-| aarch64      | Production  | PMULL, NEON                           |
-| x86_64       | Development | Software fallback (PCLMULQDQ roadmap) |
-| WASM         | Fallback    | Software multiply                     |
-
----
-
-## Next Steps
+## Getting Started
 
 - [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), build from source, configure features
 - [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), first proof
