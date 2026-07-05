@@ -276,26 +276,27 @@ binary you can run with `cargo run --release --example <name>`.
 
 All numbers on Apple M3 Max (16 cores, 48 GB RAM), `--release` with `-C target-cpu=native`,
 features `std parallel blake3 table-math`. Measured on commit `master` with the example binaries
-in `hekate/examples/`. Peak / total heap via `dhat-heap`.
+in `hekate/examples/`. Peak RSS is the process maximum resident set size (`/usr/bin/time -l`).
 
 Reproduce:
 
 ```bash
-RUSTFLAGS="-C target-cpu=native" cargo run --release \
+RUSTFLAGS="-C target-cpu=native" cargo build --release \
   --no-default-features --features "std parallel blake3 table-math" \
-  --example <name> [-- <arg>]
+  --example <name>
+
+/usr/bin/time -l target/release/examples/<name> [<arg>]
 ```
 
 ### Post-Quantum Crypto and AES
 
-|              | ML-KEM-768 | ML-DSA-44 | ML-DSA-65 | ML-DSA-87 | AES-128   | AES-256   |
-|:-------------|:-----------|:----------|:----------|:----------|:----------|:----------|
-| Proving      | 945.36 ms  | 1.7 s     | 1.81 s    | 2.95 s    | 1.68 s    | 1.80 s    |
-| Verification | 12.4 ms    | 18.3 ms   | 18.9 ms   | 23.3 ms   | 8.8 ms    | 9.4 ms    |
-| Proof Size   | 4,232 KiB  | 5,139 KiB | 5,156 KiB | 8,620 KiB | 3,405 KiB | 3,706 KiB |
-| Peak Heap    | 331 MB     | 294 MB    | 294 MB    | 580 MB    | 772 MB    | 1,005 MB  |
-| Total Alloc  | 1.58 GB    | 3.75 GB   | 3.76 GB   | 7.28 GB   | 2.05 GB   | 2.40 GB   |
-| Chiplets     | 6          | 7         | 7         | 7         | 2         | 2         |
+|              | ML-KEM-768 | ML-DSA-44/65 | ML-DSA-87 | AES-128   | AES-256   |
+|:-------------|:-----------|:-------------|:----------|:----------|:----------|
+| Proving      | 945.36 ms  | 1.8 s        | 2.95 s    | 1.68 s    | 1.80 s    |
+| Verification | 12.4 ms    | 18.6 ms      | 23.3 ms   | 8.8 ms    | 9.4 ms    |
+| Proof Size   | 2,831 KiB  | 3,510 KiB    | 4,415 KiB | 2,856 KiB | 3,027 KiB |
+| Peak RSS     | 393 MB     | 435 MB       | 786 MB    | 854 MB    | 1,256 MB  |
+| Chiplets     | 6          | 7            | 7         | 2         | 2         |
 
 Chiplet trace sizes:
 
@@ -311,22 +312,22 @@ AES-256).
 
 `hekate/examples/keccak_inline.rs <num_vars>`, default 20.
 
-| Scale (rows) | Permutations | Hashed  | Proving  | Verify  | Proof Size | Peak Heap | Total Alloc |
-|:-------------|:-------------|:--------|:---------|:--------|:-----------|:----------|:------------|
-| 2^15         | 1,310        | ~178 KB | 455 ms   | 4.1 ms  | 1,312 KiB  | 92 MB     | 255 MB      |
-| 2^20         | 41,943       | ~5.4 MB | 10.77 s  | 11.9 ms | 5,156 KiB  | 2,278 MB  | 3,747 MB    |
-| 2^24         | 671,088      | ~91 MB  | 187.10 s | 44.3 ms | 20,209 KiB | 31,088 MB | 51,535 MB   |
+| Scale (rows) | Permutations | Hashed  | Proving  | Verify  | Proof Size | Peak RSS  |
+|:-------------|:-------------|:--------|:---------|:--------|:-----------|:----------|
+| 2^15         | 1,310        | ~178 KB | 455 ms   | 4.1 ms  | 642 KiB    | 143 MB    |
+| 2^20         | 41,943       | ~5.4 MB | 10.77 s  | 11.9 ms | 3,424 KiB  | 2,561 MB  |
+| 2^24         | 671,088      | ~91 MB  | 187.10 s | 44.3 ms | 13,403 KiB | 23,447 MB |
 
 ### Fibonacci (32-bit integer add), scaling
 
 `hekate/examples/fibonacci_raw.rs <num_vars>`, default 24. Each row: bit-sliced 32-bit add with
 explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns.
 
-| Scale (rows) | Proving   | Verify  | Proof Size | Peak Heap | Total Alloc |
-|:-------------|:----------|:--------|:-----------|:----------|:------------|
-| 2^20         | 583.62 ms | 5.1 ms  | 804 KiB    | 209 MB    | 361 MB      |
-| 2^24         | 8.54 s    | 19.1 ms | 2,956 KiB  | 3,077 MB  | 5,210 MB    |
-| 2^26         | 35.41 s   | 40.0 ms | 5,818 KiB  | 12,072 MB | 20,486 MB   |
+| Scale (rows) | Proving   | Verify  | Proof Size | Peak RSS  |
+|:-------------|:----------|:--------|:-----------|:----------|
+| 2^20         | 583.62 ms | 5.1 ms  | 647 KiB    | 138 MB    |
+| 2^24         | 8.54 s    | 19.1 ms | 2,499 KiB  | 1,805 MB  |
+| 2^26         | 35.41 s   | 40.0 ms | 4,951 KiB  | 6,972 MB  |
 
 ---
 
