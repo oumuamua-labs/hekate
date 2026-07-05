@@ -38,6 +38,7 @@ use hekate_core::proofs::InnerProof;
 use hekate_core::protocol;
 use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::{ColumnType, TraceCompatibleField};
+use hekate_core::utils::opened_row_bytes;
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{Flat, HardwareField, PackableField, TowerField};
@@ -119,7 +120,15 @@ where
             metrics.expansion_degree
         );
 
-        config.check_security(num_vars, field_bits)?;
+        let main_data_bytes: usize = program
+            .column_layout()
+            .iter()
+            .map(|ct| ct.byte_size())
+            .sum();
+
+        let main_row_bytes = opened_row_bytes(main_data_bytes, config.sumcheck_blinding_factor);
+
+        config.check_security(num_vars, field_bits, main_row_bytes)?;
 
         if proof.eval_proof.point_evaluations.is_empty() {
             return Err(errors::Error::Protocol {
@@ -523,14 +532,8 @@ where
         let blinding_factor = config.sumcheck_blinding_factor;
         let layout: Vec<ColumnType> = air.column_layout().to_vec();
 
-        let mut expected_row_bytes: usize = 0;
-        for ct in &layout {
-            expected_row_bytes += ct.byte_size() * 2;
-        }
-
-        // ZK Noise:
-        // B128 base + shift per blinding column.
-        expected_row_bytes += blinding_factor * 16 * 2;
+        let data_bytes: usize = layout.iter().map(|ct| ct.byte_size()).sum();
+        let expected_row_bytes = opened_row_bytes(data_bytes, blinding_factor);
 
         let parser = AirRowParser {
             air,
@@ -544,6 +547,7 @@ where
             points: vec![r_final],
             claimed_values_per_point: vec![claimed_values],
             num_vars,
+            row_bytes: expected_row_bytes,
             parser: &parser,
         };
 

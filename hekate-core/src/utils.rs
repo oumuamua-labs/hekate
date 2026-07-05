@@ -34,16 +34,24 @@ impl Instant {
 }
 
 /// Splitting variable `c` minimising
-/// `2^c · 16 + num_queries · 2^(num_vars - c) · row_bytes`
-/// at an assumed 128-byte row width.
+/// `2^c · 16 + num_queries · 2^(num_vars - c) · row_bytes`.
 #[inline(always)]
-pub fn compute_split_vars(num_vars: usize, num_queries: usize) -> usize {
+pub fn compute_split_vars(num_vars: usize, num_queries: usize, row_bytes: usize) -> usize {
     if num_vars == 0 {
         return 0;
     }
 
-    let factor = (num_queries * 8).max(1);
+    let ratio = (row_bytes / 16).max(1);
+    let factor = (num_queries * ratio).max(1);
     let optimal_c = (num_vars + factor.ilog2() as usize) / 2;
 
     optimal_c.clamp(1, num_vars.max(1))
+}
+
+/// Serialized width of one opened Brakedown grid row:
+/// base+shift of every physical column
+/// plus interleaved B128 noise.
+#[inline(always)]
+pub fn opened_row_bytes(physical_data_bytes: usize, sumcheck_blinding_factor: usize) -> usize {
+    2 * physical_data_bytes + 2 * sumcheck_blinding_factor * 16
 }

@@ -157,13 +157,6 @@ fn noise_entropy_inspection() {
     let columns = &proof.eval_proof.ldt_proof.opened_columns;
     assert!(!columns.is_empty(), "Must have opened columns");
 
-    // Calculate grid_rows based on the
-    // asymmetric grid formula used in Prover.
-    let grid_rows = {
-        let split_vars = compute_split_vars(num_vars, config.num_queries);
-        1 << (num_vars - split_vars)
-    };
-
     // Architecture:
     // FibAir uses [B32, B32, Bit]
     // Physical size = 4 + 4 + 1 = 9 bytes
@@ -174,6 +167,13 @@ fn noise_entropy_inspection() {
     // ZK Sumcheck noise is always Block128 (16 bytes).
     let noise_bytes_per_row = config.sumcheck_blinding_factor * 16 * 2;
     let bytes_per_row = data_bytes_per_row + noise_bytes_per_row;
+
+    // Calculate grid_rows based on the
+    // asymmetric grid formula used in Prover.
+    let grid_rows = {
+        let split_vars = compute_split_vars(num_vars, config.num_queries, bytes_per_row);
+        1 << (num_vars - split_vars)
+    };
 
     for col_data in columns {
         assert_eq!(

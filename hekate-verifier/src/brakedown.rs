@@ -68,11 +68,12 @@ where
         proof: &'a BrakedownProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
+        row_bytes: usize,
     ) -> errors::Result<OpenedRows<'a>> {
         let num_rows = commitment.num_rows;
         let num_vars = num_rows.trailing_zeros() as usize;
 
-        let split_vars = compute_split_vars(num_vars, config.num_queries);
+        let split_vars = compute_split_vars(num_vars, config.num_queries, row_bytes);
         let grid_cols = 1 << split_vars;
         let encoded_width = grid_cols + config.ldt_blinding_factor;
         let num_queries = config.num_queries;
@@ -186,7 +187,7 @@ mod tests {
         let num_cols = 1;
         let field_size = 16; // Block128 size
 
-        let split_vars = compute_split_vars(num_vars, config.num_queries);
+        let split_vars = compute_split_vars(num_vars, config.num_queries, 128);
 
         let grid_cols = 1 << split_vars;
         let grid_rows = 1 << (num_vars - split_vars);
@@ -271,6 +272,7 @@ mod tests {
             &proof,
             &mut verifier_transcript,
             &config,
+            128,
         );
 
         assert!(result.is_ok(), "Valid Brakedown proof should verify");
@@ -289,7 +291,7 @@ mod tests {
         let num_rows = 16;
         let num_vars = 4;
 
-        let split_vars = compute_split_vars(num_vars, config.num_queries);
+        let split_vars = compute_split_vars(num_vars, config.num_queries, 128);
         let grid_cols = 1 << split_vars;
         let encoded_width = grid_cols + config.ldt_blinding_factor;
 
@@ -312,7 +314,7 @@ mod tests {
 
         let mut transcript = Transcript::<H>::new(b"test");
         let result =
-            BrakedownVerifier::<F, H>::verify(&commitment, &proof, &mut transcript, &config);
+            BrakedownVerifier::<F, H>::verify(&commitment, &proof, &mut transcript, &config, 128);
 
         assert!(result.is_err(), "Tampered/Invalid proof should fail");
     }

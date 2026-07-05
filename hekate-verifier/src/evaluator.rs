@@ -56,6 +56,7 @@ pub struct EvalVerifyContext<'a, F: HardwareField, RP: VirtualRowParser<F>> {
     pub points: Vec<&'a [Flat<F>]>,
     pub claimed_values_per_point: Vec<&'a [Flat<F>]>,
     pub num_vars: usize,
+    pub row_bytes: usize,
     pub parser: &'a RP,
 }
 
@@ -125,6 +126,7 @@ where
         let points = ctx.points;
         let claimed_values_per_point = ctx.claimed_values_per_point;
         let num_vars = ctx.num_vars;
+        let row_bytes = ctx.row_bytes;
 
         let num_points = points.len();
         if num_points == 0 || claimed_values_per_point.len() != num_points {
@@ -198,7 +200,7 @@ where
         let q = &proof.tensor_vec;
         transcript.append_field_list(b"tensor_q", q);
 
-        let split_vars = utils::compute_split_vars(num_vars, config.num_queries);
+        let split_vars = utils::compute_split_vars(num_vars, config.num_queries, row_bytes);
         let grid_cols = 1 << split_vars;
         let grid_rows = 1 << (num_vars - split_vars);
         let encoded_width = grid_cols + config.ldt_blinding_factor;
@@ -260,6 +262,7 @@ where
             &proof.ldt_proof,
             transcript, // advances the real transcript
             config,
+            row_bytes,
         )?;
 
         // Replay randomness generation
