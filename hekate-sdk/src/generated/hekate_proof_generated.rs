@@ -582,125 +582,6 @@ pub mod hekate {
                 ds.finish()
             }
         }
-        pub enum MerklePathOffset {}
-        #[derive(Copy, Clone, PartialEq)]
-
-        pub struct MerklePath<'a> {
-            pub _tab: ::flatbuffers::Table<'a>,
-        }
-
-        impl<'a> ::flatbuffers::Follow<'a> for MerklePath<'a> {
-            type Inner = MerklePath<'a>;
-            #[inline]
-            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                Self {
-                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
-                }
-            }
-        }
-
-        impl<'a> MerklePath<'a> {
-            pub const VT_HASHES: ::flatbuffers::VOffsetT = 4;
-
-            #[inline]
-            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                MerklePath { _tab: table }
-            }
-            #[allow(unused_mut)]
-            pub fn create<
-                'bldr: 'args,
-                'args: 'mut_bldr,
-                'mut_bldr,
-                A: ::flatbuffers::Allocator + 'bldr,
-            >(
-                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args MerklePathArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<MerklePath<'bldr>> {
-                let mut builder = MerklePathBuilder::new(_fbb);
-                if let Some(x) = args.hashes {
-                    builder.add_hashes(x);
-                }
-                builder.finish()
-            }
-
-            #[inline]
-            pub fn hashes(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
-                            MerklePath::VT_HASHES,
-                            None,
-                        )
-                }
-            }
-        }
-
-        impl ::flatbuffers::Verifiable for MerklePath<'_> {
-            #[inline]
-            fn run_verifier(
-                v: &mut ::flatbuffers::Verifier,
-                pos: usize,
-            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
-                v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
-                        "hashes",
-                        Self::VT_HASHES,
-                        false,
-                    )?
-                    .finish();
-                Ok(())
-            }
-        }
-        pub struct MerklePathArgs<'a> {
-            pub hashes: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
-        }
-        impl<'a> Default for MerklePathArgs<'a> {
-            #[inline]
-            fn default() -> Self {
-                MerklePathArgs { hashes: None }
-            }
-        }
-
-        pub struct MerklePathBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
-            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
-        }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MerklePathBuilder<'a, 'b, A> {
-            #[inline]
-            pub fn add_hashes(
-                &mut self,
-                hashes: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
-            ) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<_>>(MerklePath::VT_HASHES, hashes);
-            }
-            #[inline]
-            pub fn new(
-                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> MerklePathBuilder<'a, 'b, A> {
-                let start = _fbb.start_table();
-                MerklePathBuilder {
-                    fbb_: _fbb,
-                    start_: start,
-                }
-            }
-            #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<MerklePath<'a>> {
-                let o = self.fbb_.end_table(self.start_);
-                ::flatbuffers::WIPOffset::new(o.value())
-            }
-        }
-
-        impl ::core::fmt::Debug for MerklePath<'_> {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("MerklePath");
-                ds.field("hashes", &self.hashes());
-                ds.finish()
-            }
-        }
         pub enum BrakedownProofOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -719,8 +600,8 @@ pub mod hekate {
         }
 
         impl<'a> BrakedownProof<'a> {
-            pub const VT_LDT_PROOFS: ::flatbuffers::VOffsetT = 4;
-            pub const VT_OPENED_COLUMNS: ::flatbuffers::VOffsetT = 6;
+            pub const VT_OPENED_COLUMNS: ::flatbuffers::VOffsetT = 4;
+            pub const VT_BATCH_PATH: ::flatbuffers::VOffsetT = 6;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -737,29 +618,15 @@ pub mod hekate {
                 args: &'args BrakedownProofArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<BrakedownProof<'bldr>> {
                 let mut builder = BrakedownProofBuilder::new(_fbb);
+                if let Some(x) = args.batch_path {
+                    builder.add_batch_path(x);
+                }
                 if let Some(x) = args.opened_columns {
                     builder.add_opened_columns(x);
-                }
-                if let Some(x) = args.ldt_proofs {
-                    builder.add_ldt_proofs(x);
                 }
                 builder.finish()
             }
 
-            #[inline]
-            pub fn ldt_proofs(
-                &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MerklePath<'a>>>>
-            {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MerklePath>>,
-                    >>(BrakedownProof::VT_LDT_PROOFS, None)
-                }
-            }
             #[inline]
             pub fn opened_columns(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
                 // Safety:
@@ -773,6 +640,19 @@ pub mod hekate {
                         )
                 }
             }
+            #[inline]
+            pub fn batch_path(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                            BrakedownProof::VT_BATCH_PATH,
+                            None,
+                        )
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for BrakedownProof<'_> {
@@ -782,12 +662,14 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<MerklePath>>,
-                    >>("ldt_proofs", Self::VT_LDT_PROOFS, false)?
                     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
                         "opened_columns",
                         Self::VT_OPENED_COLUMNS,
+                        false,
+                    )?
+                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
+                        "batch_path",
+                        Self::VT_BATCH_PATH,
                         false,
                     )?
                     .finish();
@@ -795,19 +677,15 @@ pub mod hekate {
             }
         }
         pub struct BrakedownProofArgs<'a> {
-            pub ldt_proofs: Option<
-                ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MerklePath<'a>>>,
-                >,
-            >,
             pub opened_columns: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub batch_path: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
         }
         impl<'a> Default for BrakedownProofArgs<'a> {
             #[inline]
             fn default() -> Self {
                 BrakedownProofArgs {
-                    ldt_proofs: None,
                     opened_columns: None,
+                    batch_path: None,
                 }
             }
         }
@@ -818,18 +696,6 @@ pub mod hekate {
         }
         impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BrakedownProofBuilder<'a, 'b, A> {
             #[inline]
-            pub fn add_ldt_proofs(
-                &mut self,
-                ldt_proofs: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<MerklePath<'b>>>,
-                >,
-            ) {
-                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    BrakedownProof::VT_LDT_PROOFS,
-                    ldt_proofs,
-                );
-            }
-            #[inline]
             pub fn add_opened_columns(
                 &mut self,
                 opened_columns: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
@@ -837,6 +703,16 @@ pub mod hekate {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     BrakedownProof::VT_OPENED_COLUMNS,
                     opened_columns,
+                );
+            }
+            #[inline]
+            pub fn add_batch_path(
+                &mut self,
+                batch_path: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    BrakedownProof::VT_BATCH_PATH,
+                    batch_path,
                 );
             }
             #[inline]
@@ -859,8 +735,8 @@ pub mod hekate {
         impl ::core::fmt::Debug for BrakedownProof<'_> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 let mut ds = f.debug_struct("BrakedownProof");
-                ds.field("ldt_proofs", &self.ldt_proofs());
                 ds.field("opened_columns", &self.opened_columns());
+                ds.field("batch_path", &self.batch_path());
                 ds.finish()
             }
         }

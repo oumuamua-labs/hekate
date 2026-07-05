@@ -28,7 +28,7 @@ use hekate_math::TowerField;
 
 use crate::generated::proof as fb;
 
-const WIRE_PROOF_VERSION: u32 = 1;
+const WIRE_PROOF_VERSION: u32 = 2;
 
 pub fn serialize_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -70,7 +70,7 @@ pub fn serialize_proof<'a, F: TowerField>(
     fb::Proof::create(
         fbb,
         &fb::ProofArgs {
-            version: 1,
+            version: WIRE_PROOF_VERSION,
             trace_commitment: Some(tc),
             zerocheck_proof: Some(zc),
             main_logup_aux: Some(mla),
@@ -242,22 +242,6 @@ fn serialize_brakedown_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     proof: &BrakedownProof<F>,
 ) -> flatbuffers::WIPOffset<fb::BrakedownProof<'a>> {
-    let ldt_offsets: Vec<_> = proof
-        .ldt_proofs
-        .iter()
-        .map(|path| {
-            let mut flat = Vec::with_capacity(path.len() * 32);
-            for hash in path {
-                flat.extend_from_slice(hash);
-            }
-
-            let data = fbb.create_vector(&flat);
-
-            fb::MerklePath::create(fbb, &fb::MerklePathArgs { hashes: Some(data) })
-        })
-        .collect();
-    let ldt = fbb.create_vector(&ldt_offsets);
-
     let mut flat_cols = Vec::new();
     for col in &proof.opened_columns {
         let len_bytes = (col.len() as u32).to_le_bytes();
@@ -267,11 +251,18 @@ fn serialize_brakedown_proof<'a, F: TowerField>(
 
     let cols = fbb.create_vector(&flat_cols);
 
+    let mut flat_path = Vec::with_capacity(proof.batch_path.len() * 32);
+    for hash in &proof.batch_path {
+        flat_path.extend_from_slice(hash);
+    }
+
+    let path = fbb.create_vector(&flat_path);
+
     fb::BrakedownProof::create(
         fbb,
         &fb::BrakedownProofArgs {
-            ldt_proofs: Some(ldt),
             opened_columns: Some(cols),
+            batch_path: Some(path),
         },
     )
 }
@@ -498,33 +489,6 @@ fn deserialize_eval_batch<F: TowerField>(fb: fb::EvalBatchProof<'_>) -> Result<E
 fn deserialize_brakedown_proof<F: TowerField>(
     fb: fb::BrakedownProof<'_>,
 ) -> Result<BrakedownProof<F>> {
-    let ldt_proofs = match fb.ldt_proofs() {
-        Some(paths) => {
-            let mut proofs = Vec::with_capacity(paths.len());
-            for i in 0..paths.len() {
-                let path = paths.get(i);
-                let hashes = match path.hashes() {
-                    Some(data) => data
-                        .bytes()
-                        .chunks_exact(32)
-                        .map(|c| {
-                            let mut h = [0u8; 32];
-                            h.copy_from_slice(c);
-
-                            h
-                        })
-                        .collect(),
-                    None => Vec::new(),
-                };
-
-                proofs.push(hashes);
-            }
-
-            proofs
-        }
-        None => Vec::new(),
-    };
-
     let opened_columns = match fb.opened_columns() {
         Some(data) => {
             let bytes = data.bytes();
@@ -550,7 +514,28 @@ fn deserialize_brakedown_proof<F: TowerField>(
         None => Vec::new(),
     };
 
-    Ok(BrakedownProof::new(ldt_proofs, opened_columns))
+    let batch_path = match fb.batch_path() {
+        Some(data) => {
+            let bytes = data.bytes();
+
+            if !bytes.len().is_multiple_of(32) {
+                return Err(wire_err("batch_path length not a multiple of 32"));
+            }
+
+            bytes
+                .chunks_exact(32)
+                .map(|c| {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(c);
+
+                    h
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
+    Ok(BrakedownProof::new(opened_columns, batch_path))
 }
 
 fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux<F>> {
