@@ -200,7 +200,8 @@ impl Config {
             .into());
         }
 
-        let split_vars = compute_split_vars(num_vars, self.num_queries, row_bytes);
+        let split_vars =
+            compute_split_vars(num_vars, self.num_queries, self.expansion_degree, row_bytes);
         let grid_cols = 1usize << split_vars;
 
         // Random-expander δ guarantees

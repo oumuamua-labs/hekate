@@ -171,7 +171,13 @@ fn noise_entropy_inspection() {
     // Calculate grid_rows based on the
     // asymmetric grid formula used in Prover.
     let grid_rows = {
-        let split_vars = compute_split_vars(num_vars, config.num_queries, bytes_per_row);
+        let split_vars = compute_split_vars(
+            num_vars,
+            config.num_queries,
+            config.expansion_degree,
+            bytes_per_row,
+        );
+
         1 << (num_vars - split_vars)
     };
 
