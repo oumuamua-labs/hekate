@@ -200,7 +200,13 @@ where
         let q = &proof.tensor_vec;
         transcript.append_field_list(b"tensor_q", q);
 
-        let split_vars = utils::compute_split_vars(num_vars, config.num_queries, row_bytes);
+        let split_vars = utils::compute_split_vars(
+            num_vars,
+            config.num_queries,
+            config.expansion_degree,
+            row_bytes,
+        );
+
         let grid_cols = 1 << split_vars;
         let grid_rows = 1 << (num_vars - split_vars);
         let encoded_width = grid_cols + config.ldt_blinding_factor;
@@ -257,13 +263,16 @@ where
 
         let mut ldt_transcript = transcript.clone();
 
-        let opened_columns = BrakedownVerifier::<F, H>::verify(
+        let openings = BrakedownVerifier::<F, H>::verify(
             commitment,
             &proof.ldt_proof,
             transcript, // advances the real transcript
             config,
             row_bytes,
         )?;
+
+        let opened_columns = openings.columns;
+        let slot_map = &openings.slot_map;
 
         // Replay randomness generation
         let mut random_indices = Vec::with_capacity(config.num_queries);
@@ -343,7 +352,7 @@ where
             // interleaved during matrix encoding, one
             // queried leaf natively contains all the
             // data needed for AIR transitions.
-            let col_bytes = &opened_columns[q_idx];
+            let col_bytes = &opened_columns[slot_map[q_idx]];
             let row_bytes_len = col_bytes.len() / grid_rows;
 
             let mut calculated_q_val = Flat::from_raw(F::ZERO);
