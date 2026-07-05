@@ -62,7 +62,7 @@ where
     /// 1. Bind public inputs, config,
     ///    and trace root into the transcript.
     /// 2. Absorb each chiplet header
-    ///    (name, rows, cols, root).
+    ///    (name, rows, cols, row_bytes, root).
     /// 3. Draw global LogUp challenges γ, β.
     /// 4. Per chiplet:
     ///    verify ZeroCheck (with LogUp)
@@ -245,12 +245,19 @@ where
         // =========================================================
         // PHASE 1: TRACE COMMITMENT & FIAT-SHAMIR BINDING
         // =========================================================
-        Self::verify_trace_commitment(program, instance, proof, transcript, config)?;
+        Self::verify_trace_commitment(
+            program,
+            instance,
+            proof,
+            transcript,
+            config,
+            main_row_bytes,
+        )?;
 
         // =========================================================
         // PHASE 2: COMMIT EACH CHIPLET (absorb roots)
         // =========================================================
-        Self::verify_chiplet_commitments_only(program, proof, transcript)?;
+        Self::verify_chiplet_commitments_only(program, proof, transcript, config)?;
 
         // =========================================================
         // PHASE 3: DRAW GLOBAL γ, β, AND r_bus PER LOOKUP BUS
@@ -352,6 +359,7 @@ where
         program: &P,
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
+        config: &Config,
     ) -> errors::Result<()> {
         let chiplet_defs = program.chiplet_defs()?;
 
@@ -366,11 +374,19 @@ where
             let c_comm = &proof.chiplet_commitments[c_idx];
             let c_num_rows = c_comm.num_rows;
 
+            let c_data_bytes: usize = Air::<F>::column_layout(def)
+                .iter()
+                .map(|ct| ct.byte_size())
+                .sum();
+
+            let c_row_bytes = opened_row_bytes(c_data_bytes, config.sumcheck_blinding_factor);
+
             protocol::absorb_chiplet_header(
                 transcript,
                 &def.name(),
                 c_num_rows,
                 def.num_columns(),
+                c_row_bytes,
                 &c_comm.root,
             );
 
@@ -564,6 +580,7 @@ where
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
+        main_row_bytes: usize,
     ) -> errors::Result<()> {
         let num_rows = instance.num_rows();
         let num_cols = program.num_columns();
@@ -576,6 +593,11 @@ where
             config.sumcheck_blinding_factor as u64,
         );
         transcript.append_u64(b"num_queries", config.num_queries as u64);
+
+        // Bind the Brakedown grid-geometry inputs
+        transcript.append_u64(b"expansion_degree", config.expansion_degree as u64);
+        transcript.append_message(b"matrix_seed", &config.matrix_seed);
+        transcript.append_u64(b"main_row_bytes", main_row_bytes as u64);
 
         for val in instance.public_inputs() {
             transcript.append_field(b"public_input", *val);
