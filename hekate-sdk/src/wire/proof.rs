@@ -501,7 +501,7 @@ fn deserialize_brakedown_proof<F: TowerField>(
                     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
 
-                if offset + len > bytes.len() {
+                if len > bytes.len() - offset {
                     return Err(wire_err("truncated opened_columns data"));
                 }
 
