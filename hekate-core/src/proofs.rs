@@ -86,27 +86,28 @@ impl<F: TowerField> InnerProof<F> {
 // BRAKEDOWN PROOF
 // ===================================
 
-/// LDT opening payload for
-/// one Brakedown commitment:
-/// the sibling paths and raw encoded-column bytes
-/// that a verifier replays against `trace_commitment`.
+/// LDT opening payload for one Brakedown commitment:
+/// the opened encoded columns and one octopus multiproof
+/// that a verifier replays against the commitment root.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BrakedownProof<F: TowerField> {
-    /// One Merkle sibling path per LDT query.
-    pub ldt_proofs: Vec<Vec<[u8; 32]>>,
-
-    /// Raw bytes of the opened 2D columns.
+    /// Raw bytes of the opened 2D columns, one per
+    /// distinct queried index in ascending order.
     /// Only encoded code bytes, data stays private.
     pub opened_columns: Vec<Vec<u8>>,
+
+    /// Octopus multiproof: pruned Merkle sibling
+    /// set covering all queried columns.
+    pub batch_path: Vec<[u8; 32]>,
 
     _marker: PhantomData<F>,
 }
 
 impl<F: TowerField> BrakedownProof<F> {
-    pub fn new(ldt_proofs: Vec<Vec<[u8; 32]>>, opened_columns: Vec<Vec<u8>>) -> Self {
+    pub fn new(opened_columns: Vec<Vec<u8>>, batch_path: Vec<[u8; 32]>) -> Self {
         Self {
-            ldt_proofs,
             opened_columns,
+            batch_path,
             _marker: PhantomData,
         }
     }
