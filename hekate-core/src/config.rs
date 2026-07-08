@@ -184,7 +184,12 @@ impl Config {
     /// Rejects configs that can't meet
     /// `min_security_bits` for the
     /// given trace dimensions.
-    pub fn check_security(&self, num_vars: usize, field_bits: usize) -> errors::Result<()> {
+    pub fn check_security(
+        &self,
+        num_vars: usize,
+        field_bits: usize,
+        row_bytes: usize,
+    ) -> errors::Result<()> {
         // ZK-privacy floor;
         // dev (min_security_bits == 0) waives it.
         if self.min_security_bits > 0 && self.ldt_blinding_factor < self.num_queries {
@@ -195,7 +200,8 @@ impl Config {
             .into());
         }
 
-        let split_vars = compute_split_vars(num_vars, self.num_queries);
+        let split_vars =
+            compute_split_vars(num_vars, self.num_queries, self.expansion_degree, row_bytes);
         let grid_cols = 1usize << split_vars;
 
         // Random-expander δ guarantees
@@ -273,7 +279,7 @@ mod tests {
         let prod = Config::prod();
 
         assert!(prod.estimated_security_bits(128) >= MIN_PRODUCTION_BITS);
-        assert!(prod.check_security(10, 128).is_ok());
+        assert!(prod.check_security(10, 128, 128).is_ok());
     }
 
     #[test]
@@ -281,7 +287,7 @@ mod tests {
         let dev = Config::dev();
 
         assert!(dev.estimated_security_bits(128) < MIN_PRODUCTION_BITS);
-        assert!(dev.check_security(10, 128).is_ok());
+        assert!(dev.check_security(10, 128, 128).is_ok());
     }
 
     #[test]
@@ -291,6 +297,6 @@ mod tests {
             ..Config::prod()
         };
 
-        assert!(weak.check_security(10, 128).is_err());
+        assert!(weak.check_security(10, 128, 128).is_err());
     }
 }

@@ -33,8 +33,6 @@ pub enum Error {
         leaf_index: usize,
         num_leaves: usize,
     },
-    SubtreeUnaligned,
-    SubtreeInternalIndexOutOfBounds,
 }
 
 impl fmt::Display for Error {
@@ -47,12 +45,6 @@ impl fmt::Display for Error {
                 f,
                 "Merkle leaf index out of bounds: leaf_index={leaf_index}, num_leaves={num_leaves}",
             ),
-            Self::SubtreeUnaligned => {
-                write!(f, "Merkle subtree range must be aligned to power of 2")
-            }
-            Self::SubtreeInternalIndexOutOfBounds => {
-                write!(f, "Merkle internal node index out of bounds (logic error)")
-            }
         }
     }
 }
@@ -69,7 +61,7 @@ pub struct MerkleTree<F: TowerField, H: Hasher = DefaultHasher> {
     num_leaves: usize,
 
     /// Guard for the `MaybeUninit` nodes:
-    /// reading `root`/`prove`/subtree ops
+    /// reading `root`/`prove`/`prove_batch`
     /// before `build_layers` runs is UB.
     built: bool,
 
@@ -307,131 +299,152 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
     }
 
     // =================================
-    // Subtree proofs
+    // Batch (octopus) proofs
     // =================================
 
-    /// Returns the hash of the subtree root spanning
-    /// leaves `[leaf_start_idx, leaf_start_idx + 2^height)`.
-    /// Used to batch-commit TensorPCS columns
-    /// without emitting one path per leaf.
-    pub fn get_internal_root(
-        &self,
-        leaf_start_idx: usize,
-        subtree_height: usize,
-    ) -> Result<[u8; 32]> {
+    /// Octopus multiproof: one pruned sibling set opening
+    /// every `leaf_indices` entry against the root, each
+    /// shared sibling sent once. Emitted in canonical order;
+    /// `verify_batch` must consume it in the same order.
+    pub fn prove_batch(&self, leaf_indices: &[usize]) -> Result<Vec<[u8; 32]>> {
         // SAFETY:
         // see `root`, requires `built`.
         assert!(
-            self.built,
-            "MerkleTree::get_internal_root called before build_layers"
+            self.nodes.is_empty() || self.built,
+            "MerkleTree::prove_batch called before build_layers"
         );
 
-        let num_leaves_in_subtree = 1 << subtree_height;
-
-        if !leaf_start_idx.is_multiple_of(num_leaves_in_subtree) {
-            return Err(Error::SubtreeUnaligned);
-        }
-
-        if leaf_start_idx + num_leaves_in_subtree > self.num_leaves {
-            return Err(Error::LeafIndexOutOfBounds {
-                leaf_index: leaf_start_idx + num_leaves_in_subtree,
-                num_leaves: self.num_leaves,
-            });
-        }
-
-        // Heap layout:
-        // leaves start at `num_leaves - 1`;
-        // walk up `subtree_height` levels
-        // to the ancestor.
-        let mut node_idx = (self.num_leaves - 1) + leaf_start_idx;
-        for _ in 0..subtree_height {
-            node_idx = (node_idx - 1) / 2;
-        }
-
-        if node_idx >= self.nodes.len() {
-            return Err(Error::SubtreeInternalIndexOutOfBounds);
-        }
-
-        unsafe { Ok(self.nodes[node_idx].assume_init()) }
-    }
-
-    /// Sibling path proving that `subtree_root`
-    /// sits at `subtree_height` inside the tree
-    /// committed to by `root`.
-    pub fn prove_subtree(
-        &self,
-        leaf_start_idx: usize,
-        subtree_height: usize,
-    ) -> Result<Vec<[u8; 32]>> {
-        // SAFETY:
-        // see `root`, requires `built`.
-        assert!(
-            self.built,
-            "MerkleTree::prove_subtree called before build_layers"
-        );
-
-        let num_leaves_in_subtree = 1 << subtree_height;
-        if !leaf_start_idx.is_multiple_of(num_leaves_in_subtree) {
-            return Err(Error::SubtreeUnaligned);
-        }
-
-        let mut node_idx = (self.num_leaves - 1) + leaf_start_idx;
-        for _ in 0..subtree_height {
-            node_idx = (node_idx - 1) / 2;
-        }
-
-        let depth = (self.num_leaves.trailing_zeros() as usize) - subtree_height;
-        let mut proof = Vec::with_capacity(depth);
-
-        // Odd child index -> node is the left one,
-        // sibling is +1.
-        // Even child index -> node is the right one,
-        // sibling is -1.
-        while node_idx > 0 {
-            let sibling_idx = if !node_idx.is_multiple_of(2) {
-                node_idx + 1
-            } else {
-                node_idx - 1
-            };
-
-            let sib = unsafe { self.nodes[sibling_idx].assume_init() };
-            proof.push(sib);
-
-            node_idx = (node_idx - 1) / 2;
-        }
-
-        Ok(proof)
-    }
-
-    pub fn verify_subtree(
-        root: &[u8; 32],
-        subtree_root: [u8; 32],
-        leaf_start_idx: usize,
-        subtree_height: usize,
-        proof: &[[u8; 32]],
-    ) -> bool {
-        // Logical index of the subtree in its layer,
-        // e.g. leaves 256..512 with height 8 -> index 1.
-        let mut node_logical_idx = leaf_start_idx >> subtree_height;
-        let mut current_hash = subtree_root;
-
-        for sibling in proof {
-            let mut hasher = H::new();
-            hasher.update(&[1u8]);
-
-            if node_logical_idx.is_multiple_of(2) {
-                hasher.update(&current_hash);
-                hasher.update(sibling);
-            } else {
-                hasher.update(sibling);
-                hasher.update(&current_hash);
+        let mut frontier: Vec<usize> = Vec::with_capacity(leaf_indices.len());
+        for &idx in leaf_indices {
+            if idx >= self.num_leaves {
+                return Err(Error::LeafIndexOutOfBounds {
+                    leaf_index: idx,
+                    num_leaves: self.num_leaves,
+                });
             }
 
-            current_hash = hasher.finalize();
-            node_logical_idx /= 2;
+            frontier.push(idx);
         }
 
-        &current_hash == root
+        frontier.sort_unstable();
+        frontier.dedup();
+
+        let mut siblings = Vec::new();
+        let mut next: Vec<usize> = Vec::with_capacity(frontier.len());
+        let mut layer_width = self.num_leaves;
+
+        while layer_width > 1 {
+            let layer_offset = layer_width - 1;
+
+            next.clear();
+
+            let mut i = 0;
+            while i < frontier.len() {
+                let node = frontier[i];
+                let sibling = node ^ 1;
+
+                if i + 1 < frontier.len() && frontier[i + 1] == sibling {
+                    i += 2;
+                } else {
+                    // SAFETY:
+                    // `built` guarantees every node is
+                    // initialized; `sibling < layer_width`
+                    // keeps the index inside this layer.
+                    siblings.push(unsafe { self.nodes[layer_offset + sibling].assume_init() });
+
+                    i += 1;
+                }
+
+                next.push(node >> 1);
+            }
+
+            core::mem::swap(&mut frontier, &mut next);
+
+            layer_width >>= 1;
+        }
+
+        Ok(siblings)
+    }
+
+    /// Verifies a `prove_batch` multiproof against `root`.
+    /// `num_leaves` is the padded power-of-two leaf count;
+    /// `leaves` must be sorted strictly ascending by index.
+    pub fn verify_batch(
+        root: &[u8; 32],
+        num_leaves: usize,
+        leaves: &[(usize, [u8; 32])],
+        siblings: &[[u8; 32]],
+    ) -> bool {
+        if !num_leaves.is_power_of_two() || leaves.is_empty() {
+            return false;
+        }
+
+        let mut frontier: Vec<(usize, [u8; 32])> = Vec::with_capacity(leaves.len());
+        let mut prev: Option<usize> = None;
+
+        for &(idx, hash) in leaves {
+            if idx >= num_leaves {
+                return false;
+            }
+
+            if let Some(p) = prev
+                && idx <= p
+            {
+                return false;
+            }
+
+            prev = Some(idx);
+            frontier.push((idx, hash));
+        }
+
+        let mut sib_pos = 0usize;
+        let mut next: Vec<(usize, [u8; 32])> = Vec::with_capacity(leaves.len());
+        let mut layer_width = num_leaves;
+
+        while layer_width > 1 {
+            next.clear();
+
+            let mut i = 0;
+            while i < frontier.len() {
+                let (idx, hash) = frontier[i];
+                let sibling_idx = idx ^ 1;
+
+                let (left, right) = if i + 1 < frontier.len() && frontier[i + 1].0 == sibling_idx {
+                    let sib_hash = frontier[i + 1].1;
+                    i += 2;
+
+                    (hash, sib_hash)
+                } else {
+                    if sib_pos >= siblings.len() {
+                        return false;
+                    }
+
+                    let sib_hash = siblings[sib_pos];
+
+                    sib_pos += 1;
+                    i += 1;
+
+                    if idx.is_multiple_of(2) {
+                        (hash, sib_hash)
+                    } else {
+                        (sib_hash, hash)
+                    }
+                };
+
+                let mut hasher = H::new();
+                hasher.update(&[1u8]);
+                hasher.update(&left);
+                hasher.update(&right);
+
+                next.push((idx >> 1, hasher.finalize()));
+            }
+
+            core::mem::swap(&mut frontier, &mut next);
+
+            layer_width >>= 1;
+        }
+
+        sib_pos == siblings.len() && frontier.len() == 1 && &frontier[0].1 == root
     }
 }
 
@@ -544,6 +557,14 @@ mod tests {
         hasher.update(data);
 
         hasher.finalize()
+    }
+
+    fn batch_leaves(indices: &[usize], leaf_hashes: &[[u8; 32]]) -> Vec<(usize, [u8; 32])> {
+        let mut distinct = indices.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+
+        distinct.into_iter().map(|i| (i, leaf_hashes[i])).collect()
     }
 
     #[test]
@@ -695,6 +716,168 @@ mod tests {
         let t2 = MerkleTree::<Block128, H>::new(&leaves);
 
         assert_ne!(t1.root(), t2.root());
+    }
+
+    #[test]
+    fn batch_proof_verifies_and_matches_single_paths() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..64u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+        let root = tree.root();
+
+        for query in [
+            &[0usize][..],
+            &[63],
+            &[0, 1],
+            &[0, 63],
+            &[7, 7, 7],
+            &[0, 1, 2, 5, 17, 63],
+            &[1, 3, 5, 7, 9, 11, 40, 41],
+        ] {
+            let siblings = tree.prove_batch(query).unwrap();
+            let leaves = batch_leaves(query, &leaf_hashes);
+
+            assert!(
+                MerkleTree::<Block128, H>::verify_batch(&root, 64, &leaves, &siblings),
+                "batch proof rejected for {query:?}"
+            );
+
+            for &(idx, leaf) in &leaves {
+                let single = tree.prove(idx).unwrap();
+                assert!(MerkleTree::<Block128, H>::verify(&root, leaf, idx, &single));
+            }
+        }
+    }
+
+    #[test]
+    fn batch_proof_full_leaf_set_needs_no_siblings() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..32u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+
+        let all: Vec<usize> = (0..32).collect();
+        let siblings = tree.prove_batch(&all).unwrap();
+
+        assert!(siblings.is_empty(), "full leaf set needs zero siblings");
+
+        let leaves = batch_leaves(&all, &leaf_hashes);
+
+        assert!(MerkleTree::<Block128, H>::verify_batch(
+            &tree.root(),
+            32,
+            &leaves,
+            &siblings
+        ));
+    }
+
+    #[test]
+    fn batch_proof_single_leaf_sibling_count_is_depth() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..64u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+
+        let siblings = tree.prove_batch(&[42]).unwrap();
+
+        assert_eq!(siblings.len(), 6, "single-leaf octopus is a full path");
+        assert_eq!(siblings, tree.prove(42).unwrap());
+    }
+
+    #[test]
+    fn verify_batch_rejects_tampering() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..64u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+        let root = tree.root();
+
+        let query = [3usize, 8, 8, 20, 55];
+        let siblings = tree.prove_batch(&query).unwrap();
+        let leaves = batch_leaves(&query, &leaf_hashes);
+
+        assert!(MerkleTree::<Block128, H>::verify_batch(
+            &root, 64, &leaves, &siblings
+        ));
+
+        let mut wrong_leaf = leaves.clone();
+        wrong_leaf[1].1 = hash_bytes(b"forged");
+
+        assert!(!MerkleTree::<Block128, H>::verify_batch(
+            &root,
+            64,
+            &wrong_leaf,
+            &siblings
+        ));
+
+        let mut extra = siblings.clone();
+        extra.push([0u8; 32]);
+
+        assert!(
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &leaves, &extra),
+            "unconsumed extra sibling must reject"
+        );
+
+        let missing = &siblings[..siblings.len() - 1];
+
+        assert!(
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &leaves, missing),
+            "missing sibling must reject"
+        );
+
+        assert!(!MerkleTree::<Block128, H>::verify_batch(
+            &[9u8; 32], 64, &leaves, &siblings
+        ));
+
+        let unsorted = vec![leaves[2], leaves[0], leaves[1], leaves[3]];
+
+        assert!(
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &unsorted, &siblings),
+            "unsorted leaves must reject"
+        );
+
+        let dup = vec![leaves[0], leaves[0], leaves[1]];
+
+        assert!(
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &dup, &siblings),
+            "duplicate leaf indices must reject"
+        );
+
+        assert!(
+            !MerkleTree::<Block128, H>::verify_batch(&root, 63, &leaves, &siblings),
+            "non-power-of-two leaf count must reject"
+        );
+    }
+
+    #[test]
+    fn batch_proof_padded_tree() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..5u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+        let padded = tree.num_leaves();
+
+        assert_eq!(padded, 8);
+
+        let query = [0usize, 4];
+        let siblings = tree.prove_batch(&query).unwrap();
+        let padded_hashes: Vec<[u8; 32]> = (0..padded)
+            .map(|i| {
+                if i < leaf_hashes.len() {
+                    leaf_hashes[i]
+                } else {
+                    [0u8; 32]
+                }
+            })
+            .collect();
+
+        let leaves = batch_leaves(&query, &padded_hashes);
+
+        assert!(MerkleTree::<Block128, H>::verify_batch(
+            &tree.root(),
+            padded,
+            &leaves,
+            &siblings
+        ));
+    }
+
+    #[test]
+    fn prove_batch_rejects_oob_index() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..8u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+
+        assert!(tree.prove_batch(&[0, 8]).is_err());
     }
 
     #[test]

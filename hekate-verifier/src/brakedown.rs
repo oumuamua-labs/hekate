@@ -25,10 +25,17 @@ use hekate_core::utils::compute_split_vars;
 use hekate_crypto::Hasher;
 use hekate_crypto::merkle::MerkleTree;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Block8, HardwareField, PackableField, TowerField};
+use hekate_math::{Block8, HardwareField, PackableField};
 use tracing::instrument;
 
 pub type OpenedRows<'a> = &'a [Vec<u8>];
+
+/// Distinct opened columns plus the per-query slot map.
+/// `slot_map[q]` indexes `columns` for the q-th query.
+pub struct VerifiedOpenings<'a> {
+    pub columns: OpenedRows<'a>,
+    pub slot_map: Vec<usize>,
+}
 
 #[derive(Clone, Debug)]
 pub struct BrakedownVerifier<F, H: Hasher> {
@@ -39,40 +46,28 @@ impl<F, H: Hasher> BrakedownVerifier<F, H>
 where
     F: HardwareField + PackableField + From<Block8> + From<u128>,
 {
-    /// Verifies the Brakedown LDT
-    /// opening for random columns.
-    ///
-    /// # Architecture: LDT Merkle Verification
-    ///
-    /// The Verifier does not have the original 2D grid.
-    /// It only has the Merkle `ROOT`. For each randomly
-    /// selected column, the Prover provides the raw column
-    /// data and a Merkle path. The Verifier hashes the
-    /// column and recomputes the path up to the root
-    /// to ensure data integrity.
-    ///
-    /// ```text
-    ///                  [ ROOT (Merkle Root) ]  <-- Known to Verifier
-    ///                          /      \
-    ///                      Hash_L    Hash_R    <-- Recomputed using Merkle Path
-    ///                      /   \      /   \
-    ///                    ...   ...  ...   ...
-    ///                   /                  \
-    ///                 Hash_i                ...
-    ///                  |
-    /// Opened Column: [ C_i ] <-- Prover provides this column + Path
-    /// ```
+    /// Verifies the Brakedown LDT opening: hashes each
+    /// distinct opened column to a leaf and replays one
+    /// octopus multiproof against the commitment root.
+    /// Returns the columns plus a per-query slot map.
     #[instrument(skip_all, name = "Brakedown::verify")]
     pub fn verify<'a>(
         commitment: &BrakedownCommitment,
         proof: &'a BrakedownProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
-    ) -> errors::Result<OpenedRows<'a>> {
+        row_bytes: usize,
+    ) -> errors::Result<VerifiedOpenings<'a>> {
         let num_rows = commitment.num_rows;
         let num_vars = num_rows.trailing_zeros() as usize;
 
-        let split_vars = compute_split_vars(num_vars, config.num_queries);
+        let split_vars = compute_split_vars(
+            num_vars,
+            config.num_queries,
+            config.expansion_degree,
+            row_bytes,
+        );
+
         let grid_cols = 1 << split_vars;
         let encoded_width = grid_cols + config.ldt_blinding_factor;
         let num_queries = config.num_queries;
@@ -89,70 +84,68 @@ where
             random_indices.push((rng_val % (encoded_width as u64)) as usize);
         }
 
-        if proof.opened_columns.len() != num_queries {
+        // One opened column and one octopus leaf
+        // per distinct queried index, ascending.
+        let mut distinct = random_indices.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+
+        if proof.opened_columns.len() != distinct.len() {
             return Err(errors::Error::Protocol {
                 protocol: "brakedown",
-                message: "opened column count does not match num_queries",
+                message: "opened column count does not match distinct query count",
             });
         }
 
         #[cfg(feature = "parallel")]
-        {
+        let leaves: Vec<(usize, [u8; 32])> = {
             use rayon::prelude::*;
 
-            random_indices
+            distinct
                 .par_iter()
-                .enumerate()
-                .try_for_each(|(idx, &col_idx)| {
-                    verify_single_column::<F, H>(&commitment.root, col_idx, proof, idx, idx)
-                })?;
-        }
+                .zip(proof.opened_columns.par_iter())
+                .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
+                .collect()
+        };
 
         #[cfg(not(feature = "parallel"))]
-        for (idx, &col_idx) in random_indices.iter().enumerate() {
-            verify_single_column::<F, H>(&commitment.root, col_idx, proof, idx, idx)?;
+        let leaves: Vec<(usize, [u8; 32])> = distinct
+            .iter()
+            .zip(proof.opened_columns.iter())
+            .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
+            .collect();
+
+        let padded_leaves = encoded_width.next_power_of_two();
+
+        if !MerkleTree::<F, H>::verify_batch(
+            &commitment.root,
+            padded_leaves,
+            &leaves,
+            &proof.batch_path,
+        ) {
+            return Err(errors::Error::Protocol {
+                protocol: "brakedown",
+                message: "batch merkle proof verification failed",
+            });
         }
 
-        Ok(&proof.opened_columns)
+        let mut slot_map = Vec::with_capacity(num_queries);
+        for &col_idx in &random_indices {
+            let slot = distinct
+                .binary_search(&col_idx)
+                .map_err(|_| errors::Error::Protocol {
+                    protocol: "brakedown",
+                    message: "query index missing from distinct set",
+                })?;
+
+            slot_map.push(slot);
+        }
+
+        Ok(VerifiedOpenings {
+            columns: &proof.opened_columns,
+            slot_map,
+        })
     }
-}
-
-/// Helper:
-/// Verify a single 2D column
-/// using individual merkle path.
-fn verify_single_column<F: TowerField, H: Hasher>(
-    root: &[u8; 32],
-    col_idx: usize,
-    proof: &BrakedownProof<F>,
-    opened_idx: usize,
-    proof_idx: usize,
-) -> errors::Result<()> {
-    if opened_idx >= proof.opened_columns.len() {
-        return Err(errors::Error::Protocol {
-            protocol: "brakedown",
-            message: "opened columns index out of bounds",
-        });
-    }
-    if proof_idx >= proof.ldt_proofs.len() {
-        return Err(errors::Error::Protocol {
-            protocol: "brakedown",
-            message: "ldt proofs index out of bounds",
-        });
-    }
-
-    let code_bytes = &proof.opened_columns[opened_idx];
-    let merkle_path = &proof.ldt_proofs[proof_idx];
-
-    let leaf_hash = hash_leaf::<H>(code_bytes);
-
-    if !MerkleTree::<F, H>::verify(root, leaf_hash, col_idx, merkle_path) {
-        return Err(errors::Error::Protocol {
-            protocol: "brakedown",
-            message: "merkle proof verification failed",
-        });
-    }
-
-    Ok(())
 }
 
 fn hash_leaf<H: Hasher>(code: &[u8]) -> [u8; 32] {
@@ -186,7 +179,8 @@ mod tests {
         let num_cols = 1;
         let field_size = 16; // Block128 size
 
-        let split_vars = compute_split_vars(num_vars, config.num_queries);
+        let split_vars =
+            compute_split_vars(num_vars, config.num_queries, config.expansion_degree, 128);
 
         let grid_cols = 1 << split_vars;
         let grid_rows = 1 << (num_vars - split_vars);
@@ -240,15 +234,14 @@ mod tests {
             query_indices.push((rng_val % (encoded_width as u64)) as usize);
         }
 
-        // 3. Construct Proof
-        let mut merkle_proofs = Vec::new();
+        // 3. Construct Proof: one opened column per
+        // distinct query, plus one octopus multiproof.
+        let mut distinct = query_indices.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+
         let mut opened_columns = Vec::new();
-
-        // One leaf contains both Base and Shifted encodings.
-        // We only push 1 column per query.
-        for &col_idx in &query_indices {
-            merkle_proofs.push(tree.prove(col_idx).unwrap());
-
+        for &col_idx in &distinct {
             let mut code_col = Vec::new();
             for r in 0..grid_rows {
                 let idx = r * encoded_width + col_idx;
@@ -262,7 +255,8 @@ mod tests {
             opened_columns.push(code_col);
         }
 
-        let proof = BrakedownProof::new(merkle_proofs, opened_columns);
+        let batch_path = tree.prove_batch(&distinct).unwrap();
+        let proof = BrakedownProof::new(opened_columns, batch_path);
 
         // 4. Verify
         let mut verifier_transcript = Transcript::<H>::new(b"test_brakedown");
@@ -271,13 +265,15 @@ mod tests {
             &proof,
             &mut verifier_transcript,
             &config,
+            128,
         );
 
         assert!(result.is_ok(), "Valid Brakedown proof should verify");
 
-        // Ensure we got exactly 1 column per query back
-        let cols = result.unwrap();
-        assert_eq!(cols.len(), config.num_queries);
+        let openings = result.unwrap();
+
+        assert_eq!(openings.columns.len(), distinct.len());
+        assert_eq!(openings.slot_map.len(), config.num_queries);
     }
 
     #[test]
@@ -289,7 +285,8 @@ mod tests {
         let num_rows = 16;
         let num_vars = 4;
 
-        let split_vars = compute_split_vars(num_vars, config.num_queries);
+        let split_vars =
+            compute_split_vars(num_vars, config.num_queries, config.expansion_degree, 128);
         let grid_cols = 1 << split_vars;
         let encoded_width = grid_cols + config.ldt_blinding_factor;
 
@@ -297,22 +294,40 @@ mod tests {
         let leaves = vec![[0u8; 32]; encoded_width];
         let tree = MerkleTree::<F, H>::new(&leaves);
 
-        // Mock commitment
         let commitment = BrakedownCommitment {
             root: tree.root(),
             num_rows,
             num_cols: 1,
         };
 
-        // Mock Proof with GARBAGE data (1 column per query)
-        let proof = BrakedownProof::new(
-            vec![vec![]; config.num_queries], // Empty proofs
-            vec![vec![4, 5, 6]; config.num_queries],
-        );
+        // Replay the query draws to learn the distinct
+        // count, then submit garbage columns with an
+        // empty octopus path: the batch walk starves.
+        let mut prover_transcript = Transcript::<H>::new(b"test");
+        let mut distinct = Vec::new();
+
+        for _ in 0..config.num_queries {
+            let bytes = prover_transcript
+                .challenge_field::<F>(b"idx_query")
+                .unwrap()
+                .to_bytes();
+
+            let mut rng_val: u64 = 0;
+            for (k, &b) in bytes.iter().take(8).enumerate() {
+                rng_val |= (b as u64) << (8 * k);
+            }
+
+            distinct.push((rng_val % (encoded_width as u64)) as usize);
+        }
+
+        distinct.sort_unstable();
+        distinct.dedup();
+
+        let proof = BrakedownProof::new(vec![vec![4u8, 5, 6]; distinct.len()], Vec::new());
 
         let mut transcript = Transcript::<H>::new(b"test");
         let result =
-            BrakedownVerifier::<F, H>::verify(&commitment, &proof, &mut transcript, &config);
+            BrakedownVerifier::<F, H>::verify(&commitment, &proof, &mut transcript, &config, 128);
 
         assert!(result.is_err(), "Tampered/Invalid proof should fail");
     }

@@ -28,13 +28,9 @@ table SumcheckProof {
 
 // ===== Brakedown Opening =====
 
-table MerklePath {
-  hashes: [ubyte];
-}
-
 table BrakedownProof {
-  ldt_proofs: [MerklePath];
   opened_columns: [ubyte];
+  batch_path: [ubyte];
 }
 
 // ===== Evaluation Argument =====
