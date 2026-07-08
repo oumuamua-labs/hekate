@@ -38,9 +38,9 @@ hekate-sdk = { path = "hekate-sdk", version = "=0.30.0", default-features = fals
 hekate-gadgets = { path = "hekate-gadgets", version = "=0.30.0", default-features = false }
 hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.30.0", default-features = false }
 hekate-scribble = { path = "hekate-scribble", version = "=0.30.0", default-features = false }
-hekate-keccak = { path = "hekate-keccak", version = "=0.2.0", default-features = false }
-hekate-aes = { path = "hekate-aes", version = "=0.2.0", default-features = false }
-hekate-pqc = { path = "hekate-pqc", version = "=0.3.0", default-features = false }
+hekate-keccak = { path = "hekate-keccak", version = "=0.3.0", default-features = false }
+hekate-aes = { path = "hekate-aes", version = "=0.3.0", default-features = false }
+hekate-pqc = { path = "hekate-pqc", version = "=0.4.0", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 zeroize = { version = "1.8", default-features = false, features = ["alloc", "derive"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }

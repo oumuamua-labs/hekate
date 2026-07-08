@@ -190,9 +190,9 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bytes"
-version = "1.12.0"
+version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cast"
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-aes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-keccak"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "hekate-core",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-pqc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
