@@ -163,7 +163,7 @@ fn xor_cell(trace: &mut ColumnTrace, col: usize, row: usize, mask: u128) {
     match column_at_mut(trace, col) {
         TraceColumn::Bit(v) => {
             let cell = row_mut(v, col, row);
-            *cell = Bit::from(cell.0 ^ ((mask & 1) as u8));
+            *cell = Bit::from(cell.get() ^ ((mask & 1) as u8));
         }
         TraceColumn::B8(v) => {
             let cell = row_mut(v, col, row);
@@ -211,7 +211,7 @@ fn flip_bit_cell(trace: &mut ColumnTrace, col: usize, row: usize) {
     match column_at_mut(trace, col) {
         TraceColumn::Bit(v) => {
             let cell = row_mut(v, col, row);
-            *cell = Bit::from(cell.0 ^ 1);
+            *cell = Bit::from(cell.get() ^ 1);
         }
         other => panic!(
             "FlipSelector requires a Bit column; column {col} is {:?}",

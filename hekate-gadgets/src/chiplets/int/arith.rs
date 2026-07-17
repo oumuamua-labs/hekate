@@ -751,7 +751,7 @@ mod tests {
 
         for col in trace.columns.iter() {
             match col {
-                TraceColumn::Bit(v) => buf.push(v[row].0),
+                TraceColumn::Bit(v) => buf.push(v[row].get()),
                 TraceColumn::B8(v) => buf.push(v[row].into_raw().0),
                 TraceColumn::B16(v) => buf.extend_from_slice(&v[row].into_raw().0.to_le_bytes()),
                 TraceColumn::B32(v) => buf.extend_from_slice(&v[row].into_raw().0.to_le_bytes()),
