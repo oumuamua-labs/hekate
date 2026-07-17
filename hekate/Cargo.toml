@@ -9,7 +9,7 @@ authors.workspace = true
 publish = false
 
 [features]
-default = ["std", "parallel", "blake3"]
+default = ["std", "parallel", "blake3", "public"]
 std = [
     "hekate-math/std",
     "hekate-core/std",
@@ -43,6 +43,8 @@ sha3 = [
 ]
 table-math = ["hekate-math/table-math", "hekate-verifier/table-math"]
 dhat-heap = ["dep:dhat"]
+ct = ["hekate-prover-sys/ct"]
+public = ["hekate-prover-sys/public"]
 
 [dependencies]
 hekate-core = { workspace = true }
@@ -55,7 +57,7 @@ rayon = { version = "1.11", optional = true }
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
-hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
+hekate-prover-sys = { workspace = true, features = ["blake3"] }
 hekate-sdk = { workspace = true }
 hekate-keccak = { workspace = true, features = ["std", "blake3"] }
 hekate-aes = { workspace = true, features = ["std", "blake3"] }
