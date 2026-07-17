@@ -625,6 +625,10 @@ impl RingSwitchPlan {
         self.units.iter().any(|(is_ring, _)| *is_ring)
     }
 
+    pub fn total_claims(&self) -> usize {
+        self.units.iter().map(|(_, n)| n).sum()
+    }
+
     /// Per committed column:
     /// its base `eta` coefficients in the ring and whole
     /// masters, plus `eta^U` (the next-row shift multiplier).

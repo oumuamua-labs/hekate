@@ -88,6 +88,13 @@ where
         let point = points[0];
         let claims = claimed[0];
 
+        if claims.len() != plan.total_claims() * 2 {
+            return Err(errors::Error::Protocol {
+                protocol: "evaluator_verifier",
+                message: "ring-switch plan claim count does not match the claimed evaluations",
+            });
+        }
+
         transcript.append_message(b"eval_batch_start", b"");
 
         for &val in claims {
@@ -302,10 +309,9 @@ where
         let check_query =
             |q_idx: usize, col_idx: usize, phys_row: &mut Vec<Flat<F>>| -> errors::Result<bool> {
                 let col_bytes = &opened_columns[slot_map[q_idx]];
-                let row_bytes_len = col_bytes.len() / grid_rows;
 
-                if row_bytes_len < phys_row_bytes {
-                    warn!("opened column shorter than physical row layout");
+                if col_bytes.len() != grid_rows * phys_row_bytes {
+                    warn!("opened column length does not match the physical row layout");
                     return Ok(false);
                 }
 
@@ -313,7 +319,7 @@ where
                 let mut q_ring_val = Flat::from_raw(F::ZERO);
 
                 for r in 0..grid_rows {
-                    let row_data = &col_bytes[r * row_bytes_len..(r + 1) * row_bytes_len];
+                    let row_data = &col_bytes[r * phys_row_bytes..(r + 1) * phys_row_bytes];
 
                     phys_row.clear();
 
