@@ -378,6 +378,7 @@ where
             Self::Shifted(h) => {
                 let len = h.len();
                 let next_idx = if index + 1 == len { 0 } else { index + 1 };
+
                 h[next_idx]
             }
             Self::Eq(t) => t.evaluate_at_index(index),
@@ -427,7 +428,7 @@ where
             Self::CompositeSelector(cols) => {
                 let mut sum = Flat::from_raw(F::default());
                 for col in cols {
-                    if col[index].0 == 1 {
+                    if col[index].get() == 1 {
                         sum += Flat::from_raw(F::ONE);
                     }
                 }
