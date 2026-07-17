@@ -133,7 +133,7 @@ fn noise_entropy_inspection() {
 
     let config = Config {
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 2,
+        ldt_support_size: 2,
         num_queries: 8,
         min_security_bits: 0,
         ..Config::default()
@@ -158,11 +158,11 @@ fn noise_entropy_inspection() {
     assert!(!columns.is_empty(), "Must have opened columns");
 
     // Architecture:
-    // FibAir uses [B32, B32, Bit]
-    // Physical size = 4 + 4 + 1 = 9 bytes
-    // per base row. With interleaved shifted
-    // columns: 9 * 2 = 18 bytes.
-    let data_bytes_per_row = (4 + 4 + 1) * 2;
+    // FibAir uses [B32, B32, Bit]. The MDS RS code
+    // commits each cell at its rs_field width, Bit
+    // widens to B32: (4 + 4 + 4) = 12 bytes per base
+    // row, 12 * 2 = 24 with the interleaved shift.
+    let data_bytes_per_row = (4 + 4 + 4) * 2;
 
     // ZK Sumcheck noise is always Block128 (16 bytes).
     let noise_bytes_per_row = config.sumcheck_blinding_factor * 16 * 2;
@@ -174,7 +174,7 @@ fn noise_entropy_inspection() {
         let split_vars = compute_split_vars(
             num_vars,
             config.num_queries,
-            config.expansion_degree,
+            config.ldt_support_size,
             bytes_per_row,
         );
 
@@ -262,6 +262,7 @@ fn seed_nondeterminism() {
         sumcheck_blinding_factor: 1,
         num_queries: 8,
         min_security_bits: 0,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -272,6 +273,7 @@ fn seed_nondeterminism() {
         sumcheck_blinding_factor: 1,
         num_queries: 8,
         min_security_bits: 0,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -341,7 +343,7 @@ fn noise_integrity_check() {
 
     let config = Config {
         sumcheck_blinding_factor: 1,
-        ldt_blinding_factor: 1,
+        ldt_support_size: 1,
         num_queries: 8,
         min_security_bits: 0,
         ..Config::default()
@@ -364,8 +366,9 @@ fn noise_integrity_check() {
     let col_data = &mut proof.eval_proof.ldt_proof.opened_columns[0];
 
     // Architecture:
-    // FibAir uses [B32, B32, Bit] = 9 bytes.
-    let data_bytes_per_row = (4 + 4 + 1) * 2;
+    // FibAir [B32, B32, Bit], each cell committed at
+    // its rs_field width (Bit -> B32): 4 + 4 + 4 = 12.
+    let data_bytes_per_row = (4 + 4 + 4) * 2;
     let bytes_per_row = data_bytes_per_row + (config.sumcheck_blinding_factor * 16 * 2);
 
     // ATTACK:
@@ -478,7 +481,7 @@ fn trust_me_bro_knowledge() {
         num_queries: 8,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2, // ZK ACTIVATED
-        ldt_blinding_factor: 2,
+        ldt_support_size: 2,
         ..Config::default()
     };
 
@@ -521,7 +524,7 @@ fn trust_me_bro_knowledge() {
         num_queries: 8,
         min_security_bits: 0,
         sumcheck_blinding_factor: 0, // ZK DISABLED
-        ldt_blinding_factor: 1,
+        ldt_support_size: 1,
         ..Config::default()
     };
 
@@ -575,7 +578,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
 
     let config_no_zk = Config {
         sumcheck_blinding_factor: 0,
-        ldt_blinding_factor: 4,
+        ldt_support_size: 4,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()
@@ -583,7 +586,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
 
     let config_zk = Config {
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 4,
+        ldt_support_size: 4,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()
@@ -691,13 +694,13 @@ fn algebraic_and_evaluation_perfect_hiding() {
     assert_ne!(eval_no_zk, eval_zk_a, "ZK failed to hide trace evaluations");
     assert_ne!(eval_zk_a, eval_zk_b, "ZK failed to hide trace evaluations");
 
-    // K = 0, ldt_blinding = 200 ablation pair.
-    // Isolates whether ldt_blinding alone
+    // K = 0, ldt_support_size > 0 ablation pair.
+    // Isolates whether ldt_support_size alone
     // produces seed-dependent round polys and
     // evaluations without any sumcheck masks.
     let config_only_ldt = Config {
         sumcheck_blinding_factor: 0,
-        ldt_blinding_factor: 200,
+        ldt_support_size: 8,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()
@@ -729,14 +732,14 @@ fn algebraic_and_evaluation_perfect_hiding() {
     assert!(
         HekateVerifier::<F, H>::verify(&air, &instance, &p_only_ldt_a, &mut vt4, &config_only_ldt)
             .unwrap(),
-        "K=0/ldt=200 proof A must verify"
+        "K=0/ldt>0 proof A must verify"
     );
 
     let mut vt5 = Transcript::<H>::new(b"ZK_Hiding");
     assert!(
         HekateVerifier::<F, H>::verify(&air, &instance, &p_only_ldt_b, &mut vt5, &config_only_ldt)
             .unwrap(),
-        "K=0/ldt=200 proof B must verify"
+        "K=0/ldt>0 proof B must verify"
     );
 
     let poly_only_ldt_a = &p_only_ldt_a.zerocheck_proof.round_polys[0].evals;
@@ -748,7 +751,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
     );
     assert_ne!(
         poly_only_ldt_a, poly_only_ldt_b,
-        "K=0/ldt=200: round polys must diverge across seeds"
+        "K=0/ldt>0: round polys must diverge across seeds"
     );
 
     let eval_only_ldt_a = &p_only_ldt_a.eval_proof.point_evaluations[0].1;
@@ -760,7 +763,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
     );
     assert_ne!(
         eval_only_ldt_a, eval_only_ldt_b,
-        "K=0/ldt=200: trace evaluations must diverge across seeds"
+        "K=0/ldt>0: trace evaluations must diverge across seeds"
     );
 }
 
@@ -833,18 +836,11 @@ fn true_zk_memory_isolation() {
     // STAGE A
     // Production blinding.
     // Magic bytes MUST be hidden.
-    //
-    // expansion_degree pinned to 16
-    // (= grid_cols for num_vars=4,
-    // num_queries=4) so the Stage B
-    // negative control below stays
-    // deterministic.
     let config_zk = Config {
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 2,
+        ldt_support_size: 2,
         num_queries: 4,
         min_security_bits: 0,
-        expansion_degree: 16,
         ..Config::default()
     };
 
@@ -859,43 +855,34 @@ fn true_zk_memory_isolation() {
     );
 
     // STAGE B
-    // Zero blinding control.
-    // Magic bytes MUST be visible.
-    let config_no_zk = Config {
-        sumcheck_blinding_factor: 0,
-        ldt_blinding_factor: 0,
-        num_queries: 4,
-        min_security_bits: 0,
-        expansion_degree: 16,
-        ..Config::default()
-    };
+    // The non-systematic row code emits no verbatim
+    // column, no real leak exists to detect.
+    let mut planted = proof_zk.clone();
 
-    let proof_no_zk = prove(
-        b"TrueZK",
-        &air,
-        &instance,
-        &witness,
-        &config_no_zk,
-        [7u8; 32],
-        None,
-    )
-    .unwrap();
+    let target = planted
+        .eval_proof
+        .ldt_proof
+        .opened_columns
+        .iter_mut()
+        .find(|col| col.len() >= needle.len())
+        .expect("a main opening wide enough to hold the needle");
+
+    target[..needle.len()].copy_from_slice(&needle);
 
     assert!(
-        scan_main_openings(&proof_no_zk),
-        "STAGE B FAILURE: magic hardware bytes did NOT appear in main LDT openings"
+        scan_main_openings(&planted),
+        "positive control: a planted needle must be detected by the scan",
     );
 
     // STAGE C
-    // K = 0, ldt_blinding = 200.
-    // Isolates whether ldt_blinding alone
+    // K = 0, ldt_support_size = 200.
+    // Isolates whether ldt_support_size alone
     // hides raw bytes without sumcheck masks.
     let config_only_ldt = Config {
         sumcheck_blinding_factor: 0,
-        ldt_blinding_factor: 200,
+        ldt_support_size: 200,
         num_queries: 4,
         min_security_bits: 0,
-        expansion_degree: 16,
         ..Config::default()
     };
 
@@ -912,7 +899,7 @@ fn true_zk_memory_isolation() {
 
     assert!(
         !scan_main_openings(&proof_only_ldt),
-        "STAGE C FAILURE: magic hardware bytes appeared with K=0, ldt_blinding=200"
+        "STAGE C FAILURE: magic hardware bytes appeared with K=0, ldt_support_size=200"
     );
 }
 
@@ -937,7 +924,7 @@ fn truncation_overflow_injection() {
 
     let config = Config {
         sumcheck_blinding_factor: 1,
-        ldt_blinding_factor: 1,
+        ldt_support_size: 1,
         num_queries: 8,
         min_security_bits: 0,
         ..Config::default()
@@ -1031,7 +1018,7 @@ fn noise_shift_sign_forgery() {
 
     let config = Config {
         sumcheck_blinding_factor: 1, // Use 1 noise column (Base + Shifted)
-        ldt_blinding_factor: 1,
+        ldt_support_size: 1,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()
@@ -1105,7 +1092,7 @@ fn ghost_protocol_indistinguishability() {
 
     let config = Config {
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 2,
+        ldt_support_size: 2,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()
@@ -1350,7 +1337,7 @@ fn chiplet_pipeline_witness_isolation() {
     // - chiplet pipeline forgets to
     //   apply LDT noise injection.
     // - chiplet path silently overrides
-    //   ldt_blinding_factor.
+    //   support_size.
     // - any code change that lets
     //   raw chiplet bytes reach:
     //   `chiplet_eval_proofs[..].ldt_proof.opened_columns`
@@ -1411,19 +1398,11 @@ fn chiplet_pipeline_witness_isolation() {
     // STAGE A
     // Production blinding.
     // Magic bytes MUST be hidden.
-    //
-    // expansion_degree MUST equal grid_cols
-    // (=16 for num_vars=4, num_queries=4) so
-    // the Stage B negative control below is
-    // deterministic. Pinned here so the
-    // test does not silently break if
-    // Config::default().expansion_degree changes.
     let config_zk = Config {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 4,
-        expansion_degree: 16,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -1451,45 +1430,21 @@ fn chiplet_pipeline_witness_isolation() {
     );
 
     // STAGE B
-    // Zero blinding control.
-    // Magic bytes MUST be visible.
-    //
-    // Stage B works because the test sizing is
-    // engineered to make the leak deterministic:
-    // with num_vars=4 and num_queries=4,
-    // compute_split_vars yields grid_cols=16,
-    // matching the pinned expansion_degree=16.
-    // The rejection sampler in the binary expander
-    // matrix has no choice, every output row must
-    // select every input column. Each encoded row
-    // therefore equals magic XOR 0 XOR ... XOR 0
-    // = magic, and the needle appears in every
-    // opened column. With both blinding factors at
-    // 0, no noise columns are appended, so those
-    // raw encoded bytes reach the LDT openings.
-    let config_no_zk = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        sumcheck_blinding_factor: 0,
-        ldt_blinding_factor: 0,
-        expansion_degree: 16,
-        ..Config::default()
-    };
+    // The non-systematic row code emits no verbatim
+    // column, no real leak exists to detect.
+    let mut planted = proof_zk.clone();
 
-    let proof_no_zk = prove(
-        b"ChipletWitnessIsolation",
-        &air,
-        &instance,
-        &witness,
-        &config_no_zk,
-        seed,
-        None,
-    )
-    .expect("zero-blinding proof generation must succeed");
+    let target = planted
+        .chiplet_eval_proofs
+        .iter_mut()
+        .flat_map(|ep| ep.ldt_proof.opened_columns.iter_mut())
+        .find(|col| col.len() >= needle.len())
+        .expect("a chiplet opening wide enough to hold the needle");
 
-    let leaked_no_zk = scan_chiplet_openings(&proof_no_zk);
+    target[..needle.len()].copy_from_slice(&needle);
+
     assert!(
-        leaked_no_zk,
-        "STAGE B FAILURE: magic witness bytes 0x{MAGIC:08X} did NOT appear in chiplet LDT openings",
+        scan_chiplet_openings(&planted),
+        "positive control: a planted needle must be detected by the scan",
     );
 }

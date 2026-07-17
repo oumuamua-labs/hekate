@@ -189,16 +189,18 @@ fn transcript_binding_security_trace_root_changes_challenges() {
     };
 
     let config_a = Config {
-        matrix_seed: [1u8; 32],
+        inv_rate: 2,
         num_queries: 8,
         min_security_bits: 0,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
     let config_b = Config {
-        matrix_seed: [2u8; 32],
+        inv_rate: 4,
         num_queries: 8,
         min_security_bits: 0,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -269,8 +271,6 @@ fn zk_air_happy_path() {
     let mut config = test_config();
     config.sumcheck_blinding_factor = 2;
 
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
-
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
 
@@ -299,7 +299,6 @@ proptest! {
     #[test]
     fn fuzz_air_completeness(
         num_vars in 4usize..=10,
-        matrix_seed in any::<[u8; 32]>(),
         blinding_seed in any::<[u8; 32]>(),
         sumcheck_blinding_factor in 0usize..=2,
     ) {
@@ -316,9 +315,8 @@ proptest! {
         };
 
         let config = Config {
-            matrix_seed,
             sumcheck_blinding_factor,
-            ldt_blinding_factor: 6,
+            ldt_support_size: 6,
             num_queries: 4,
             min_security_bits: 0,
             ..Config::default()

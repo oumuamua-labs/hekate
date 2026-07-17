@@ -21,8 +21,7 @@ use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
 use hekate_core::trace::TraceBuilder;
-use hekate_crypto::expander_matrix::generate_expander_matrix;
-use hekate_math::{Bit, Block32, Flat, HardwareField};
+use hekate_math::{Bit, Block32, HardwareField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
@@ -186,61 +185,13 @@ fn zk_config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 4,
-        ..Config::default()
-    }
-}
-
-fn no_zk_config() -> Config {
-    Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        sumcheck_blinding_factor: 0,
-        ldt_blinding_factor: 0,
+        ldt_support_size: 4,
         ..Config::default()
     }
 }
 
 // =========================================================
 // TEST 1:
-// Binary SpMV Weights
-//
-// Virtual packing soundness requires tower_bit
-// to commute with SpMV. This only holds for binary
-// (0/1) weights. Probe the matrix with unit vectors
-// to verify every weight is exactly 0 or 1 in GF(2^128).
-// =========================================================
-
-#[test]
-fn brakedown_binary_weights_verified() {
-    let zero = Flat::from_raw(F::ZERO);
-    let one = Flat::from_raw(F::ONE);
-
-    for &seed_byte in &[0u8, 42, 0xFF, 0xDE] {
-        let seed = [seed_byte; 32];
-
-        for &(dim, degree) in &[(20, 16), (36, 16), (64, 8), (128, 16)] {
-            let matrix = generate_expander_matrix(dim, dim, degree, seed);
-
-            for c in 0..dim {
-                let mut unit_vec = vec![zero; dim];
-                unit_vec[c] = one;
-
-                let result = matrix.spmv(unit_vec.as_slice());
-
-                for (r, &val) in result.iter().enumerate() {
-                    assert!(
-                        val == zero || val == one,
-                        "non-binary weight at ({r},{c}) seed=0x{seed_byte:02X} dim={dim}",
-                    );
-                }
-            }
-        }
-    }
-}
-
-// =========================================================
-// TEST 2:
 // Virtual Packing Eval Forgery
 //
 // Corrupt a virtual bit column evaluation in
@@ -288,7 +239,7 @@ fn virtual_packing_eval_forgery_rejected() {
 }
 
 // =========================================================
-// TEST 3:
+// TEST 2:
 // Virtual Expansion Witness Isolation
 //
 // Stage A:
@@ -321,10 +272,7 @@ fn virtual_expansion_witness_isolation() {
         false
     };
 
-    // STAGE A:
-    // ZK enabled
     let config_zk = zk_config();
-
     let proof_zk = prove(
         b"VirtualPackWitnessIsolation",
         &air,
@@ -347,23 +295,21 @@ fn virtual_expansion_witness_isolation() {
         "ZK enabled but witness bytes leaked in chiplet LDT openings",
     );
 
-    // STAGE B:
-    // ZK disabled (control)
-    let config_no_zk = no_zk_config();
+    // The non-systematic row code emits no verbatim
+    // column, no real leak exists to detect.
+    let mut planted = proof_zk.clone();
 
-    let proof_no = prove(
-        b"VirtualPackWitnessIsolation",
-        &air,
-        &instance,
-        &witness,
-        &config_no_zk,
-        seed,
-        None,
-    )
-    .expect("non-ZK proof must succeed");
+    let target = planted
+        .chiplet_eval_proofs
+        .iter_mut()
+        .flat_map(|ep| ep.ldt_proof.opened_columns.iter_mut())
+        .find(|col| col.len() >= needle.len())
+        .expect("a chiplet opening wide enough to hold the needle");
+
+    target[..needle.len()].copy_from_slice(&needle);
 
     assert!(
-        scan_chiplet_openings(&proof_no),
-        "ZK disabled but witness bytes absent, control group broken",
+        scan_chiplet_openings(&planted),
+        "positive control: a planted needle must be detected by the scan",
     );
 }

@@ -214,6 +214,7 @@ fn run(
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 0,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -455,7 +456,7 @@ fn paired_air_constraint_ast_mutated_post_prove_rejected() {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 4,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -619,7 +620,7 @@ fn chiplet_paired_bus_without_mutex_root_rejected_at_verify() {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 4,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
