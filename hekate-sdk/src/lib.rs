@@ -26,7 +26,7 @@ mod wire;
 pub mod builder;
 pub mod preflight;
 
-pub use builder::{build_bundle, program_id, program_id_hex};
+pub use builder::{program_id, program_id_hex};
 pub use preflight::preflight;
 pub use program::BundleProgram;
 pub use wire::bundle::{

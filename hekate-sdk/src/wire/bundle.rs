@@ -34,7 +34,7 @@ use hekate_program::{
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
-const WIRE_FORMAT_VERSION: u32 = 1;
+const WIRE_FORMAT_VERSION: u32 = 2;
 
 pub struct DeserializedBundle<F: TowerField> {
     pub constraint_ast: ConstraintAst<F>,

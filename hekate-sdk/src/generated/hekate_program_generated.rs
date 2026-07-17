@@ -3773,12 +3773,11 @@ pub mod hekate {
         }
 
         impl<'a> Config<'a> {
-            pub const VT_EXPANSION_DEGREE: ::flatbuffers::VOffsetT = 4;
+            pub const VT_INV_RATE: ::flatbuffers::VOffsetT = 4;
             pub const VT_NUM_QUERIES: ::flatbuffers::VOffsetT = 6;
             pub const VT_SUMCHECK_BLINDING_FACTOR: ::flatbuffers::VOffsetT = 8;
-            pub const VT_LDT_BLINDING_FACTOR: ::flatbuffers::VOffsetT = 10;
+            pub const VT_LDT_SUPPORT_SIZE: ::flatbuffers::VOffsetT = 10;
             pub const VT_MIN_SECURITY_BITS: ::flatbuffers::VOffsetT = 12;
-            pub const VT_MATRIX_SEED: ::flatbuffers::VOffsetT = 14;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3792,30 +3791,23 @@ pub mod hekate {
                 A: ::flatbuffers::Allocator + 'bldr,
             >(
                 _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args ConfigArgs<'args>,
+                args: &'args ConfigArgs,
             ) -> ::flatbuffers::WIPOffset<Config<'bldr>> {
                 let mut builder = ConfigBuilder::new(_fbb);
-                if let Some(x) = args.matrix_seed {
-                    builder.add_matrix_seed(x);
-                }
                 builder.add_min_security_bits(args.min_security_bits);
-                builder.add_ldt_blinding_factor(args.ldt_blinding_factor);
+                builder.add_ldt_support_size(args.ldt_support_size);
                 builder.add_sumcheck_blinding_factor(args.sumcheck_blinding_factor);
                 builder.add_num_queries(args.num_queries);
-                builder.add_expansion_degree(args.expansion_degree);
+                builder.add_inv_rate(args.inv_rate);
                 builder.finish()
             }
 
             #[inline]
-            pub fn expansion_degree(&self) -> u32 {
+            pub fn inv_rate(&self) -> u32 {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<u32>(Config::VT_EXPANSION_DEGREE, Some(0))
-                        .unwrap()
-                }
+                unsafe { self._tab.get::<u32>(Config::VT_INV_RATE, Some(0)).unwrap() }
             }
             #[inline]
             pub fn num_queries(&self) -> u32 {
@@ -3840,13 +3832,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn ldt_blinding_factor(&self) -> u32 {
+            pub fn ldt_support_size(&self) -> u32 {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<u32>(Config::VT_LDT_BLINDING_FACTOR, Some(0))
+                        .get::<u32>(Config::VT_LDT_SUPPORT_SIZE, Some(0))
                         .unwrap()
                 }
             }
@@ -3861,19 +3853,6 @@ pub mod hekate {
                         .unwrap()
                 }
             }
-            #[inline]
-            pub fn matrix_seed(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
-                            Config::VT_MATRIX_SEED,
-                            None,
-                        )
-                }
-            }
         }
 
         impl ::flatbuffers::Verifiable for Config<'_> {
@@ -3883,42 +3862,35 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-                    .visit_field::<u32>("expansion_degree", Self::VT_EXPANSION_DEGREE, false)?
+                    .visit_field::<u32>("inv_rate", Self::VT_INV_RATE, false)?
                     .visit_field::<u32>("num_queries", Self::VT_NUM_QUERIES, false)?
                     .visit_field::<u32>(
                         "sumcheck_blinding_factor",
                         Self::VT_SUMCHECK_BLINDING_FACTOR,
                         false,
                     )?
-                    .visit_field::<u32>("ldt_blinding_factor", Self::VT_LDT_BLINDING_FACTOR, false)?
+                    .visit_field::<u32>("ldt_support_size", Self::VT_LDT_SUPPORT_SIZE, false)?
                     .visit_field::<u32>("min_security_bits", Self::VT_MIN_SECURITY_BITS, false)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
-                        "matrix_seed",
-                        Self::VT_MATRIX_SEED,
-                        false,
-                    )?
                     .finish();
                 Ok(())
             }
         }
-        pub struct ConfigArgs<'a> {
-            pub expansion_degree: u32,
+        pub struct ConfigArgs {
+            pub inv_rate: u32,
             pub num_queries: u32,
             pub sumcheck_blinding_factor: u32,
-            pub ldt_blinding_factor: u32,
+            pub ldt_support_size: u32,
             pub min_security_bits: u32,
-            pub matrix_seed: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
         }
-        impl<'a> Default for ConfigArgs<'a> {
+        impl<'a> Default for ConfigArgs {
             #[inline]
             fn default() -> Self {
                 ConfigArgs {
-                    expansion_degree: 0,
+                    inv_rate: 0,
                     num_queries: 0,
                     sumcheck_blinding_factor: 0,
-                    ldt_blinding_factor: 0,
+                    ldt_support_size: 0,
                     min_security_bits: 0,
-                    matrix_seed: None,
                 }
             }
         }
@@ -3929,9 +3901,8 @@ pub mod hekate {
         }
         impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ConfigBuilder<'a, 'b, A> {
             #[inline]
-            pub fn add_expansion_degree(&mut self, expansion_degree: u32) {
-                self.fbb_
-                    .push_slot::<u32>(Config::VT_EXPANSION_DEGREE, expansion_degree, 0);
+            pub fn add_inv_rate(&mut self, inv_rate: u32) {
+                self.fbb_.push_slot::<u32>(Config::VT_INV_RATE, inv_rate, 0);
             }
             #[inline]
             pub fn add_num_queries(&mut self, num_queries: u32) {
@@ -3947,24 +3918,14 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_ldt_blinding_factor(&mut self, ldt_blinding_factor: u32) {
+            pub fn add_ldt_support_size(&mut self, ldt_support_size: u32) {
                 self.fbb_
-                    .push_slot::<u32>(Config::VT_LDT_BLINDING_FACTOR, ldt_blinding_factor, 0);
+                    .push_slot::<u32>(Config::VT_LDT_SUPPORT_SIZE, ldt_support_size, 0);
             }
             #[inline]
             pub fn add_min_security_bits(&mut self, min_security_bits: u32) {
                 self.fbb_
                     .push_slot::<u32>(Config::VT_MIN_SECURITY_BITS, min_security_bits, 0);
-            }
-            #[inline]
-            pub fn add_matrix_seed(
-                &mut self,
-                matrix_seed: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
-            ) {
-                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    Config::VT_MATRIX_SEED,
-                    matrix_seed,
-                );
             }
             #[inline]
             pub fn new(
@@ -3986,12 +3947,11 @@ pub mod hekate {
         impl ::core::fmt::Debug for Config<'_> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 let mut ds = f.debug_struct("Config");
-                ds.field("expansion_degree", &self.expansion_degree());
+                ds.field("inv_rate", &self.inv_rate());
                 ds.field("num_queries", &self.num_queries());
                 ds.field("sumcheck_blinding_factor", &self.sumcheck_blinding_factor());
-                ds.field("ldt_blinding_factor", &self.ldt_blinding_factor());
+                ds.field("ldt_support_size", &self.ldt_support_size());
                 ds.field("min_security_bits", &self.min_security_bits());
-                ds.field("matrix_seed", &self.matrix_seed());
                 ds.finish()
             }
         }

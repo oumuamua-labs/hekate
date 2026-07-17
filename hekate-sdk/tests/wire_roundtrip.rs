@@ -24,6 +24,9 @@
 
 use hekate_core::config::Config;
 use hekate_core::errors;
+use hekate_core::proofs::{
+    BrakedownCommitment, BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, SumcheckProof,
+};
 use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
 use hekate_gadgets::{
@@ -41,7 +44,10 @@ use hekate_program::constraint::{
 use hekate_program::define_columns;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
-use hekate_sdk::{DeserializedBundle, build_bundle, deserialize_bundle, serialize_bundle};
+use hekate_sdk::{
+    DeserializedBundle, deserialize_bundle, deserialize_proof, serialize_bundle,
+    serialize_proof_bytes,
+};
 
 type F = Block128;
 
@@ -737,7 +743,7 @@ fn roundtrip_fibonacci_main_trace_only() {
     let witness = ProgramWitness::new(trace);
     let config = Config::default();
 
-    let bytes = build_bundle(&program, &instance, &witness, &config).unwrap();
+    let bytes = serialize_bundle(&program, &instance, &witness, &config).unwrap();
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
     assert_bundle_eq(&program, &restored, &witness, "fibonacci");
@@ -765,7 +771,7 @@ fn roundtrip_ram_isolated_chiplet() {
 
     let config = Config::default();
 
-    let bytes = build_bundle(&program, &instance, &witness, &config).unwrap();
+    let bytes = serialize_bundle(&program, &instance, &witness, &config).unwrap();
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
     assert_bundle_eq(&program, &restored, &witness, "ram");
@@ -798,7 +804,7 @@ fn roundtrip_many_chiplets() {
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
     let config = Config::default();
 
-    let bytes = build_bundle(&program, &instance, &witness, &config).unwrap();
+    let bytes = serialize_bundle(&program, &instance, &witness, &config).unwrap();
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
     assert_bundle_eq(&program, &restored, &witness, "many_chiplets");
@@ -806,60 +812,6 @@ fn roundtrip_many_chiplets() {
     assert_eq!(restored.chiplet_defs.len(), 3, "ROM + Arith + RAM");
     assert_eq!(restored.witness.chiplet_traces.len(), 3);
     assert_eq!(restored.permutation_checks.len(), 3, "3 LogUp buses");
-}
-
-#[test]
-fn deterministic_matrix_seed() {
-    let num_rows = 1 << 10;
-    let program = FibProgram { num_rows };
-    let trace = fib_trace(10);
-    let result = trace.get_element::<F>(1, num_rows - 1).unwrap().to_tower();
-    let instance = ProgramInstance::new(num_rows, vec![result]);
-    let witness = ProgramWitness::new(trace);
-    let config = Config::default();
-
-    let bytes1 = build_bundle(&program, &instance, &witness, &config).unwrap();
-    let bytes2 = build_bundle(&program, &instance, &witness, &config).unwrap();
-
-    let b1: DeserializedBundle<F> = deserialize_bundle(&bytes1).unwrap();
-    let b2: DeserializedBundle<F> = deserialize_bundle(&bytes2).unwrap();
-
-    assert_eq!(
-        b1.config.matrix_seed, b2.config.matrix_seed,
-        "same program must produce same seed"
-    );
-    assert_ne!(
-        b1.config.matrix_seed, [42u8; 32],
-        "seed must differ from default"
-    );
-}
-
-#[test]
-fn different_programs_different_seeds() {
-    let config = Config::default();
-
-    let p1 = FibProgram { num_rows: 1 << 10 };
-    let t1 = fib_trace(10);
-    let r1 = t1.get_element::<F>(1, (1 << 10) - 1).unwrap().to_tower();
-    let i1 = ProgramInstance::new(1 << 10, vec![r1]);
-    let w1 = ProgramWitness::new(t1);
-
-    let p2 = FibProgram { num_rows: 1 << 12 };
-    let t2 = fib_trace(12);
-    let r2 = t2.get_element::<F>(1, (1 << 12) - 1).unwrap().to_tower();
-    let i2 = ProgramInstance::new(1 << 12, vec![r2]);
-    let w2 = ProgramWitness::new(t2);
-
-    let bytes1 = build_bundle(&p1, &i1, &w1, &config).unwrap();
-    let bytes2 = build_bundle(&p2, &i2, &w2, &config).unwrap();
-
-    let b1: DeserializedBundle<F> = deserialize_bundle(&bytes1).unwrap();
-    let b2: DeserializedBundle<F> = deserialize_bundle(&bytes2).unwrap();
-
-    assert_ne!(
-        b1.config.matrix_seed, b2.config.matrix_seed,
-        "different num_rows must produce different seeds"
-    );
 }
 
 #[test]
@@ -881,21 +833,20 @@ fn config_roundtrip() {
     let witness = ProgramWitness::new(trace);
 
     let config = Config {
-        expansion_degree: 32,
+        inv_rate: 4,
         num_queries: 200,
         sumcheck_blinding_factor: 4,
-        ldt_blinding_factor: 250,
+        ldt_support_size: 250,
         min_security_bits: 120,
-        ..Config::default()
     };
 
-    let bytes = build_bundle(&program, &instance, &witness, &config).unwrap();
+    let bytes = serialize_bundle(&program, &instance, &witness, &config).unwrap();
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
-    assert_eq!(restored.config.expansion_degree, 32);
+    assert_eq!(restored.config.inv_rate, 4);
     assert_eq!(restored.config.num_queries, 200);
     assert_eq!(restored.config.sumcheck_blinding_factor, 4);
-    assert_eq!(restored.config.ldt_blinding_factor, 250);
+    assert_eq!(restored.config.ldt_support_size, 250);
     assert_eq!(restored.config.min_security_bits, 120);
 }
 
@@ -912,7 +863,7 @@ fn serialize_bundle_preserves_raw_config() {
     let witness = ProgramWitness::new(trace);
 
     let config = Config {
-        matrix_seed: [0xAB; 32],
+        ldt_support_size: 199,
         ..Config::default()
     };
 
@@ -920,8 +871,8 @@ fn serialize_bundle_preserves_raw_config() {
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
     assert_eq!(
-        restored.config.matrix_seed, [0xAB; 32],
-        "serialize_bundle must preserve caller's seed verbatim"
+        restored.config.ldt_support_size, 199,
+        "serialize_bundle must preserve the caller's config verbatim"
     );
 
     assert_bundle_eq(&program, &restored, &witness, "raw_serialize");
@@ -1451,4 +1402,84 @@ fn paired_permutation_spec_round_trips() {
 #[test]
 fn paired_lookup_spec_round_trips() {
     paired_spec_roundtrip(BusKind::Lookup);
+}
+
+// =================================================================
+// Proof wire round-trip (tensor_vec / tensor_vec_ring)
+// =================================================================
+
+fn empty_sumcheck() -> SumcheckProof<F> {
+    SumcheckProof {
+        round_polys: vec![],
+        claimed_evaluation: F::ZERO,
+    }
+}
+
+fn eval_proof_with(tensor_vec: Vec<F>, tensor_vec_ring: Vec<F>) -> EvalBatchProof<F> {
+    EvalBatchProof::new(
+        empty_sumcheck(),
+        BrakedownProof::new(vec![], vec![]),
+        vec![(vec![wide(1)], vec![wide(2), wide(3)])],
+        tensor_vec,
+        tensor_vec_ring,
+    )
+}
+
+fn dummy_commitment() -> BrakedownCommitment {
+    BrakedownCommitment {
+        root: [7u8; 32],
+        num_rows: 1 << 10,
+        num_cols: 8,
+    }
+}
+
+#[test]
+fn proof_tensor_vec_ring_round_trips() {
+    let main_eval = eval_proof_with(vec![wide(1), wide(2)], vec![wide(10), wide(11), wide(12)]);
+    let chiplet_eval = eval_proof_with(vec![wide(5)], vec![wide(20), wide(21)]);
+
+    let proof = InnerProof::new(
+        dummy_commitment(),
+        empty_sumcheck(),
+        LogUpAux::new(vec![], vec![]),
+        main_eval,
+        vec![dummy_commitment()],
+        vec![empty_sumcheck()],
+        vec![LogUpAux::new(vec![], vec![])],
+        vec![chiplet_eval],
+    );
+
+    let bytes = serialize_proof_bytes(&proof);
+    let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
+
+    let bytes_of = |v: &[F]| v.iter().map(|f| f.to_bytes()).collect::<Vec<_>>();
+
+    assert_eq!(
+        bytes_of(&restored.eval_proof.tensor_vec),
+        bytes_of(&[wide(1), wide(2)]),
+        "main tensor_vec must survive the wire",
+    );
+    assert_eq!(
+        bytes_of(&restored.eval_proof.tensor_vec_ring),
+        bytes_of(&[wide(10), wide(11), wide(12)]),
+        "main tensor_vec_ring must survive the wire",
+    );
+    assert_ne!(
+        bytes_of(&restored.eval_proof.tensor_vec),
+        bytes_of(&restored.eval_proof.tensor_vec_ring),
+        "tensor_vec and tensor_vec_ring must not be conflated",
+    );
+
+    let chip = &restored.chiplet_eval_proofs[0];
+
+    assert_eq!(
+        bytes_of(&chip.tensor_vec),
+        bytes_of(&[wide(5)]),
+        "chiplet tensor_vec must survive the wire",
+    );
+    assert_eq!(
+        bytes_of(&chip.tensor_vec_ring),
+        bytes_of(&[wide(20), wide(21)]),
+        "chiplet tensor_vec_ring must survive the wire",
+    );
 }
