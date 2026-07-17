@@ -59,8 +59,6 @@ hekate-gadgets = { path = "hekate-gadgets" }
 hekate-prover-sys = { path = "hekate-prover-sys" }
 
 [profile.release]
-opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
