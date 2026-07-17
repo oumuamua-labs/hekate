@@ -21,13 +21,10 @@ blake3 = ["dep:blake3"]
 sha2 = ["dep:sha2"]
 sha3 = ["dep:sha3"]
 parallel = ["dep:rayon", "hekate-math/parallel"]
-expander = ["dep:aes", "dep:rand"]
 transcript-trace = []
 
 [dependencies]
 hekate-math = { workspace = true }
-aes = { version = "0.9", default-features = false, optional = true }
-rand = { version = "0.10", default-features = false, optional = true }
 rayon = { workspace = true, optional = true }
 blake3 = { version = "1.8", default-features = false, optional = true }
 sha2 = { version = "0.11", default-features = false, optional = true }

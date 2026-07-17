@@ -28,7 +28,7 @@ table-math = ["hekate-math/table-math"]
 
 [dependencies]
 hekate-math = { workspace = true }
-hekate-crypto = { workspace = true, features = ["expander"] }
+hekate-crypto = { workspace = true }
 hekate-core = { workspace = true }
 hekate-program = { workspace = true }
 tracing = { workspace = true }

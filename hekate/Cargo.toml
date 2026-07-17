@@ -46,7 +46,7 @@ dhat-heap = ["dep:dhat"]
 
 [dependencies]
 hekate-core = { workspace = true }
-hekate-crypto = { workspace = true, features = ["expander"] }
+hekate-crypto = { workspace = true }
 hekate-math = { workspace = true }
 hekate-program = { workspace = true }
 hekate-gadgets = { workspace = true }
