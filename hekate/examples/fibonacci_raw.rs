@@ -206,12 +206,10 @@ fn main() {
 
     let num_rows = 1 << num_vars;
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 0,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();

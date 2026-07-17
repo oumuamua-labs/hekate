@@ -352,12 +352,10 @@ fn main() {
     let ram_num_rows = num_ops.next_power_of_two();
     let ram_num_vars = ram_num_rows.trailing_zeros() as usize;
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();

@@ -419,11 +419,10 @@ fn main() {
     let pipeline = Pipeline::new(rom_num_rows, arith_num_rows);
     let audit = Audit::new(dummy_num_rows);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
