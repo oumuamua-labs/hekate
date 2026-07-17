@@ -249,8 +249,6 @@ fn bench_keccak_prove(c: &mut Criterion) {
             ..Config::default()
         };
 
-        OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
-
         let mut blinding_seed = [0u8; 32];
         OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
 

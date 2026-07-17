@@ -182,12 +182,10 @@ fn prove_and_verify_128(
         return Err("preflight violations".into());
     }
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -249,12 +247,10 @@ where
     let instance = ProgramInstance::new(CPU128_ROWS, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -898,12 +894,10 @@ fn prove_and_verify_256(
         return Err("preflight violations".into());
     }
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -969,12 +963,10 @@ where
     let instance = ProgramInstance::new(CPU256_ROWS, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();

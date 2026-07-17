@@ -205,12 +205,10 @@ fn prove_and_verify_mldsa(
         }
     }
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -343,12 +341,10 @@ where
     let instance = ProgramInstance::new(cpu_rows, public_inputs);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();

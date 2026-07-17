@@ -194,12 +194,10 @@ where
     let instance = ProgramInstance::new(cpu_rows, Vec::new());
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![twiddle_trace]);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
-        ..Config::default()
+        ..Config::dev()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut seed).unwrap();

@@ -195,12 +195,10 @@ fn prove_and_verify_mlkem_level(level: MlKemLevel, ct: &[u8], sk: &[u8]) -> Resu
     let instance = ProgramInstance::new(cpu_rows, ct_public);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -297,11 +295,10 @@ where
     let instance = ProgramInstance::new(cpu_rows, ct_public);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -400,12 +397,10 @@ where
     let instance = ProgramInstance::new(cpu_rows, ct_public);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -674,12 +669,10 @@ fn exploit_ntt_ram_binding_mismatch() {
     let instance = ProgramInstance::new(cpu_rows, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -779,12 +772,10 @@ fn exploit_ntt_flow_connectivity_scramble() {
     let instance = ProgramInstance::new(cpu_rows, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -1000,12 +991,10 @@ fn exploit_keccak_input_unbound() {
     let instance = ProgramInstance::new(cpu_rows, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
         ..Config::default()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
