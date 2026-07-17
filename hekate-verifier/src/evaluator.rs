@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
-// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,170 +24,112 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::proofs::{BrakedownCommitment, EvalBatchProof};
 use hekate_core::tensor::TensorProduct;
-use hekate_core::trace::TraceCompatibleField;
+use hekate_core::trace::{ColumnType, TraceCompatibleField};
 use hekate_core::utils;
 use hekate_crypto::Hasher;
-use hekate_crypto::expander_matrix::generate_expander_matrix;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::matrix::ByteSparseMatrix;
-use hekate_math::{Flat, HardwareField, PackableField};
-use tracing::{debug, instrument, warn};
+use hekate_math::{
+    AdditiveFft, BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField,
+};
+use hekate_program::expander::RingSwitchPlan;
+use tracing::{instrument, warn};
 
 #[cfg(feature = "parallel")]
 const PARALLEL_PROXIMITY_THRESHOLD: usize = 1 << 18;
 
-pub trait VirtualRowParser<F: HardwareField>: Sync {
-    fn parse(&self, row_bytes: &[u8], scratch: &mut RowParseScratch<F>, out: &mut Vec<Flat<F>>);
-}
+const NBITS: usize = 128;
 
 pub struct EvaluatorVerifier<F, H: Hasher> {
     _marker: PhantomData<(F, H)>,
 }
 
-#[derive(Default)]
-pub struct RowParseScratch<F: HardwareField> {
-    pub base_bytes: Vec<u8>,
-    pub shift_bytes: Vec<u8>,
-    pub virt_base: Vec<Flat<F>>,
-    pub virt_shift: Vec<Flat<F>>,
-}
-
-pub struct EvalVerifyContext<'a, F: HardwareField, RP: VirtualRowParser<F>> {
+pub struct EvalVerifyContext<'a, F: HardwareField> {
     pub points: Vec<&'a [Flat<F>]>,
     pub claimed_values_per_point: Vec<&'a [Flat<F>]>,
     pub num_vars: usize,
     pub row_bytes: usize,
-    pub parser: &'a RP,
+    pub ring_plan: &'a RingSwitchPlan,
 }
 
 impl<F, H: Hasher> EvaluatorVerifier<F, H>
 where
     F: HardwareField + PackableField + TraceCompatibleField,
 {
-    /// Verifies the Batch Evaluation Argument (TensorPCS).
-    ///
-    /// This is the cryptographic cornerstone that links all
-    /// polynomial evaluations (AIR constraints, GPA bus,
-    /// GKR gadgets) to the physical Brakedown commitment.
-    /// It prevents "Floating Proof" attacks by mathematically
-    /// proving that the claimed evaluations strictly belong
-    /// to the committed Merkle tree.
-    ///
-    /// # Cryptographic Protocol
-    /// 1. **Random Linear Combination (RLC):** Folds all
-    ///    requested columns using the `eta` challenge, and
-    ///    all requested evaluation points using the `rho`
-    ///    challenge, into a single target value.
-    /// 2. **Evaluation Sumcheck:** Verifies a Sumcheck
-    ///    protocol that reduces the 2D trace evaluation
-    ///    to a single 1D vector `q`.
-    /// 3. **ZK Codeword Check:** Since the Brakedown LDT
-    ///    commits only to the encoded Parity/Code (without
-    ///    exposing original data), the Verifier explicitly
-    ///    encodes the `q` vector using the exact same
-    ///    Expander Matrix.
-    /// 4. **LDT Verification:** Verifies the Brakedown
-    ///    proofs to ensure the committed matrix is close
-    ///    to a valid codeword.
-    /// 5. **Virtual Unpacking & Proximity Check:**
-    ///    Parses the raw physical bytes from the LDT leaves
-    ///    using the layout-aware `VirtualRowParser`. The physical
-    ///    bytes are expanded into virtual field elements,
-    ///    linearly combined using interleaved `eta`
-    ///    coefficients, and checked against `q_encoded`.
-    ///
-    /// # Architecture: Column Consistency Check
-    ///
-    /// The Verifier receives the folded vector `q` and
-    /// explicitly encodes it into `q_encoded`. Then, for
-    /// each randomly opened LDT column, the Verifier applies
-    /// the exact same folding logic (using powers of `r`)
-    /// and asserts that the result matches the corresponding
-    /// element in `q_encoded`.
-    ///
-    /// ```text
-    /// Given a random challenge opening Column 2:
-    ///
-    /// Prover provides LDT column: [C2, C9, C16]
-    /// Verifier computes:          (C2*r^0 + C9*r^1 + C16*r^2)
-    /// Verifier asserts:           Result == q_encoded[2]
-    /// ```
+    /// Verifies the ring-switch TensorPCS evaluation argument,
+    /// binding the claimed virtual evals to the Brakedown commitment.
+    /// A degree-2 sumcheck reduces `A·master_bit + master_whole·Eq(P)`
+    /// to `r_final`; the final check pairs `A(r')` and `Eq(P,r')`
+    /// with two whole-column openings that the proximity test
+    /// binds to the committed codewords.
     #[instrument(skip_all, name = "Evaluator::verify")]
-    pub fn verify<RP>(
+    pub fn verify(
         commitment: &BrakedownCommitment,
         proof: &EvalBatchProof<F>,
         transcript: &mut Transcript<H>,
-        ctx: EvalVerifyContext<'_, F, RP>,
+        ctx: EvalVerifyContext<'_, F>,
         config: &Config,
     ) -> errors::Result<bool>
     where
-        RP: VirtualRowParser<F>,
+        F: BinaryFieldExtras + Into<Block128> + From<u128>,
     {
         let points = ctx.points;
-        let claimed_values_per_point = ctx.claimed_values_per_point;
+        let claimed = ctx.claimed_values_per_point;
         let num_vars = ctx.num_vars;
         let row_bytes = ctx.row_bytes;
+        let plan = ctx.ring_plan;
 
-        let num_points = points.len();
-        if num_points == 0 || claimed_values_per_point.len() != num_points {
-            debug!(
-                "Input mismatch: points={}, values={}",
-                num_points,
-                claimed_values_per_point.len()
-            );
+        if points.len() != 1 || claimed.len() != 1 {
             return Err(errors::Error::Protocol {
                 protocol: "evaluator_verifier",
-                message: "input length mismatch",
+                message: "ring-switch evaluation expects a single point",
             });
         }
 
-        let num_cols = claimed_values_per_point[0].len();
+        let point = points[0];
+        let claims = claimed[0];
 
         transcript.append_message(b"eval_batch_start", b"");
 
-        // Sync η (eta) and ρ (rho)
-        for point_vals in &claimed_values_per_point {
-            for val in *point_vals {
-                transcript.append_field(b"claimed_val", val.to_tower());
-            }
+        for &val in claims {
+            transcript.append_field(b"claimed_val", val.to_tower());
         }
 
         let eta_tower = transcript.challenge_field::<F>(b"eval_eta")?;
-        let rho_tower = transcript.challenge_field::<F>(b"eval_rho")?;
+
+        // Drawn for transcript parity with the prover's multi-point path;
+        // production is single-point, rho is unused.
+        let _rho = transcript.challenge_field::<F>(b"eval_rho")?;
+
         let eta = eta_tower.to_hardware();
-        let rho = rho_tower.to_hardware();
 
-        // Combined Target V(r_0)
-        let mut target_value = Flat::from_raw(F::ZERO);
-        let mut rho_pow = Flat::from_raw(F::ONE);
+        let has_ring = plan.has_ring();
 
-        for point_vals in &claimed_values_per_point {
-            if point_vals.len() != num_cols {
-                warn!(
-                    "Input mismatch: expected {} columns, got {}",
-                    num_cols,
-                    point_vals.len()
-                );
-                return Err(errors::Error::Protocol {
-                    protocol: "evaluator_verifier",
-                    message: "claimed_values_per_point column count mismatch",
-                });
-            }
-
-            let mut col_rlc = Flat::from_raw(F::ZERO);
-            let mut eta_pow = Flat::from_raw(F::ONE);
-
-            for &val in *point_vals {
-                col_rlc += eta_pow * val;
-                eta_pow *= eta;
-            }
-
-            target_value += rho_pow * col_rlc;
-            rho_pow *= rho;
+        if has_ring && F::BITS != NBITS {
+            return Err(errors::Error::Protocol {
+                protocol: "evaluator_verifier",
+                message: "ring-switch evaluation requires a 128-bit field",
+            });
         }
 
-        // Verify Sumcheck
-        let sc_res = verify(num_vars, 2, target_value, &proof.sumcheck_proof, transcript)?;
+        // Order is load-bearing:
+        // r'' follows the claimed evals, precedes the sumcheck.
+        let kappa = F::BITS.ilog2() as usize;
+
+        let r_mix: Vec<Block128> = if has_ring {
+            let mut m = Vec::with_capacity(kappa);
+            for _ in 0..kappa {
+                m.push(transcript.challenge_field::<F>(b"eval_rmix")?.into());
+            }
+
+            m
+        } else {
+            Vec::new()
+        };
+
+        let target = ring_target::<F>(plan, claims, eta_tower, &r_mix);
+        let target_flat = F::from(target.0).to_hardware();
+
+        let sc_res = verify(num_vars, 2, target_flat, &proof.sumcheck_proof, transcript)?;
         let (r_row, sumcheck_final_eval) = match sc_res {
             Some(res) => res,
             None => {
@@ -196,64 +138,107 @@ where
             }
         };
 
-        // Verification of the Sumcheck evaluation against q
-        let q = &proof.tensor_vec;
-        transcript.append_field_list(b"tensor_q", q);
+        let q_whole = &proof.tensor_vec;
+        let q_ring = &proof.tensor_vec_ring;
+
+        transcript.append_field_list(b"tensor_q", q_whole);
+
+        if has_ring {
+            transcript.append_field_list(b"tensor_q_ring", q_ring);
+        }
 
         let split_vars = utils::compute_split_vars(
             num_vars,
             config.num_queries,
-            config.expansion_degree,
+            config.ldt_support_size,
             row_bytes,
         );
 
         let grid_cols = 1 << split_vars;
         let grid_rows = 1 << (num_vars - split_vars);
-        let encoded_width = grid_cols + config.ldt_blinding_factor;
+        let geom = config.table_geom(grid_cols);
+        let encoded_width = geom.encoded_width;
 
-        // Codeword consistency check
-        //
-        // The Prover's Sumcheck yielded a vector
-        // q (folded data + ZK noise). Since the
-        // Brakedown LDT only commits to the encoded
-        // matrix (Parity/Code), the Verifier must
-        // explicitly encode q using the exact same
-        // Expander Matrix. Because the matrix is
-        // binary, this algebraically mirrors the
-        // Prover's actions natively.
-        let matrix =
-            cached_expander_matrix(encoded_width, config.expansion_degree, config.matrix_seed);
+        if grid_cols + geom.support_size > encoded_width {
+            warn!("support + data message exceeds the codeword width");
+            return Ok(false);
+        }
 
-        if q.len() != encoded_width {
+        config.check_security(size_of::<F>() * 8, grid_cols)?;
+
+        let expected_len = grid_cols + geom.support_size;
+
+        if q_whole.len() != expected_len || (has_ring && q_ring.len() != expected_len) {
             warn!("tensor_q length mismatch");
             return Ok(false);
         }
 
-        let q_flat = q
-            .iter()
-            .copied()
-            .map(|value| value.to_hardware())
-            .collect::<Vec<_>>();
-        let q_encoded = matrix.spmv(q_flat.as_slice());
+        let q_whole_flat: Vec<Flat<F>> = q_whole.iter().map(|v| v.to_hardware()).collect();
+        let q_ring_flat: Vec<Flat<F>> = if has_ring {
+            q_ring.iter().map(|v| v.to_hardware()).collect()
+        } else {
+            Vec::new()
+        };
+
+        // Two independent encodes
+        #[cfg(feature = "parallel")]
+        let (q_whole_res, q_ring_res) = rayon::join(
+            || rs_encode_row::<F>(&q_whole_flat, grid_cols, config),
+            || {
+                if has_ring {
+                    rs_encode_row::<F>(&q_ring_flat, grid_cols, config)
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+        );
+
+        #[cfg(feature = "parallel")]
+        let (q_whole_encoded, q_ring_encoded) = (q_whole_res?, q_ring_res?);
+
+        #[cfg(not(feature = "parallel"))]
+        let q_whole_encoded = rs_encode_row::<F>(&q_whole_flat, grid_cols, config)?;
+
+        #[cfg(not(feature = "parallel"))]
+        let q_ring_encoded = if has_ring {
+            rs_encode_row::<F>(&q_ring_flat, grid_cols, config)?
+        } else {
+            Vec::new()
+        };
 
         let r_col_low = &r_row[..split_vars];
-        let tensor_col = TensorProduct::<F>::new(r_col_low.to_vec());
+        let tensor_col = build_tensor_table::<F>(r_col_low);
 
-        let mut master_eval = Flat::from_raw(F::ZERO);
+        let master_eval = |q: &[Flat<F>]| {
+            let mut acc = Flat::from_raw(F::ZERO);
+            for (&val, &t) in q.iter().take(grid_cols).zip(&tensor_col) {
+                acc += val * t;
+            }
 
-        // Verify Sumcheck vs Tensor Fold
-        //
-        // The master_eval connects the 2D tensor sum back
-        // to the 1D Sumcheck claim. The parity and ZK noise
-        // portions are only meant for the LDT proximity check
-        // and must not participate in the core AIR polynomial
-        // evaluation.
-        for (i, &val) in q_flat.iter().take(grid_cols).enumerate() {
-            master_eval += val * tensor_col.evaluate_at_index(i);
-        }
+            acc
+        };
 
-        if sumcheck_final_eval != master_eval {
-            warn!("Dot product failed: sumcheck_final_eval != master_eval");
+        let master_whole_eval = master_eval(&q_whole_flat);
+        let master_bit_eval = if has_ring {
+            master_eval(&q_ring_flat)
+        } else {
+            Flat::from_raw(F::ZERO)
+        };
+
+        // A(r') and Eq(P,r') are transparent; the two master evals
+        // are bound by the whole-column proximity check below.
+        let eq_at_r = TensorProduct::evaluate_eq_slice(point, &r_row);
+        let a_r = if has_ring {
+            let point_b: Vec<Block128> = point.iter().map(|f| f.to_tower().into()).collect();
+            let r_row_b: Vec<Block128> = r_row.iter().map(|f| f.to_tower().into()).collect();
+
+            F::from(ring_switch_a_at(&point_b, &r_row_b, &r_mix).0).to_hardware()
+        } else {
+            Flat::from_raw(F::ZERO)
+        };
+
+        if sumcheck_final_eval != a_r * master_bit_eval + eq_at_r * master_whole_eval {
+            warn!("ring-switch final check failed");
             return Ok(false);
         }
 
@@ -289,125 +274,84 @@ where
             random_indices.push((rng_val % (encoded_width as u64)) as usize);
         }
 
-        // Proximity Test
         let r_row_high = &r_row[split_vars..];
         let tensor_row = TensorProduct::<F>::new(r_row_high.to_vec());
 
-        // Pre-expand TensorPCS row evaluations
         let mut tensor_row_evals = Vec::with_capacity(grid_rows);
         for r in 0..grid_rows {
             tensor_row_evals.push(tensor_row.evaluate_at_index(r));
         }
 
-        let combo_factor = {
-            let mut sum = Flat::from_raw(F::ZERO);
-            let mut r_pow = Flat::from_raw(F::ONE);
+        let num_phys = plan.phys_rs.len();
+        let (coeff_bit, coeff_whole, eta_shift) = plan.column_coeffs::<F>(eta);
+        let phys_row_bytes: usize = plan.phys_rs.iter().map(|ct| 2 * ct.byte_size()).sum();
 
-            for point in &points {
-                sum += r_pow * TensorProduct::evaluate_eq_slice(point, &r_row);
-                r_pow *= rho;
-            }
-
-            sum
+        // eta^U is row-invariant:
+        // fold it into the shift coefficients once.
+        let coeff_whole_shift: Vec<Flat<F>> = coeff_whole.iter().map(|&c| c * eta_shift).collect();
+        let coeff_bit_shift: Vec<Flat<F>> = if has_ring {
+            coeff_bit.iter().map(|&c| c * eta_shift).collect()
+        } else {
+            Vec::new()
         };
 
-        let mut final_col_coeffs = vec![Flat::from_raw(F::ZERO); num_cols];
+        // Re-derive both folded openings from the physical columns
+        // in the opened leaf; RS commutes with a whole-column fold,
+        // this must match the RS re-encodings of the prover's
+        // committed q vectors.
+        let check_query =
+            |q_idx: usize, col_idx: usize, phys_row: &mut Vec<Flat<F>>| -> errors::Result<bool> {
+                let col_bytes = &opened_columns[slot_map[q_idx]];
+                let row_bytes_len = col_bytes.len() / grid_rows;
 
-        // Proximity Test (TensorPCS Folding Check)
-        //
-        // Set up coefficients for the folded evaluation
-        // based on the eta/rho challenges. Since the data
-        // is physically interleaved as [Base0, Shift0, Base1, Shift1...],
-        // the coefficients must perfectly align with this layout:
-        // [eta^0, eta^N * eta^0,  eta^1, eta^N * eta^1, ...]
-        // (where N is base_width).
-        let base_width = num_cols / 2;
-        let mut eta_pow = Flat::from_raw(F::ONE);
-
-        // Calculate eta^N
-        let mut eta_shift_coeff = Flat::from_raw(F::ONE);
-        for _ in 0..base_width {
-            eta_shift_coeff *= eta;
-        }
-
-        for i in 0..base_width {
-            // Coefficient for Base column i
-            final_col_coeffs[2 * i] = eta_pow * combo_factor;
-
-            // Coefficient for Shifted column i,
-            // must include eta^N shift.
-            final_col_coeffs[2 * i + 1] = (eta_pow * eta_shift_coeff) * combo_factor;
-            eta_pow *= eta;
-        }
-
-        let parser = ctx.parser;
-
-        let check_query = |q_idx: usize,
-                           col_idx: usize,
-                           scratch: &mut RowParseScratch<F>,
-                           virtual_row: &mut Vec<Flat<F>>|
-         -> errors::Result<bool> {
-            // Process LDT Openings:
-            // Because Base and Shifted columns are
-            // interleaved during matrix encoding, one
-            // queried leaf natively contains all the
-            // data needed for AIR transitions.
-            let col_bytes = &opened_columns[slot_map[q_idx]];
-            let row_bytes_len = col_bytes.len() / grid_rows;
-
-            let mut calculated_q_val = Flat::from_raw(F::ZERO);
-
-            for r in 0..grid_rows {
-                let row_data = &col_bytes[r * row_bytes_len..(r + 1) * row_bytes_len];
-                let mut row_lin_comb = Flat::from_raw(F::ZERO);
-
-                virtual_row.clear();
-
-                // Virtual Unpacking:
-                // The parser slices the physical bytes
-                // using the strict physical layout and
-                // then invokes parse_virtual_row to
-                // expand them into field elements.
-                parser.parse(row_data, scratch, virtual_row);
-
-                // SAFETY
-                if virtual_row.len() != num_cols {
-                    warn!(
-                        "Row parser produced {} columns, but expected {}",
-                        virtual_row.len(),
-                        num_cols
-                    );
-                    return Err(errors::Error::Protocol {
-                        protocol: "evaluator",
-                        message: "row parser column count mismatch",
-                    });
+                if row_bytes_len < phys_row_bytes {
+                    warn!("opened column shorter than physical row layout");
+                    return Ok(false);
                 }
 
-                // Elements are interleaved:
-                // [Col0_Base, Col0_Shifted, Col1_Base, ...]
-                for c_idx in 0..num_cols {
-                    row_lin_comb += virtual_row[c_idx] * final_col_coeffs[c_idx];
+                let mut q_whole_val = Flat::from_raw(F::ZERO);
+                let mut q_ring_val = Flat::from_raw(F::ZERO);
+
+                for r in 0..grid_rows {
+                    let row_data = &col_bytes[r * row_bytes_len..(r + 1) * row_bytes_len];
+
+                    phys_row.clear();
+
+                    parse_physical_row::<F>(row_data, &plan.phys_rs, phys_row);
+
+                    let mut fold_whole = Flat::from_raw(F::ZERO);
+                    let mut fold_bit = Flat::from_raw(F::ZERO);
+
+                    for p in 0..num_phys {
+                        let base = phys_row[2 * p];
+                        let shift = phys_row[2 * p + 1];
+
+                        fold_whole += base * coeff_whole[p] + shift * coeff_whole_shift[p];
+
+                        if has_ring {
+                            fold_bit += base * coeff_bit[p] + shift * coeff_bit_shift[p];
+                        }
+                    }
+
+                    let tr = tensor_row_evals[r];
+                    q_whole_val += fold_whole * tr;
+                    q_ring_val += fold_bit * tr;
                 }
 
-                let v_row_r = tensor_row_evals[r];
-                calculated_q_val += row_lin_comb * v_row_r;
-            }
+                let ok = q_whole_val == q_whole_encoded[col_idx]
+                    && (!has_ring || q_ring_val == q_ring_encoded[col_idx]);
 
-            // Compare against the encoded q vector
-            let matched = calculated_q_val == q_encoded[col_idx];
-            if !matched {
-                warn!("TensorPCS proximity check mismatch for column {}", col_idx);
-            }
+                if !ok {
+                    warn!("TensorPCS proximity mismatch for column {}", col_idx);
+                }
 
-            Ok(matched)
-        };
+                Ok(ok)
+            };
 
         let run_sequential = |indices: &[usize]| -> errors::Result<bool> {
-            let mut scratch = RowParseScratch::<F>::default();
-            let mut virtual_row = Vec::with_capacity(num_cols);
-
+            let mut phys_row = Vec::with_capacity(2 * num_phys);
             for (q_idx, &col_idx) in indices.iter().enumerate() {
-                if !check_query(q_idx, col_idx, &mut scratch, &mut virtual_row)? {
+                if !check_query(q_idx, col_idx, &mut phys_row)? {
                     return Ok(false);
                 }
             }
@@ -417,7 +361,8 @@ where
 
         #[cfg(feature = "parallel")]
         let all_matched = {
-            let proximity_work = config.num_queries * grid_rows * num_cols;
+            let per_row_cols = num_phys * if has_ring { 3 } else { 2 };
+            let proximity_work = config.num_queries * grid_rows * per_row_cols;
 
             if proximity_work >= PARALLEL_PROXIMITY_THRESHOLD {
                 use rayon::prelude::*;
@@ -426,15 +371,8 @@ where
                     .par_iter()
                     .enumerate()
                     .map_init(
-                        || {
-                            (
-                                RowParseScratch::<F>::default(),
-                                Vec::<Flat<F>>::with_capacity(num_cols),
-                            )
-                        },
-                        |(scratch, virtual_row), (q_idx, &col_idx)| {
-                            check_query(q_idx, col_idx, scratch, virtual_row)
-                        },
+                        || Vec::<Flat<F>>::with_capacity(2 * num_phys),
+                        |phys_row, (q_idx, &col_idx)| check_query(q_idx, col_idx, phys_row),
                     )
                     .try_reduce(|| true, |a, b| Ok(a && b))?
             } else {
@@ -453,70 +391,207 @@ where
     }
 }
 
-#[cfg(feature = "std")]
-fn cached_expander_matrix(
-    encoded_width: usize,
-    degree: usize,
-    seed: [u8; 32],
-) -> alloc::sync::Arc<ByteSparseMatrix> {
-    use alloc::sync::Arc;
-    use std::collections::HashMap;
-    use std::sync::{OnceLock, RwLock};
+/// `q_flat = [q_data(grid_cols), q_support(ldt)]`. Layout must
+/// match the prover's `rs_encode_grid`; `master_eval` reads `q_data`
+/// alone, the support masks openings without entering the claim.
+fn rs_encode_row<F: HardwareField + BinaryFieldExtras>(
+    q_flat: &[Flat<F>],
+    grid_cols: usize,
+    config: &Config,
+) -> errors::Result<Vec<Flat<F>>> {
+    let geom = config.table_geom(grid_cols);
+    let ldt = geom.support_size;
+    let code_width = geom.encoded_width;
 
-    const MAX_CACHED_MATRICES: usize = 128;
+    let mut buf = vec![Flat::from_raw(F::ZERO); code_width];
+    buf[..ldt].copy_from_slice(&q_flat[grid_cols..grid_cols + ldt]);
+    buf[ldt..ldt + grid_cols].copy_from_slice(&q_flat[..grid_cols]);
 
-    type Cache = RwLock<HashMap<(usize, usize, [u8; 32]), Arc<ByteSparseMatrix>>>;
+    let fft = AdditiveFft::<F>::new(code_width.trailing_zeros());
 
-    static CACHE: OnceLock<Cache> = OnceLock::new();
+    fft.forward_scalar(&mut buf)
+        .map_err(|_| errors::Error::Protocol {
+            protocol: "evaluator",
+            message: "additive-FFT row encode failed",
+        })?;
 
-    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
-    let key = (encoded_width, degree, seed);
-
-    if let Some(matrix) = cache.read().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Arc::clone(matrix);
-    }
-
-    let matrix = Arc::new(generate_expander_matrix(
-        encoded_width,
-        encoded_width,
-        degree,
-        seed,
-    ));
-
-    let mut guard = cache.write().unwrap_or_else(|e| e.into_inner());
-
-    if guard.len() < MAX_CACHED_MATRICES || guard.contains_key(&key) {
-        guard.insert(key, Arc::clone(&matrix));
-    } else {
-        debug!(
-            encoded_width,
-            degree, "expander-matrix cache full; regenerating without caching"
-        );
-    }
-
-    matrix
+    Ok(buf)
 }
 
-#[cfg(not(feature = "std"))]
-fn cached_expander_matrix(encoded_width: usize, degree: usize, seed: [u8; 32]) -> ByteSparseMatrix {
-    generate_expander_matrix(encoded_width, encoded_width, degree, seed)
-}
+fn build_tensor_table<F: HardwareField>(r: &[Flat<F>]) -> Vec<Flat<F>> {
+    let one = Flat::from_raw(F::ONE);
+    let mut table = vec![one];
 
-#[cfg(all(test, feature = "std"))]
-mod tests {
-    use super::cached_expander_matrix;
-    use hekate_crypto::expander_matrix::generate_expander_matrix;
+    for &ri in r {
+        let one_minus = one - ri;
+        let n = table.len();
 
-    #[test]
-    fn cached_matrix_matches_fresh() {
-        let seed = [7u8; 32];
+        let mut next = Vec::with_capacity(2 * n);
 
-        for &(width, degree) in &[(256usize, 16usize), (4296, 16), (256, 16)] {
-            let cached = cached_expander_matrix(width, degree, seed);
-            let fresh = generate_expander_matrix(width, width, degree, seed);
-
-            assert_eq!(cached.weights(), fresh.weights());
-            assert_eq!(cached.col_indices(), fresh.col_indices());
+        for &v in &table {
+            next.push(v * one_minus);
         }
+
+        for &v in &table {
+            next.push(v * ri);
+        }
+
+        table = next;
+    }
+
+    table
+}
+
+fn eq_tensor_b(r: &[Block128]) -> Vec<Block128> {
+    let mut t = vec![Block128::ONE];
+    for &ri in r {
+        let len = t.len();
+        let mut nt = Vec::with_capacity(len * 2);
+
+        for &v in &t {
+            nt.push(v * (Block128::ONE + ri));
+        }
+
+        for &v in &t {
+            nt.push(v * ri);
+        }
+
+        t = nt;
+    }
+
+    t
+}
+
+fn transpose128(cols: &[Block128; NBITS]) -> [Block128; NBITS] {
+    let mut rows = [Block128::ZERO; NBITS];
+    for (v, cv) in cols.iter().enumerate() {
+        for (u, ru) in rows.iter_mut().enumerate() {
+            ru.0 |= ((cv.0 >> u) & 1) << v;
+        }
+    }
+
+    rows
+}
+
+/// A(r') via the tensor algebra, without a materialized Dense A.
+/// `e := eq~(phi0(P), phi1(r'))`;
+/// `A(r') = Σ_u eq(r'',u)·e_row[u]`.
+fn ring_switch_a_at(point: &[Block128], r_final: &[Block128], r_mix: &[Block128]) -> Block128 {
+    let mut e = [Block128::ZERO; NBITS];
+    e[0] = Block128::ONE;
+
+    for (a, b) in point.iter().zip(r_final) {
+        let mut col_scaled = e;
+        for cv in col_scaled.iter_mut() {
+            *cv *= *a;
+        }
+
+        let mut row_scaled = transpose128(&e);
+        for ru in row_scaled.iter_mut() {
+            *ru *= *b;
+        }
+
+        let row_scaled = transpose128(&row_scaled);
+
+        for i in 0..NBITS {
+            e[i] += col_scaled[i] + row_scaled[i];
+        }
+    }
+
+    let e_rows = transpose128(&e);
+    let eq_mix = eq_tensor_b(r_mix);
+
+    let mut acc = Block128::ZERO;
+    for u in 0..NBITS {
+        acc += eq_mix[u] * e_rows[u];
+    }
+
+    acc
+}
+
+/// Σ_u eq(r'',u)·ŝ_u for one ring unit, ŝ_u = Σ_v bit_u(c_v)·2^v.
+fn ring_batch_b(bit_claims: &[Block128], eq_mix: &[Block128]) -> Block128 {
+    let mut acc = Block128::ZERO;
+    for (u, &m) in eq_mix.iter().enumerate() {
+        let mut shat = 0u128;
+        for (v, cv) in bit_claims.iter().enumerate() {
+            shat |= ((cv.0 >> u) & 1) << v;
+        }
+
+        acc += m * Block128(shat);
+    }
+
+    acc
+}
+
+/// Reconstructs the sumcheck's initial claim from the claimed
+/// virtual evals, in the tower basis. Ring units contribute
+/// `eta·Σ_u eq(r'',u) ŝ_u`; whole units contribute `eta·c'`.
+fn ring_target<F>(
+    plan: &RingSwitchPlan,
+    claims: &[Flat<F>],
+    eta_tower: F,
+    r_mix: &[Block128],
+) -> Block128
+where
+    F: HardwareField + Into<Block128>,
+{
+    let half = claims.len() / 2;
+    let eq_mix = eq_tensor_b(r_mix);
+    let eta: Block128 = eta_tower.into();
+
+    let mut eta_pows = Vec::with_capacity(plan.num_units + 1);
+    let mut e = Block128::ONE;
+
+    for _ in 0..=plan.num_units {
+        eta_pows.push(e);
+        e *= eta;
+    }
+
+    let eta_shift = eta_pows[plan.num_units];
+
+    let mut target = Block128::ZERO;
+    for (offset, shift_mul) in [(0usize, Block128::ONE), (half, eta_shift)] {
+        let half_claims = &claims[offset..offset + half];
+
+        let mut ci = 0usize;
+        for (unit_idx, &(is_ring, num_claims)) in plan.units.iter().enumerate() {
+            let weight = eta_pows[unit_idx] * shift_mul;
+            if is_ring {
+                let bits: Vec<Block128> = half_claims[ci..ci + num_claims]
+                    .iter()
+                    .map(|f| f.to_tower().into())
+                    .collect();
+
+                target += weight * ring_batch_b(&bits, &eq_mix);
+            } else {
+                let c: Block128 = half_claims[ci].to_tower().into();
+                target += weight * c;
+            }
+
+            ci += num_claims;
+        }
+    }
+
+    target
+}
+
+/// Parses one opened grid-row into `[base, shift]` per
+/// committed column, each at its `rs_field` width
+/// (sub-B32 columns are B32-wide on the wire).
+fn parse_physical_row<F: TraceCompatibleField>(
+    row_data: &[u8],
+    phys_rs: &[ColumnType],
+    out: &mut Vec<Flat<F>>,
+) {
+    let mut ptr = 0;
+    for ct in phys_rs {
+        let sz = ct.byte_size();
+
+        out.push(ct.parse_from_bytes(&row_data[ptr..ptr + sz]));
+        ptr += sz;
+
+        out.push(ct.parse_from_bytes(&row_data[ptr..ptr + sz]));
+        ptr += sz;
     }
 }
