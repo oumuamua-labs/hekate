@@ -4,10 +4,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache2-yellow.svg)](./LICENSE)
 
 Zero-knowledge proof system over binary tower fields. Streaming architecture. Bounded memory. Edge-native.
-
-Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory. No FFTs,
-no trace materialization, no server-grade RAM requirements. Proves ML-KEM decapsulation and ML-DSA signature
-verification on a laptop and mobile.
+Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory.
 
 > [!WARNING]  
 > This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
@@ -27,24 +24,9 @@ verification on a laptop and mobile.
 
 ## ⚠️ Security Warning
 
-This workspace has not been audited and may contain bugs and security flaws.
+This workspace has not been independently audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
-
----
-
-## Why Hekate Exists
-
-Current ZK provers, RISC Zero, Plonky2, Plonky3, Binius, Stwo, Winterfell, materialize the full execution trace in RAM
-before proving. Most then run FFT-based commitments (FRI, Circle FRI) that blow up memory by 2x–8x on top of the trace
-with O(N log N) prover time. This "monolithic trace + FFT blowup" architecture imposes a hard floor on memory:
-128GB+ for real workloads, 76GB just for Keccak at 2^20 scale (Binius), swap death at 2^24 (Plonky3).
-
-That floor kills client-side proving. No mobile device, no browser, no edge node can run these provers.
-
-Hekate eliminates the floor. The prover streams through the trace, folds in-place, and discards intermediate state. Peak
-memory is bounded per-table, not per-computation. A 2^24 Keccak proof runs in 29.7 GB on a consumer laptop where Binius
-and Plonky3 crash or thrash.
 
 ---
 
@@ -79,8 +61,8 @@ commitments. No column waste, no forced padding. Tables linked by LogUp bus.
 **Virtual packing**, Keccak stores 1600 bits in 25 physical B64 columns instead of 1600 bit columns. Bits expand JIT in
 registers. 16x memory savings.
 
-**Linear-code commitments**, Brakedown PCS: O(N) prover, O(N) memory. No FFT blowup. Merkle tree over encoded columns
-only (raw trace never hashed, true ZK).
+**Linear-code commitments**, Brakedown PCS: O(N) prover, O(N) memory. MDS Reed-Solomon row code via additive
+binary-field FFT, exact distance δ = 1 − rate. Merkle tree over encoded columns only (raw trace never hashed, true ZK).
 
 **Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) decapsulation, AES-128/256,
 all proven natively in binary fields without bit-decomposition overhead.
@@ -103,6 +85,16 @@ commitment, own ZeroCheck, own evaluation argument, and is wired in by a LogUp b
 (`(val_a, val_b, val_res, opcode, request_idx)` keys with a row-index clock).
 
 ```rust
+use hekate::core::errors;
+use hekate::core::trace::ColumnType;
+use hekate::math::Block128;
+use hekate_gadgets::{CpuArithColumns, CpuIntArithmeticUnit, IntArithmeticChiplet};
+use hekate_program::chiplet::ChipletDef;
+use hekate_program::constraint::builder::ConstraintSystem;
+use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
+use hekate_program::permutation::PermutationCheckSpec;
+use hekate_program::{Air, Program};
+
 type F = Block128;
 
 #[derive(Clone)]
@@ -165,6 +157,14 @@ impl Program<F> for FibProgram {
 Trace generation builds the CPU columns and the chiplet trace independently; they meet on the bus.
 
 ```rust
+use hekate::core::errors;
+use hekate::core::trace::{ColumnTrace, TraceBuilder};
+use hekate::math::{Bit, Block32};
+use hekate_gadgets::{
+    ArithmeticOpcode, CpuArithColumns, IntArithmeticLayout, IntArithmeticOp,
+    generate_arithmetic_trace,
+};
+
 fn generate_traces(num_rows: usize) -> errors::Result<(ColumnTrace, ColumnTrace, u32)> {
     let num_vars = num_rows.trailing_zeros() as usize;
 
@@ -212,11 +212,20 @@ columns when its row is idle. The CPU AIR only needs the two transition constrai
 LogUp bus guarantees `val_res = a + b` for every row where `s = 1`.
 
 Wire up the program, instance, and witness, then prove with `hekate-prover-sys` and verify with
-`hekate-verifier`. The transcript label, `Config`, and matrix seed must match across both sides, the
-driver builds one `config` and reuses it. `verify` returns `true` only if every Sumcheck round, the
-LogUp bus sums, and the evaluation openings hold.
+`hekate-verifier`. The transcript label and `Config` must match across both sides, the driver builds
+one `config` and reuses it. `verify` returns `true` only if every Sumcheck round, the LogUp bus sums,
+and the evaluation openings hold.
 
 ```rust
+use hekate::core::config::Config;
+use hekate::core::errors;
+use hekate::crypto::DefaultHasher;
+use hekate::crypto::transcript::Transcript;
+use hekate_program::{ProgramInstance, ProgramWitness};
+use hekate_prover_sys::prove;
+use hekate_verifier::HekateVerifier;
+use rand::{TryRngCore, rngs::OsRng};
+
 fn run(num_rows: usize) -> errors::Result<bool> {
     let (cpu, arith, fib_n) = generate_traces(num_rows)?;
 
@@ -224,8 +233,7 @@ fn run(num_rows: usize) -> errors::Result<bool> {
     let instance = ProgramInstance::new(num_rows, vec![F::from(fib_n as u128)]);
     let witness = ProgramWitness::new(cpu).with_chiplets(vec![arith]);
 
-    let mut config = Config::default();
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
+    let config = Config::default();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -266,7 +274,7 @@ binary you can run with `cargo run --release --example <name>`.
 - [Keccak inline kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak_inline.rs) (CPU AIR
   with embedded f1600 permutation)
 - [32-bit integer arithmetic](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/arith.rs) (add / sub /
-  mul via `IntArithmeticChiplet`)
+  and / xor / not / lt via `IntArithmeticChiplet`)
 - [RAM read/write proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/ram.rs) (offline-memory
   consistency via `RamChiplet`)
 
@@ -274,29 +282,30 @@ binary you can run with `cargo run --release --example <name>`.
 
 ## Performance
 
-All numbers on Apple M3 Max (16 cores, 48 GB RAM), `--release` with `-C target-cpu=native`,
-features `std parallel blake3 table-math`. Measured on commit `master` with the example binaries
-in `hekate/examples/`. Peak RSS is the process maximum resident set size (`/usr/bin/time -l`).
+All numbers on Apple M3 Max (16 cores, 48 GB RAM), `--release`, features
+`std parallel blake3 table-math`. Measured with the example binaries in `hekate/examples/`
+on an otherwise idle machine; post-quantum and AES figures are the mean of three runs. Peak memory is
+the process peak physical footprint, which equals resident set size for any run that fits in RAM.
 
 Reproduce:
 
 ```bash
-RUSTFLAGS="-C target-cpu=native" cargo build --release \
-  --no-default-features --features "std parallel blake3 table-math" \
-  --example <name>
-
-/usr/bin/time -l target/release/examples/<name> [<arg>]
+just example mlkem "" public
+just example mldsa 65 public           # 44 | 65 | 87
+just example aes 256 public            # 128 | 256
+just example keccak_inline 20 public   # num_vars
+just example fibonacci_raw 26 public   # num_vars
 ```
 
 ### Post-Quantum Crypto and AES
 
-|              | ML-KEM-768 | ML-DSA-44/65 | ML-DSA-87 | AES-128   | AES-256   |
-|:-------------|:-----------|:-------------|:----------|:----------|:----------|
-| Proving      | 945.36 ms  | 1.8 s        | 2.95 s    | 1.68 s    | 1.80 s    |
-| Verification | 12.4 ms    | 18.6 ms      | 23.3 ms   | 8.8 ms    | 9.4 ms    |
-| Proof Size   | 2,831 KiB  | 3,510 KiB    | 4,415 KiB | 2,856 KiB | 3,027 KiB |
-| Peak RSS     | 393 MB     | 435 MB       | 786 MB    | 854 MB    | 1,256 MB  |
-| Chiplets     | 6          | 7            | 7         | 2         | 2         |
+|              | ML-KEM-768 | ML-DSA-44 | ML-DSA-65 | ML-DSA-87 | AES-128   | AES-256   |
+|:-------------|:-----------|:----------|:----------|:----------|:----------|:----------|
+| Proving      | 893 ms     | 1.50 s    | 1.56 s    | 2.69 s    | 2.01 s    | 2.11 s    |
+| Verification | 17.5 ms    | 22.2 ms   | 22.2 ms   | 28.5 ms   | 14.1 ms   | 15.9 ms   |
+| Proof Size   | 3,389 KiB  | 4,607 KiB | 4,650 KiB | 6,142 KiB | 6,554 KiB | 7,298 KiB |
+| Peak memory  | 612 MiB    | 557 MiB   | 598 MiB   | 1,136 MiB | 1,586 MiB | 2,002 MiB |
+| Chiplets     | 6          | 7         | 7         | 7         | 2         | 2         |
 
 Chiplet trace sizes:
 
@@ -312,22 +321,24 @@ AES-256).
 
 `hekate/examples/keccak_inline.rs <num_vars>`, default 20.
 
-| Scale (rows) | Permutations | Hashed  | Proving  | Verify  | Proof Size | Peak RSS  |
-|:-------------|:-------------|:--------|:---------|:--------|:-----------|:----------|
-| 2^15         | 1,310        | ~178 KB | 455 ms   | 4.1 ms  | 642 KiB    | 143 MB    |
-| 2^20         | 41,943       | ~5.4 MB | 10.77 s  | 11.9 ms | 3,424 KiB  | 2,561 MB  |
-| 2^24         | 671,088      | ~91 MB  | 187.10 s | 44.3 ms | 13,403 KiB | 23,447 MB |
+| Scale (rows) | Permutations | Hashed  | Proving  | Verify  | Proof Size | Peak memory |
+|:-------------|:-------------|:--------|:---------|:--------|:-----------|:------------|
+| 2^15         | 1,310        | ~178 KB | 323 ms   | 5.6 ms  | 958 KiB    | 181 MiB     |
+| 2^20         | 41,943       | ~5.4 MB | 7.78 s   | 10.8 ms | 4,796 KiB  | 3,495 MiB   |
+| 2^24 *       | 671,088      | ~91 MB  | 155.43 s | 70.7 ms | 18,860 KiB | 46,080 MiB  |
+
+\* 2^24 exceeds this host's 48 GB, its proving time includes compressor overhead.
 
 ### Fibonacci (32-bit integer add), scaling
 
 `hekate/examples/fibonacci_raw.rs <num_vars>`, default 24. Each row: bit-sliced 32-bit add with
 explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns.
 
-| Scale (rows) | Proving   | Verify  | Proof Size | Peak RSS  |
-|:-------------|:----------|:--------|:-----------|:----------|
-| 2^20         | 583.62 ms | 5.1 ms  | 647 KiB    | 138 MB    |
-| 2^24         | 8.54 s    | 19.1 ms | 2,499 KiB  | 1,805 MB  |
-| 2^26         | 35.41 s   | 40.0 ms | 4,951 KiB  | 6,972 MB  |
+| Scale (rows) | Proving | Verify  | Proof Size | Peak memory |
+|:-------------|:--------|:--------|:-----------|:------------|
+| 2^20         | 504 ms  | 4.5 ms  | 1,034 KiB  | 233 MiB     |
+| 2^24         | 8.00 s  | 10.9 ms | 3,999 KiB  | 3,296 MiB   |
+| 2^26         | 33.18 s | 15.6 ms | 7,939 KiB  | 13,312 MiB  |
 
 ---
 
