@@ -244,7 +244,7 @@ fn bench_keccak_prove(c: &mut Criterion) {
         let instance = ProgramInstance::new(num_rows, vec![]);
         let witness = ProgramWitness::new(trace);
 
-        let mut config = Config {
+        let config = Config {
             sumcheck_blinding_factor: 2,
             ..Config::default()
         };

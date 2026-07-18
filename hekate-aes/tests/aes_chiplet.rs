@@ -184,7 +184,7 @@ fn prove_and_verify_128(
 
     let config = Config {
         sumcheck_blinding_factor: 2,
-        ..Config::default()
+        ..Config::dev()
     };
 
     let mut blinding_seed = [0u8; 32];
@@ -249,7 +249,7 @@ where
 
     let config = Config {
         sumcheck_blinding_factor: 2,
-        ..Config::default()
+        ..Config::dev()
     };
 
     let mut blinding_seed = [0u8; 32];
@@ -896,7 +896,7 @@ fn prove_and_verify_256(
 
     let config = Config {
         sumcheck_blinding_factor: 2,
-        ..Config::default()
+        ..Config::dev()
     };
 
     let mut blinding_seed = [0u8; 32];
@@ -965,7 +965,7 @@ where
 
     let config = Config {
         sumcheck_blinding_factor: 2,
-        ..Config::default()
+        ..Config::dev()
     };
 
     let mut blinding_seed = [0u8; 32];
