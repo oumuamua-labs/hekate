@@ -645,45 +645,41 @@ where
         // Constraint System Setup
         // =========================================================
 
-        // Validate LogUp aux structure and bind
-        // claimed_sums into the transcript before
-        // drawing alpha / r_zerocheck so the
-        // ZeroCheck challenges depend on the
-        // bus-sum target.
-        if !bus_specs.is_empty() {
-            if logup_aux.claimed_sums.len() != bus_specs.len() {
+        // Validate LogUp aux structure and bind claimed_sums
+        // into the transcript before drawing alpha / r_zerocheck,
+        // the ZeroCheck challenges depend on the bus-sum target.
+        if logup_aux.claimed_sums.len() != bus_specs.len() {
+            return Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "logup_aux claimed_sums length mismatch with bus_specs",
+            });
+        }
+
+        if logup_aux.h_evals.len() != bus_specs.len() {
+            return Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "logup_aux h_evals length mismatch with bus_specs",
+            });
+        }
+
+        for (i, ((h_bus, _), (claim_bus, _))) in logup_aux
+            .h_evals
+            .iter()
+            .zip(logup_aux.claimed_sums.iter())
+            .enumerate()
+        {
+            if h_bus != claim_bus {
                 return Err(errors::Error::Protocol {
                     protocol: "verifier",
-                    message: "logup_aux claimed_sums length mismatch with bus_specs",
+                    message: "logup_aux bus_id order diverges between h_evals and claimed_sums",
                 });
             }
 
-            if logup_aux.h_evals.len() != bus_specs.len() {
+            if h_bus.as_str() != bus_specs[i].0.as_str() {
                 return Err(errors::Error::Protocol {
                     protocol: "verifier",
-                    message: "logup_aux h_evals length mismatch with bus_specs",
+                    message: "logup_aux bus_id does not match bus_specs ordering",
                 });
-            }
-
-            for (i, ((h_bus, _), (claim_bus, _))) in logup_aux
-                .h_evals
-                .iter()
-                .zip(logup_aux.claimed_sums.iter())
-                .enumerate()
-            {
-                if h_bus != claim_bus {
-                    return Err(errors::Error::Protocol {
-                        protocol: "verifier",
-                        message: "logup_aux bus_id order diverges between h_evals and claimed_sums",
-                    });
-                }
-
-                if h_bus.as_str() != bus_specs[i].0.as_str() {
-                    return Err(errors::Error::Protocol {
-                        protocol: "verifier",
-                        message: "logup_aux bus_id does not match bus_specs ordering",
-                    });
-                }
             }
         }
 
@@ -691,6 +687,7 @@ where
 
         let alpha_tower = transcript.challenge_field::<F>(b"alpha")?;
         let alpha = alpha_tower.to_hardware();
+
         let r_zerocheck = (0..num_vars)
             .map(|_| {
                 transcript
@@ -707,14 +704,13 @@ where
             sumcheck_degree = sumcheck_degree.max(2);
         }
 
-        // LogUp consistency `h · key · Eq` is degree 3.
+        // LogUp consistency `h · key · Eq` is degree 3
         if !bus_specs.is_empty() {
             sumcheck_degree = sumcheck_degree.max(3);
         }
 
-        // LogUp α_pow offset must match
-        // the prover's continuation past
-        // AIR + boundary + blinding.
+        // LogUp α_pow offset must match the prover's
+        // continuation past AIR + boundary + blinding.
         let logup_alpha_offset =
             ast.roots.len() + boundary_constraints.len() + config.sumcheck_blinding_factor;
 
