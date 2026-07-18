@@ -70,6 +70,7 @@ jobs:
             sdk:
               - 'hekate-sdk/**'
               - 'hekate-verifier/**'
+              - 'hekate-gadgets/**'
               - 'hekate-program/**'
               - 'hekate-core/**'
               - 'hekate-crypto/**'
@@ -86,6 +87,10 @@ jobs:
               - 'Cargo.lock'
             keccak:
               - 'hekate-keccak/**'
+              - 'hekate-verifier/**'
+              - 'hekate-sdk/**'
+              - 'hekate-prover-sys/**'
+              - 'hekate-scribble/**'
               - 'hekate-program/**'
               - 'hekate-core/**'
               - 'hekate-crypto/**'
@@ -93,6 +98,10 @@ jobs:
               - 'Cargo.lock'
             aes:
               - 'hekate-aes/**'
+              - 'hekate-verifier/**'
+              - 'hekate-sdk/**'
+              - 'hekate-prover-sys/**'
+              - 'hekate-scribble/**'
               - 'hekate-program/**'
               - 'hekate-core/**'
               - 'hekate-crypto/**'
@@ -100,6 +109,10 @@ jobs:
               - 'Cargo.lock'
             pqc:
               - 'hekate-pqc/**'
+              - 'hekate-verifier/**'
+              - 'hekate-sdk/**'
+              - 'hekate-prover-sys/**'
+              - 'hekate-scribble/**'
               - 'hekate-keccak/**'
               - 'hekate-gadgets/**'
               - 'hekate-program/**'
