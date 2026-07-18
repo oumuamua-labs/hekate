@@ -337,7 +337,7 @@ fn is_noop<F: TraceCompatibleField>(
 
 fn cell_equal(column: &TraceColumn, row: usize, value: CellValue) -> bool {
     match (column, value) {
-        (TraceColumn::Bit(v), CellValue::Bit(x)) => v[row].0 == x.0,
+        (TraceColumn::Bit(v), CellValue::Bit(x)) => v[row].get() == x.get(),
         (TraceColumn::B8(v), CellValue::B8(x)) => v[row].into_raw().0 == x.into_raw().0,
         (TraceColumn::B16(v), CellValue::B16(x)) => v[row].into_raw().0 == x.into_raw().0,
         (TraceColumn::B32(v), CellValue::B32(x)) => v[row].into_raw().0 == x.into_raw().0,

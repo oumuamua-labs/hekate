@@ -299,7 +299,16 @@ fn serialize_eval_batch<'a, F: TowerField>(
         .iter()
         .map(|f| block128_from_field(f))
         .collect();
+
     let tensor = fbb.create_vector(&tv);
+
+    let tv_ring: Vec<fb::Block128> = proof
+        .tensor_vec_ring
+        .iter()
+        .map(|f| block128_from_field(f))
+        .collect();
+
+    let tensor_ring = fbb.create_vector(&tv_ring);
 
     fb::EvalBatchProof::create(
         fbb,
@@ -308,6 +317,7 @@ fn serialize_eval_batch<'a, F: TowerField>(
             ldt_proof: Some(ldt),
             point_evaluations: Some(pts),
             tensor_vec: Some(tensor),
+            tensor_vec_ring: Some(tensor_ring),
         },
     )
 }
@@ -478,11 +488,24 @@ fn deserialize_eval_batch<F: TowerField>(fb: fb::EvalBatchProof<'_>) -> Result<E
         None => Vec::new(),
     };
 
+    let tensor_vec_ring = match fb.tensor_vec_ring() {
+        Some(v) => {
+            let mut tv = Vec::with_capacity(v.len());
+            for i in 0..v.len() {
+                tv.push(field_from_block128::<F>(*v.get(i))?);
+            }
+
+            tv
+        }
+        None => Vec::new(),
+    };
+
     Ok(EvalBatchProof {
         sumcheck_proof,
         ldt_proof,
         point_evaluations,
         tensor_vec,
+        tensor_vec_ring,
     })
 }
 

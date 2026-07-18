@@ -35,13 +35,13 @@ impl Instant {
 
 /// Splitting variable `c` minimising
 /// `2^c · 16 + num_queries · 2^(num_vars - c) · row_bytes`,
-/// floored to `2^c >= expansion_degree`
-/// (expander matrix requires `degree <= grid_cols`).
+/// floored toward `2^c >= max(2, support_size)`,
+/// then capped at `num_vars`.
 #[inline(always)]
 pub fn compute_split_vars(
     num_vars: usize,
     num_queries: usize,
-    expansion_degree: usize,
+    support_size: usize,
     row_bytes: usize,
 ) -> usize {
     if num_vars == 0 {
@@ -52,9 +52,13 @@ pub fn compute_split_vars(
     let factor = (num_queries * ratio).max(1);
     let optimal_c = (num_vars + factor.ilog2() as usize) / 2;
 
-    let degree_floor = expansion_degree.max(2).next_power_of_two().trailing_zeros() as usize;
+    let support_floor = if support_size > 1 {
+        (support_size - 1).ilog2() as usize + 1
+    } else {
+        1
+    };
 
-    optimal_c.clamp(degree_floor.min(num_vars), num_vars)
+    optimal_c.max(support_floor).clamp(1, num_vars)
 }
 
 /// Serialized width of one opened Brakedown grid row:

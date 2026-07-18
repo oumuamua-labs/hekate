@@ -64,12 +64,12 @@ where
         let split_vars = compute_split_vars(
             num_vars,
             config.num_queries,
-            config.expansion_degree,
+            config.ldt_support_size,
             row_bytes,
         );
 
         let grid_cols = 1 << split_vars;
-        let encoded_width = grid_cols + config.ldt_blinding_factor;
+        let encoded_width = config.encoded_width(grid_cols);
         let num_queries = config.num_queries;
 
         let mut random_indices = Vec::with_capacity(num_queries);
@@ -170,7 +170,7 @@ mod tests {
     fn brakedown_verify_valid_proof() {
         let config = Config {
             num_queries: 4,
-            ldt_blinding_factor: 2, // Enable ZK noise for test
+            ldt_support_size: 2, // Enable ZK noise for test
             ..Config::default()
         };
 
@@ -180,11 +180,11 @@ mod tests {
         let field_size = 16; // Block128 size
 
         let split_vars =
-            compute_split_vars(num_vars, config.num_queries, config.expansion_degree, 128);
+            compute_split_vars(num_vars, config.num_queries, config.ldt_support_size, 128);
 
         let grid_cols = 1 << split_vars;
         let grid_rows = 1 << (num_vars - split_vars);
-        let encoded_width = grid_cols + config.ldt_blinding_factor;
+        let encoded_width = config.encoded_width(grid_cols);
 
         // 1. Setup Mock Data (Leaves)
         // Verification expects:
@@ -286,9 +286,9 @@ mod tests {
         let num_vars = 4;
 
         let split_vars =
-            compute_split_vars(num_vars, config.num_queries, config.expansion_degree, 128);
+            compute_split_vars(num_vars, config.num_queries, config.ldt_support_size, 128);
         let grid_cols = 1 << split_vars;
-        let encoded_width = grid_cols + config.ldt_blinding_factor;
+        let encoded_width = config.encoded_width(grid_cols);
 
         // Minimal fake tree mapped to encoded_width
         let leaves = vec![[0u8; 32]; encoded_width];

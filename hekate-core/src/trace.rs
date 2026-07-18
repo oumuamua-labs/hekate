@@ -23,8 +23,8 @@ use core::any::TypeId;
 use core::fmt;
 use core::mem::transmute;
 use hekate_math::{
-    Bit, Block8, Block16, Block32, Block64, Block128, CanonicalSerialize, Flat, FlatPromote,
-    HardwareField, PackableField, TowerField,
+    BinaryFieldExtras, Bit, Block8, Block16, Block32, Block64, Block128, CanonicalSerialize, Flat,
+    FlatPromote, HardwareField, PackableField, TowerField,
 };
 use zeroize::Zeroize;
 #[cfg(feature = "secure-memory")]
@@ -99,13 +99,15 @@ impl fmt::Display for Error {
 }
 
 /// Bound for the proving field `F`:
-/// it must losslessly represent every
-/// `ColumnType` used by the trace
-/// (Bit, B8, B16, B32, B64, B128).
+/// it must losslessly represent every `ColumnType`
+/// used by the trace (Bit, B8, B16, B32, B64, B128)
+/// and carry the additive-FFT substrate the
+/// Brakedown RS row code encodes over.
 pub trait TraceCompatibleField:
     TowerField
     + HardwareField
     + PackableField
+    + BinaryFieldExtras
     + FlatPromote<Block8>
     + FlatPromote<Block16>
     + FlatPromote<Block32>
@@ -126,6 +128,7 @@ impl<T> TraceCompatibleField for T where
     T: TowerField
         + HardwareField
         + PackableField
+        + BinaryFieldExtras
         + FlatPromote<Block8>
         + FlatPromote<Block16>
         + FlatPromote<Block32>
@@ -364,6 +367,17 @@ impl ColumnType {
         }
     }
 
+    /// The tower field this column's cells are committed
+    /// in under the MDS Reed-Solomon row code. GF(2),
+    /// GF(2^8), and GF(2^16) admit no rate-1/2 MDS RS.
+    #[inline]
+    pub const fn rs_field(&self) -> Self {
+        match self {
+            Self::Bit | Self::B8 | Self::B16 => Self::B32,
+            other => *other,
+        }
+    }
+
     /// Parse a field element from its on-wire
     /// bytes (little-endian, hardware basis)
     /// without intermediate allocation.
@@ -372,7 +386,7 @@ impl ColumnType {
         F: TraceCompatibleField,
     {
         match self {
-            Self::Bit => Flat::from_raw(F::from(Bit(bytes[0]))),
+            Self::Bit => Flat::from_raw(F::from(Bit::new(bytes[0]))),
             Self::B8 => F::promote_flat(Flat::from_raw(Block8(bytes[0]))),
             Self::B16 => {
                 let mut buf = [0u8; 2];
@@ -503,7 +517,7 @@ impl TraceColumn {
 
     pub fn is_all_zeros(&self) -> bool {
         match self {
-            Self::Bit(v) => v.iter().all(|x| x.0 == 0),
+            Self::Bit(v) => v.iter().all(|x| x.get() == 0),
             Self::B8(v) => v.iter().all(|x| x.into_raw().0 == 0),
             Self::B16(v) => v.iter().all(|x| x.into_raw().0 == 0),
             Self::B32(v) => v.iter().all(|x| x.into_raw().0 == 0),
@@ -530,7 +544,7 @@ impl TraceColumn {
     pub fn append_bytes_at(&self, row_idx: usize, buf: &mut Vec<u8>) {
         match self {
             Self::Bit(v) => {
-                buf.push(v[row_idx].0);
+                buf.push(v[row_idx].get());
             }
             Self::B8(v) => {
                 buf.push(v[row_idx].into_raw().0);

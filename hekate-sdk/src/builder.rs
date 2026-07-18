@@ -17,44 +17,15 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use hekate_core::config::Config;
 use hekate_core::errors;
-use hekate_core::trace::{ColumnType, Trace};
+use hekate_core::trace::ColumnType;
 use hekate_crypto::{DefaultHasher, Hasher};
 use hekate_math::TowerField;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::{BoundaryTarget, ConstraintAst, ConstraintExpr, ExprId};
 use hekate_program::expander::ExpansionEntry;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
-use hekate_program::{
-    Air, FixedColumn, FixedShape, InlineKernelHint, Program, ProgramInstance, ProgramWitness,
-};
-
-use crate::wire::bundle;
-
-/// Serialize a program bundle with
-/// deterministic matrix seed.
-///
-/// Derives `config.matrix_seed` from
-/// program structure so prover and verifier
-/// agree without manual coordination. All
-/// other config fields are used as-is.
-pub fn build_bundle<F, P, T>(
-    program: &P,
-    instance: &ProgramInstance<F>,
-    witness: &ProgramWitness<F, T>,
-    cfg: &Config,
-) -> errors::Result<Vec<u8>>
-where
-    F: TowerField,
-    P: Program<F>,
-    T: Trace,
-{
-    let mut cfg = cfg.clone();
-    cfg.matrix_seed = derive_matrix_seed::<F, P>(program, instance.num_rows())?;
-
-    bundle::serialize_bundle(program, instance, witness, &cfg)
-}
+use hekate_program::{Air, FixedColumn, FixedShape, InlineKernelHint, Program};
 
 /// Deterministic 32-byte structural ID. Witness-independent,
 /// num_rows-independent. Same program shape -> same ID.
@@ -75,25 +46,6 @@ pub fn program_id_hex<F: TowerField, P: Program<F>>(program: &P) -> errors::Resu
     }
 
     Ok(s)
-}
-
-/// Deterministic matrix seed from
-/// program structure + `num_rows`.
-///
-/// Same program + same num_rows = same seed = same
-/// expander graph on prover and verifier.
-pub(crate) fn derive_matrix_seed<F: TowerField, P: Program<F>>(
-    program: &P,
-    num_rows: usize,
-) -> errors::Result<[u8; 32]> {
-    let h_struct = program_structural_hash::<F, P>(program)?;
-
-    let mut h = DefaultHasher::new();
-    h.update(b"hekate-matrix-seed-v1");
-    h.update(&h_struct);
-    h.update(&(num_rows as u64).to_le_bytes());
-
-    Ok(h.finalize())
 }
 
 /// Pure shape-only hash.

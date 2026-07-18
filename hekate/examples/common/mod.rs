@@ -31,6 +31,8 @@ pub fn init(name: &str) {
         )
         .try_init();
 
+    hekate_prover_sys::init_tracing();
+
     println!("==================================================");
     println!("Hekate: {}", name);
 }

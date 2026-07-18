@@ -162,10 +162,17 @@ pub struct EvalBatchProof<F: TowerField> {
     /// `(r_final, AIR column evals)`.
     pub point_evaluations: Vec<(Vec<F>, Vec<F>)>,
 
-    /// TensorPCS intermediate fold
-    /// `q = M · r_col`, length `sqrt(N)`.
+    /// TensorPCS row-fold of the whole-column master
+    /// (pass-through / control / blinding columns),
+    /// `q_whole = M_whole · r_col`, length `grid_cols`.
     #[serde(default)]
     pub tensor_vec: Vec<F>,
+
+    /// TensorPCS row-fold of the ring-switch
+    /// master (bit-expanded physical columns),
+    /// `q_ring = M_bit · r_col`.
+    #[serde(default)]
+    pub tensor_vec_ring: Vec<F>,
 }
 
 impl<F: TowerField> EvalBatchProof<F> {
@@ -174,12 +181,14 @@ impl<F: TowerField> EvalBatchProof<F> {
         ldt_proof: BrakedownProof<F>,
         point_evaluations: Vec<(Vec<F>, Vec<F>)>,
         tensor_vec: Vec<F>,
+        tensor_vec_ring: Vec<F>,
     ) -> Self {
         Self {
             sumcheck_proof,
             ldt_proof,
             point_evaluations,
             tensor_vec,
+            tensor_vec_ring,
         }
     }
 }

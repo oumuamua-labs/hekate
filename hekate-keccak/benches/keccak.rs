@@ -244,12 +244,10 @@ fn bench_keccak_prove(c: &mut Criterion) {
         let instance = ProgramInstance::new(num_rows, vec![]);
         let witness = ProgramWitness::new(trace);
 
-        let mut config = Config {
+        let config = Config {
             sumcheck_blinding_factor: 2,
             ..Config::default()
         };
-
-        OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
         let mut blinding_seed = [0u8; 32];
         OsRng.try_fill_bytes(&mut blinding_seed).unwrap();

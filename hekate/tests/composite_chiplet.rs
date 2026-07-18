@@ -43,7 +43,7 @@ fn test_config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2,
-        ldt_blinding_factor: 4,
+        ldt_support_size: 4,
         ..Config::default()
     }
 }

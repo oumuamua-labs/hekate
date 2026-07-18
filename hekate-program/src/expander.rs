@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
-// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::iter::repeat_n;
 use hekate_core::errors::Error;
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{ColumnType, Trace, TraceColumn, TraceCompatibleField};
-use hekate_math::{Bit, Block8, Block16, Block32, Block64, Flat};
+use hekate_math::{Bit, Block8, Block16, Block32, Block64, Flat, HardwareField};
 
 /// Serializable expansion step descriptor.
 #[derive(Clone, Copy, Debug)]
@@ -503,6 +504,165 @@ impl Default for VirtualExpander {
     }
 }
 
+/// Maps the claimed virtual evals and the committed columns
+/// onto ring-switch binding units. `eta^k` runs once per
+/// unit (in claim order); a bit-expanded physical column
+/// is one Ring unit consuming its `bits` claims.
+pub struct RingSwitchPlan {
+    pub num_units: usize,
+    pub units: Vec<(bool, usize)>,
+    pub phys_rs: Vec<ColumnType>,
+    phys_bit: Vec<Vec<usize>>,
+    phys_whole: Vec<Vec<usize>>,
+}
+
+impl RingSwitchPlan {
+    pub fn new(
+        layout: &[ColumnType],
+        entries: Option<&[ExpansionEntry]>,
+        num_blind: usize,
+    ) -> Result<Self, Error> {
+        let num_phys = layout.len();
+        let total = num_phys + num_blind;
+
+        let mut phys_bit = vec![Vec::new(); total];
+        let mut phys_whole = vec![Vec::new(); total];
+        let mut units: Vec<(bool, usize)> = Vec::new();
+
+        let mut phys_rs: Vec<ColumnType> = layout.iter().map(|ct| ct.rs_field()).collect();
+        phys_rs.extend((0..num_blind).map(|_| ColumnType::B128));
+
+        let bounds = |upper: usize| -> Result<(), Error> {
+            if upper > num_phys {
+                return Err(Error::Protocol {
+                    protocol: "ring_switch_plan",
+                    message: "expansion entry exceeds the physical column layout",
+                });
+            }
+
+            Ok(())
+        };
+
+        match entries {
+            Some(entries) => {
+                let mut running = 0usize;
+                for e in entries {
+                    match *e {
+                        ExpansionEntry::ExpandBits { count, storage } => {
+                            let bits = expand_bit_width(storage)?;
+
+                            bounds(running + count)?;
+
+                            for j in 0..count {
+                                phys_bit[running + j].push(units.len());
+                                units.push((true, bits));
+                            }
+
+                            running += count;
+                        }
+                        ExpansionEntry::PassThrough { count, .. }
+                        | ExpansionEntry::ControlBits { count } => {
+                            bounds(running + count)?;
+
+                            for j in 0..count {
+                                phys_whole[running + j].push(units.len());
+                                units.push((false, 1));
+                            }
+
+                            running += count;
+                        }
+                        ExpansionEntry::ReusePassThrough {
+                            phy_col_start,
+                            count,
+                            ..
+                        } => {
+                            bounds(phy_col_start + count)?;
+                            for j in 0..count {
+                                phys_whole[phy_col_start + j].push(units.len());
+                                units.push((false, 1));
+                            }
+                        }
+                        ExpansionEntry::ReuseExpandBits {
+                            phy_col_start,
+                            count,
+                            storage,
+                        } => {
+                            let bits = expand_bit_width(storage)?;
+                            bounds(phy_col_start + count)?;
+                            for j in 0..count {
+                                phys_bit[phy_col_start + j].push(units.len());
+                                units.push((true, bits));
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                for pw in phys_whole.iter_mut().take(num_phys) {
+                    pw.push(units.len());
+                    units.push((false, 1));
+                }
+            }
+        }
+
+        for b in 0..num_blind {
+            phys_whole[num_phys + b].push(units.len());
+            units.push((false, 1));
+        }
+
+        let num_units = units.len();
+
+        Ok(Self {
+            units,
+            phys_bit,
+            phys_whole,
+            phys_rs,
+            num_units,
+        })
+    }
+
+    pub fn has_ring(&self) -> bool {
+        self.units.iter().any(|(is_ring, _)| *is_ring)
+    }
+
+    pub fn total_claims(&self) -> usize {
+        self.units.iter().map(|(_, n)| n).sum()
+    }
+
+    /// Per committed column:
+    /// its base `eta` coefficients in the ring and whole
+    /// masters, plus `eta^U` (the next-row shift multiplier).
+    pub fn column_coeffs<F>(&self, eta: Flat<F>) -> (Vec<Flat<F>>, Vec<Flat<F>>, Flat<F>)
+    where
+        F: HardwareField,
+    {
+        let mut eta_pows = Vec::with_capacity(self.num_units + 1);
+        let mut e = Flat::from_raw(F::ONE);
+
+        for _ in 0..=self.num_units {
+            eta_pows.push(e);
+            e *= eta;
+        }
+
+        let total = self.phys_rs.len();
+
+        let mut coeff_bit = vec![Flat::from_raw(F::ZERO); total];
+        let mut coeff_whole = vec![Flat::from_raw(F::ZERO); total];
+
+        for p in 0..total {
+            for &u in &self.phys_bit[p] {
+                coeff_bit[p] += eta_pows[u];
+            }
+
+            for &u in &self.phys_whole[p] {
+                coeff_whole[p] += eta_pows[u];
+            }
+        }
+
+        (coeff_bit, coeff_whole, eta_pows[self.num_units])
+    }
+}
+
 fn expand_bit_width(storage: ColumnType) -> Result<usize, Error> {
     match storage {
         ColumnType::B8 => Ok(8),
@@ -644,7 +804,7 @@ fn expand_pass_through<F: TraceCompatibleField + 'static>(
 mod tests {
     use super::*;
     use hekate_core::trace::TraceBuilder;
-    use hekate_math::Block128;
+    use hekate_math::{Block128, TowerField};
 
     #[test]
     fn ram_layout() {
@@ -831,7 +991,7 @@ mod tests {
         let mut tb = TraceBuilder::new(&layout, num_vars).unwrap();
         tb.set_b32(0, 0, Block32(0xAAAA_BBBB)).unwrap();
         tb.set_b32(1, 0, Block32(0x1111_2222)).unwrap();
-        tb.set_bit(2, 0, Bit(1)).unwrap();
+        tb.set_bit(2, 0, Bit::ONE).unwrap();
 
         let trace = tb.build();
 

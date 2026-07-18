@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // This file is part of the hekate project.
 // Copyright (C) 2026 Andrei Kochergin <andrei@oumuamua.dev>
-// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>. All rights reserved.
+// Copyright (C) 2026 Oumuamua Labs <info@oumuamua.dev>.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ mod sumcheck;
 
 pub use sumcheck::verify;
 
-use crate::evaluator::{EvalVerifyContext, EvaluatorVerifier, RowParseScratch, VirtualRowParser};
+use crate::evaluator::{EvalVerifyContext, EvaluatorVerifier};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
@@ -38,10 +38,11 @@ use hekate_core::proofs::InnerProof;
 use hekate_core::protocol;
 use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::{ColumnType, TraceCompatibleField};
-use hekate_core::utils::opened_row_bytes;
+use hekate_core::utils::{compute_split_vars, opened_row_bytes};
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Flat, HardwareField, PackableField, TowerField};
+use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField};
+use hekate_program::expander::RingSwitchPlan;
 use hekate_program::permutation::{self, BusKind};
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, chiplet, validate_fixed_columns};
 use tracing::{debug, info, instrument, warn};
@@ -53,7 +54,12 @@ pub struct HekateVerifier<F, H> {
 
 impl<F, H: Hasher> HekateVerifier<F, H>
 where
-    F: HardwareField + PackableField + TraceCompatibleField,
+    F: HardwareField
+        + PackableField
+        + TraceCompatibleField
+        + BinaryFieldExtras
+        + Into<Block128>
+        + From<u128>,
 {
     /// Verifies an `InnerProof` produced
     /// by `HekateProver::prove`.
@@ -108,18 +114,6 @@ where
             });
         }
 
-        let field_bits = size_of::<F>() * 8;
-        let metrics = config.security_metrics(field_bits);
-
-        info!(
-            "System Security: ~{} bits (LDT: {}, Field: {}, Distance: {:.4}, d={})",
-            metrics.security_bits,
-            metrics.ldt_bits,
-            field_bits,
-            metrics.relative_distance,
-            metrics.expansion_degree
-        );
-
         let main_data_bytes: usize = program
             .column_layout()
             .iter()
@@ -127,8 +121,23 @@ where
             .sum();
 
         let main_row_bytes = opened_row_bytes(main_data_bytes, config.sumcheck_blinding_factor);
+        let main_grid_cols = 1
+            << compute_split_vars(
+                num_vars,
+                config.num_queries,
+                config.ldt_support_size,
+                main_row_bytes,
+            );
 
-        config.check_security(num_vars, field_bits, main_row_bytes)?;
+        let field_bits = size_of::<F>() * 8;
+        let metrics = config.security_metrics(field_bits, main_grid_cols);
+
+        info!(
+            "System Security: ~{} bits (LDT: {}, Field: {}, Distance: {:.4})",
+            metrics.security_bits, metrics.ldt_bits, field_bits, metrics.relative_distance,
+        );
+
+        config.check_security(field_bits, main_grid_cols)?;
 
         if proof.eval_proof.point_evaluations.is_empty() {
             return Err(errors::Error::Protocol {
@@ -551,20 +560,15 @@ where
         let data_bytes: usize = layout.iter().map(|ct| ct.byte_size()).sum();
         let expected_row_bytes = opened_row_bytes(data_bytes, blinding_factor);
 
-        let parser = AirRowParser {
-            air,
-            layout: &layout,
-            blinding_factor,
-            expected_row_bytes,
-            _marker: PhantomData,
-        };
+        let entries = air.virtual_expander().map(|e| e.expansion_entries());
+        let ring_plan = RingSwitchPlan::new(&layout, entries.as_deref(), blinding_factor)?;
 
         let ctx = EvalVerifyContext {
             points: vec![r_final],
             claimed_values_per_point: vec![claimed_values],
             num_vars,
             row_bytes: expected_row_bytes,
-            parser: &parser,
+            ring_plan: &ring_plan,
         };
 
         EvaluatorVerifier::<F, H>::verify(commitment, eval_proof, transcript, ctx, config)
@@ -587,16 +591,15 @@ where
 
         transcript.append_u64(b"num_columns", num_cols as u64);
         transcript.append_u64(b"num_rows", num_rows as u64);
-        transcript.append_u64(b"ldt_blinding_factor", config.ldt_blinding_factor as u64);
+        transcript.append_u64(b"ldt_support_size", config.ldt_support_size as u64);
         transcript.append_u64(
             b"sumcheck_blinding_factor",
             config.sumcheck_blinding_factor as u64,
         );
         transcript.append_u64(b"num_queries", config.num_queries as u64);
 
-        // Bind the Brakedown grid-geometry inputs
-        transcript.append_u64(b"expansion_degree", config.expansion_degree as u64);
-        transcript.append_message(b"matrix_seed", &config.matrix_seed);
+        // Bind the MDS row-code rate
+        transcript.append_u64(b"inv_rate", config.inv_rate as u64);
         transcript.append_u64(b"main_row_bytes", main_row_bytes as u64);
 
         for val in instance.public_inputs() {
@@ -983,75 +986,6 @@ where
             .into_iter()
             .map(|(id, v)| (id, v.into_iter().map(|x| x.to_hardware()).collect()))
             .collect())
-    }
-}
-
-struct AirRowParser<'a, F, A> {
-    air: &'a A,
-    layout: &'a [ColumnType],
-    blinding_factor: usize,
-    expected_row_bytes: usize,
-    _marker: PhantomData<F>,
-}
-
-impl<F, A> VirtualRowParser<F> for AirRowParser<'_, F, A>
-where
-    F: HardwareField + PackableField + TraceCompatibleField,
-    A: Air<F> + Sync,
-{
-    fn parse(&self, row_bytes: &[u8], scratch: &mut RowParseScratch<F>, out: &mut Vec<Flat<F>>) {
-        if row_bytes.len() < self.expected_row_bytes {
-            return;
-        }
-
-        scratch.base_bytes.clear();
-        scratch.shift_bytes.clear();
-        scratch.virt_base.clear();
-        scratch.virt_shift.clear();
-
-        let mut ptr = 0;
-
-        // De-interleave Base + Shifted physical bytes
-        for ct in self.layout {
-            let size = ct.byte_size();
-            scratch
-                .base_bytes
-                .extend_from_slice(&row_bytes[ptr..ptr + size]);
-
-            ptr += size;
-
-            scratch
-                .shift_bytes
-                .extend_from_slice(&row_bytes[ptr..ptr + size]);
-
-            ptr += size;
-        }
-
-        // Virtual unpack via the AIR's row parser
-        self.air
-            .parse_virtual_row(&scratch.base_bytes, &mut scratch.virt_base);
-        self.air
-            .parse_virtual_row(&scratch.shift_bytes, &mut scratch.virt_shift);
-
-        // Re-interleave virtual columns:
-        // [V0_base, V0_shift, V1_base, V1_shift, ...].
-        for i in 0..scratch.virt_base.len() {
-            out.push(scratch.virt_base[i]);
-            out.push(scratch.virt_shift[i]);
-        }
-
-        // Append ZK Noise (always B128)
-        for _ in 0..self.blinding_factor {
-            let v_base = ColumnType::B128.parse_from_bytes::<F>(&row_bytes[ptr..ptr + 16]);
-            out.push(v_base);
-
-            ptr += 16;
-
-            let v_shift = ColumnType::B128.parse_from_bytes::<F>(&row_bytes[ptr..ptr + 16]);
-            out.push(v_shift);
-
-            ptr += 16;
-        }
     }
 }
 

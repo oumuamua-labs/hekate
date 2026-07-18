@@ -913,6 +913,7 @@ pub mod hekate {
             pub const VT_LDT_PROOF: ::flatbuffers::VOffsetT = 6;
             pub const VT_POINT_EVALUATIONS: ::flatbuffers::VOffsetT = 8;
             pub const VT_TENSOR_VEC: ::flatbuffers::VOffsetT = 10;
+            pub const VT_TENSOR_VEC_RING: ::flatbuffers::VOffsetT = 12;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -929,6 +930,9 @@ pub mod hekate {
                 args: &'args EvalBatchProofArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<EvalBatchProof<'bldr>> {
                 let mut builder = EvalBatchProofBuilder::new(_fbb);
+                if let Some(x) = args.tensor_vec_ring {
+                    builder.add_tensor_vec_ring(x);
+                }
                 if let Some(x) = args.tensor_vec {
                     builder.add_tensor_vec(x);
                 }
@@ -998,6 +1002,19 @@ pub mod hekate {
                         )
                 }
             }
+            #[inline]
+            pub fn tensor_vec_ring(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                            EvalBatchProof::VT_TENSOR_VEC_RING,
+                            None,
+                        )
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for EvalBatchProof<'_> {
@@ -1011,6 +1028,7 @@ pub mod hekate {
      .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownProof>>("ldt_proof", Self::VT_LDT_PROOF, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PointEvaluation>>>>("point_evaluations", Self::VT_POINT_EVALUATIONS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("tensor_vec", Self::VT_TENSOR_VEC, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("tensor_vec_ring", Self::VT_TENSOR_VEC_RING, false)?
      .finish();
                 Ok(())
             }
@@ -1024,6 +1042,8 @@ pub mod hekate {
                 >,
             >,
             pub tensor_vec: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub tensor_vec_ring:
+                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
         }
         impl<'a> Default for EvalBatchProofArgs<'a> {
             #[inline]
@@ -1033,6 +1053,7 @@ pub mod hekate {
                     ldt_proof: None,
                     point_evaluations: None,
                     tensor_vec: None,
+                    tensor_vec_ring: None,
                 }
             }
         }
@@ -1087,6 +1108,16 @@ pub mod hekate {
                 );
             }
             #[inline]
+            pub fn add_tensor_vec_ring(
+                &mut self,
+                tensor_vec_ring: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    EvalBatchProof::VT_TENSOR_VEC_RING,
+                    tensor_vec_ring,
+                );
+            }
+            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> EvalBatchProofBuilder<'a, 'b, A> {
@@ -1110,6 +1141,7 @@ pub mod hekate {
                 ds.field("ldt_proof", &self.ldt_proof());
                 ds.field("point_evaluations", &self.point_evaluations());
                 ds.field("tensor_vec", &self.tensor_vec());
+                ds.field("tensor_vec_ring", &self.tensor_vec_ring());
                 ds.finish()
             }
         }

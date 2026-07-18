@@ -187,6 +187,7 @@ jobs:
           - crate: hekate
             filter: hekate
             test_args: "--release"
+            clippy_args: "--features sha2,sha3,secure-memory,table-math,dhat-heap"
     steps:
       - name: Should run
         id: run
@@ -221,7 +222,7 @@ jobs:
 
       - if: steps.run.outputs.skip == 'false'
         name: Clippy
-        run: cargo clippy -p ${{ matrix.crate }} --all-targets --all-features -- -D warnings
+        run: cargo clippy -p ${{ matrix.crate }} --all-targets ${{ matrix.clippy_args || '--all-features' }} -- -D warnings
 
       - if: steps.run.outputs.skip == 'false'
         name: Nextest

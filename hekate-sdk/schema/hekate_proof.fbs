@@ -45,6 +45,7 @@ table EvalBatchProof {
   ldt_proof: BrakedownProof;
   point_evaluations: [PointEvaluation];
   tensor_vec: [Block128];
+  tensor_vec_ring: [Block128];
 }
 
 // ===== LogUp Auxiliary =====

@@ -203,6 +203,7 @@ fn rom_cpu_linking() {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2,
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -287,7 +288,12 @@ fn rom_padding_transparency() {
     let empty_trace = generate_combined_trace(&empty_instructions, num_rows);
     let empty_witness = ProgramWitness::new(empty_trace);
 
-    let config = Config::default();
+    let config = Config {
+        ldt_support_size: 4,
+        min_security_bits: 0,
+        ..Config::default()
+    };
+
     let proof = prove(
         b"Padding",
         &air,

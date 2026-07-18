@@ -38,6 +38,7 @@ fn test_config() -> Config {
     Config {
         num_queries: 8,
         min_security_bits: 0,
+        ldt_support_size: 4,
         ..Config::default()
     }
 }

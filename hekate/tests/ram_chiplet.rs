@@ -220,6 +220,7 @@ fn ram_cpu_linking() {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2, // Enable ZK
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -377,6 +378,7 @@ fn exploit_ram_consistency_bypass() {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 0, // No ZK to simplify debugging
+        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -545,6 +547,7 @@ fn exploit_ram_uninitialised_read_via_q_last_chain() {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 0,
+        ldt_support_size: 4,
         ..Config::default()
     };
 

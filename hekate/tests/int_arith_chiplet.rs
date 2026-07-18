@@ -285,6 +285,7 @@ fn test_config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         sumcheck_blinding_factor: 2,
+        ldt_support_size: 4,
         ..Config::default()
     }
 }
@@ -411,7 +412,7 @@ fn tamper_b32(trace: &mut ColumnTrace, col: usize, row: usize, value: u32) {
 
 fn tamper_bit(trace: &mut ColumnTrace, col: usize, row: usize, value: u8) {
     if let TraceColumn::Bit(c) = &mut trace.columns[col] {
-        c[row] = Bit(value);
+        c[row] = Bit::new(value);
     } else {
         panic!("tamper_bit: column {col} is not Bit");
     }
@@ -716,7 +717,29 @@ fn arithmetic_chiplet_mixed_widths_isolated() {
         report.bus_diagnostics.len(),
     );
 
-    let result = run_prover_verifier(&program, &instance, &witness, b"ARITH_MIXED").unwrap();
+    let config = Config {
+        num_queries: 4,
+        min_security_bits: 0,
+        sumcheck_blinding_factor: 2,
+        ldt_support_size: 2,
+        ..Config::default()
+    };
+
+    let proof = prove(
+        b"ARITH_MIXED",
+        &program,
+        &instance,
+        &witness,
+        &config,
+        [0xAA; 32],
+        None,
+    )
+    .expect("prove mixed_widths");
+
+    let mut vt = Transcript::<H>::new(b"ARITH_MIXED");
+    let result = HekateVerifier::<F, H>::verify(&program, &instance, &proof, &mut vt, &config)
+        .expect("verify mixed_widths");
+
     assert!(result, "mixed-width prove/verify failed");
 }
 

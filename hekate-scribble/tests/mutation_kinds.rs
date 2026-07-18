@@ -97,7 +97,7 @@ fn build_dual_witness() -> ProgramWitness<F, ColumnTrace> {
 
 fn read_bit(trace: &ColumnTrace, col: usize, row: usize) -> u8 {
     match &trace.columns[col] {
-        TraceColumn::Bit(v) => v[row].0,
+        TraceColumn::Bit(v) => v[row].get(),
         _ => panic!("expected Bit column"),
     }
 }

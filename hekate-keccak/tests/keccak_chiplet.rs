@@ -172,12 +172,10 @@ fn prove_and_verify(
         return Err("preflight violations".into());
     }
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
-        ..Config::default()
+        ..Config::dev()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
@@ -221,12 +219,10 @@ where
     let instance = ProgramInstance::new(CPU_ROWS, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![chiplet_trace]);
 
-    let mut config = Config {
+    let config = Config {
         sumcheck_blinding_factor: 2,
-        ..Config::default()
+        ..Config::dev()
     };
-
-    OsRng.try_fill_bytes(&mut config.matrix_seed).unwrap();
 
     let mut blinding_seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut blinding_seed).unwrap();

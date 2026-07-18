@@ -199,6 +199,13 @@ impl Air<F> for MemChiplet {
         let cs = ConstraintSystem::<F>::new();
         cs.assert_boolean(cs.col(BusCols::SEL));
 
+        let [sel, addr, req] = [
+            cs.col(BusCols::SEL),
+            cs.col(BusCols::ADDR),
+            cs.col(BusCols::REQUEST_IDX),
+        ];
+        cs.constrain_named("req_addr_match", sel * (addr + req));
+
         cs.build()
     }
 }
@@ -334,12 +341,18 @@ fn detects_gpa_bus_mismatch() {
 }
 
 #[test]
+fn non_boolean_selector_is_unrepresentable() {
+    assert!(Bit::try_new(2).is_none());
+}
+
+#[test]
 fn detects_chiplet_constraint_violation() {
     let (cpu_trace, mut mem_trace) = matching_bus_traces(3, 4);
 
-    // Corrupt selector to non-boolean
-    if let TraceColumn::Bit(ref mut v) = mem_trace.columns[BusCols::SEL] {
-        v[0] = Bit(2);
+    // Break req_addr_match on chiplet row 1:
+    // ADDR no longer equals REQUEST_IDX while SEL = 1.
+    if let TraceColumn::B32(ref mut v) = mem_trace.columns[BusCols::ADDR] {
+        v[1] = Block32::from(0xBADu32).to_hardware();
     }
 
     let instance = ProgramInstance::new(8, vec![]);
@@ -357,8 +370,8 @@ fn detects_chiplet_constraint_violation() {
         .collect();
 
     assert!(!chiplet_violations.is_empty());
-    assert_eq!(chiplet_violations[0].label, Some("boolean"));
-    assert_eq!(chiplet_violations[0].row_idx, 0);
+    assert_eq!(chiplet_violations[0].label, Some("req_addr_match"));
+    assert_eq!(chiplet_violations[0].row_idx, 1);
 }
 
 // =================================================================
