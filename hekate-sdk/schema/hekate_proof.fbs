@@ -58,6 +58,8 @@ table LogUpEntry {
 table LogUpAux {
   h_evals: [LogUpEntry];
   claimed_sums: [LogUpEntry];
+  h_commitment: BrakedownCommitment;
+  h_eval_proof: EvalBatchProof;
 }
 
 // ===== Top-Level Proof =====

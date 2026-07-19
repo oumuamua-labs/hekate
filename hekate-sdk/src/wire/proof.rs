@@ -28,7 +28,7 @@ use hekate_math::TowerField;
 
 use crate::generated::proof as fb;
 
-const WIRE_PROOF_VERSION: u32 = 2;
+const WIRE_PROOF_VERSION: u32 = 3;
 
 pub fn serialize_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -326,6 +326,16 @@ fn serialize_logup_aux<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     aux: &LogUpAux<F>,
 ) -> flatbuffers::WIPOffset<fb::LogUpAux<'a>> {
+    let h_commitment = aux
+        .h_commitment
+        .as_ref()
+        .map(|c| serialize_brakedown_commitment(fbb, c));
+
+    let h_eval_proof = aux
+        .h_eval_proof
+        .as_ref()
+        .map(|p| serialize_eval_batch(fbb, p));
+
     let h_offsets: Vec<_> = aux
         .h_evals
         .iter()
@@ -367,6 +377,8 @@ fn serialize_logup_aux<'a, F: TowerField>(
         &fb::LogUpAuxArgs {
             h_evals: Some(h_evals),
             claimed_sums: Some(claimed_sums),
+            h_commitment,
+            h_eval_proof,
         },
     )
 }
@@ -602,8 +614,17 @@ fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux
         None => Vec::new(),
     };
 
+    let h_commitment = fb.h_commitment().map(deserialize_commitment);
+
+    let h_eval_proof = fb
+        .h_eval_proof()
+        .map(|p| deserialize_eval_batch::<F>(p))
+        .transpose()?;
+
     Ok(LogUpAux {
         h_evals,
         claimed_sums,
+        h_commitment,
+        h_eval_proof,
     })
 }
