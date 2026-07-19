@@ -62,9 +62,15 @@ pub fn compute_split_vars(
 }
 
 /// Serialized width of one opened Brakedown grid row:
-/// base+shift of every physical column
-/// plus interleaved B128 noise.
+/// each physical column's base value (plus its next-row
+/// shift when `next_row`), plus interleaved B128 noise.
 #[inline(always)]
-pub fn opened_row_bytes(physical_data_bytes: usize, sumcheck_blinding_factor: usize) -> usize {
-    2 * physical_data_bytes + 2 * sumcheck_blinding_factor * 16
+pub fn opened_row_bytes(
+    physical_data_bytes: usize,
+    sumcheck_blinding_factor: usize,
+    next_row: bool,
+) -> usize {
+    let variants = if next_row { 2 } else { 1 };
+
+    variants * (physical_data_bytes + sumcheck_blinding_factor * 16)
 }
