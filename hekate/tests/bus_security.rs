@@ -713,3 +713,55 @@ fn logup_bus_id_proof_label_diverged_from_program_specs_rejected() {
         "SECURITY FAILURE: proof bus_id labels diverge from program bus_specs"
     );
 }
+
+// =====================================================
+// Zero-bus table must present empty LogUp aux
+// =====================================================
+
+#[test]
+fn zero_bus_main_emits_empty_logup_aux() {
+    let (_air, _instance, _config, proof) = multibus_proof();
+
+    assert!(
+        proof.main_logup_aux.claimed_sums.is_empty(),
+        "MultiBusProgram main declares no permutation_checks; \
+         the honest prover must emit empty claimed_sums"
+    );
+
+    assert!(
+        proof.main_logup_aux.h_evals.is_empty(),
+        "zero-bus main must emit empty h_evals"
+    );
+}
+
+#[test]
+fn zero_bus_main_injected_claimed_sum_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof();
+
+    assert!(
+        proof.main_logup_aux.claimed_sums.is_empty(),
+        "precondition: MultiBusProgram main is a zero-bus table"
+    );
+
+    proof
+        .main_logup_aux
+        .claimed_sums
+        .push((MULTI_BUS_0.into(), F::ONE));
+
+    let mut vt = Transcript::<H>::new(b"AuditP0");
+
+    match HekateVerifier::<F, H>::verify(&air, &instance, &proof, &mut vt, &config) {
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("claimed_sums length"),
+                "expected the empty-bus_specs claimed_sums length guard, got: {msg}"
+            );
+        }
+        Ok(v) => panic!(
+            "SECURITY FAILURE: a zero-bus table presented a non-empty \
+             claimed_sum and verify returned Ok({v}); an unbound endpoint \
+             would enter cross-bus matching"
+        ),
+    }
+}
