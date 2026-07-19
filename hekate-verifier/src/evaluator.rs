@@ -49,6 +49,9 @@ pub struct EvalVerifyContext<'a, F: HardwareField> {
     pub num_vars: usize,
     pub row_bytes: usize,
     pub ring_plan: &'a RingSwitchPlan,
+
+    /// `false` opens base columns only (no next-row shift).
+    pub next_row: bool,
 }
 
 impl<F, H: Hasher> EvaluatorVerifier<F, H>
@@ -77,6 +80,8 @@ where
         let num_vars = ctx.num_vars;
         let row_bytes = ctx.row_bytes;
         let plan = ctx.ring_plan;
+        let next_row = ctx.next_row;
+        let variants = if next_row { 2 } else { 1 };
 
         if points.len() != 1 || claimed.len() != 1 {
             return Err(errors::Error::Protocol {
@@ -88,7 +93,7 @@ where
         let point = points[0];
         let claims = claimed[0];
 
-        if claims.len() != plan.total_claims() * 2 {
+        if claims.len() != plan.total_claims() * variants {
             return Err(errors::Error::Protocol {
                 protocol: "evaluator_verifier",
                 message: "ring-switch plan claim count does not match the claimed evaluations",
@@ -133,7 +138,7 @@ where
             Vec::new()
         };
 
-        let target = ring_target::<F>(plan, claims, eta_tower, &r_mix);
+        let target = ring_target::<F>(plan, claims, eta_tower, &r_mix, next_row);
         let target_flat = F::from(target.0).to_hardware();
 
         let sc_res = verify(num_vars, 2, target_flat, &proof.sumcheck_proof, transcript)?;
@@ -291,7 +296,11 @@ where
 
         let num_phys = plan.phys_rs.len();
         let (coeff_bit, coeff_whole, eta_shift) = plan.column_coeffs::<F>(eta);
-        let phys_row_bytes: usize = plan.phys_rs.iter().map(|ct| 2 * ct.byte_size()).sum();
+        let phys_row_bytes: usize = plan
+            .phys_rs
+            .iter()
+            .map(|ct| variants * ct.byte_size())
+            .sum();
 
         // eta^U is row-invariant:
         // fold it into the shift coefficients once.
@@ -323,19 +332,26 @@ where
 
                     phys_row.clear();
 
-                    parse_physical_row::<F>(row_data, &plan.phys_rs, phys_row);
+                    parse_physical_row::<F>(row_data, &plan.phys_rs, phys_row, next_row);
 
                     let mut fold_whole = Flat::from_raw(F::ZERO);
                     let mut fold_bit = Flat::from_raw(F::ZERO);
 
                     for p in 0..num_phys {
-                        let base = phys_row[2 * p];
-                        let shift = phys_row[2 * p + 1];
-
-                        fold_whole += base * coeff_whole[p] + shift * coeff_whole_shift[p];
+                        let base = phys_row[variants * p];
+                        fold_whole += base * coeff_whole[p];
 
                         if has_ring {
-                            fold_bit += base * coeff_bit[p] + shift * coeff_bit_shift[p];
+                            fold_bit += base * coeff_bit[p];
+                        }
+
+                        if next_row {
+                            let shift = phys_row[variants * p + 1];
+                            fold_whole += shift * coeff_whole_shift[p];
+
+                            if has_ring {
+                                fold_bit += shift * coeff_bit_shift[p];
+                            }
                         }
                     }
 
@@ -538,11 +554,13 @@ fn ring_target<F>(
     claims: &[Flat<F>],
     eta_tower: F,
     r_mix: &[Block128],
+    next_row: bool,
 ) -> Block128
 where
     F: HardwareField + Into<Block128>,
 {
-    let half = claims.len() / 2;
+    let variants = if next_row { 2 } else { 1 };
+    let half = claims.len() / variants;
     let eq_mix = eq_tensor_b(r_mix);
     let eta: Block128 = eta_tower.into();
 
@@ -556,8 +574,12 @@ where
 
     let eta_shift = eta_pows[plan.num_units];
 
+    let base = [(0usize, Block128::ONE)];
+    let base_and_shift = [(0usize, Block128::ONE), (half, eta_shift)];
+    let offsets: &[(usize, Block128)] = if next_row { &base_and_shift } else { &base };
+
     let mut target = Block128::ZERO;
-    for (offset, shift_mul) in [(0usize, Block128::ONE), (half, eta_shift)] {
+    for &(offset, shift_mul) in offsets {
         let half_claims = &claims[offset..offset + half];
 
         let mut ci = 0usize;
@@ -582,13 +604,14 @@ where
     target
 }
 
-/// Parses one opened grid-row into `[base, shift]` per
-/// committed column, each at its `rs_field` width
-/// (sub-B32 columns are B32-wide on the wire).
+/// Parses one opened grid-row:
+/// `base` per committed column, plus `shift` when `next_row`,
+/// each at its `rs_field` width (sub-B32 columns are B32-wide).
 fn parse_physical_row<F: TraceCompatibleField>(
     row_data: &[u8],
     phys_rs: &[ColumnType],
     out: &mut Vec<Flat<F>>,
+    next_row: bool,
 ) {
     let mut ptr = 0;
     for ct in phys_rs {
@@ -597,7 +620,9 @@ fn parse_physical_row<F: TraceCompatibleField>(
         out.push(ct.parse_from_bytes(&row_data[ptr..ptr + sz]));
         ptr += sz;
 
-        out.push(ct.parse_from_bytes(&row_data[ptr..ptr + sz]));
-        ptr += sz;
+        if next_row {
+            out.push(ct.parse_from_bytes(&row_data[ptr..ptr + sz]));
+            ptr += sz;
+        }
     }
 }

@@ -71,9 +71,11 @@ where
     ///    (name, rows, cols, row_bytes, root).
     /// 3. Draw global LogUp challenges γ, β.
     /// 4. Per chiplet:
-    ///    verify ZeroCheck (with LogUp)
-    ///    and the eval at `r_final`.
-    /// 5. Verify the main AIR ZeroCheck (with LogUp).
+    ///    verify ZeroCheck (with LogUp,
+    ///    opening the committed `h` at `r_final`)
+    ///    and the trace eval at `r_final`.
+    /// 5. Verify the main AIR ZeroCheck
+    ///    (with LogUp, same `h` opening).
     /// 6. Verify the main eval at `r_final`.
     /// 7. Check that LogUp `claimed_sum` totals cancel per `bus_id`.
     #[instrument(skip_all, name = "Hekate::verify")]
@@ -120,7 +122,9 @@ where
             .map(|ct| ct.byte_size())
             .sum();
 
-        let main_row_bytes = opened_row_bytes(main_data_bytes, config.sumcheck_blinding_factor);
+        let main_row_bytes =
+            opened_row_bytes(main_data_bytes, config.sumcheck_blinding_factor, true);
+
         let main_grid_cols = 1
             << compute_split_vars(
                 num_vars,
@@ -388,7 +392,7 @@ where
                 .map(|ct| ct.byte_size())
                 .sum();
 
-            let c_row_bytes = opened_row_bytes(c_data_bytes, config.sumcheck_blinding_factor);
+            let c_row_bytes = opened_row_bytes(c_data_bytes, config.sumcheck_blinding_factor, true);
 
             protocol::absorb_chiplet_header(
                 transcript,
@@ -558,7 +562,7 @@ where
         let layout: Vec<ColumnType> = air.column_layout().to_vec();
 
         let data_bytes: usize = layout.iter().map(|ct| ct.byte_size()).sum();
-        let expected_row_bytes = opened_row_bytes(data_bytes, blinding_factor);
+        let expected_row_bytes = opened_row_bytes(data_bytes, blinding_factor, true);
 
         let entries = air.virtual_expander().map(|e| e.expansion_entries());
         let ring_plan = RingSwitchPlan::new(&layout, entries.as_deref(), blinding_factor)?;
@@ -569,6 +573,7 @@ where
             num_vars,
             row_bytes: expected_row_bytes,
             ring_plan: &ring_plan,
+            next_row: true,
         };
 
         EvaluatorVerifier::<F, H>::verify(commitment, eval_proof, transcript, ctx, config)
@@ -662,6 +667,18 @@ where
             });
         }
 
+        // The `h` binding is present exactly
+        // when the table carries a bus.
+        let has_bus = !bus_specs.is_empty();
+        if logup_aux.h_commitment.is_some() != has_bus
+            || logup_aux.h_eval_proof.is_some() != has_bus
+        {
+            return Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "logup_aux h binding presence must match bus presence",
+            });
+        }
+
         for (i, ((h_bus, _), (claim_bus, _))) in logup_aux
             .h_evals
             .iter()
@@ -684,6 +701,19 @@ where
         }
 
         protocol::absorb_logup_claimed_sums(transcript, &logup_aux.claimed_sums);
+
+        // Absorb the `h` commitment root before alpha;
+        // it must bind the ZeroCheck challenges.
+        if let Some(h_comm) = logup_aux.h_commitment.as_ref() {
+            if h_comm.num_rows != num_rows || h_comm.num_cols != bus_specs.len() {
+                return Err(errors::Error::Protocol {
+                    protocol: "verifier",
+                    message: "logup h_commitment dimensions do not match the table",
+                });
+            }
+
+            transcript.append_message(b"logup_h_root", &h_comm.root);
+        }
 
         let alpha_tower = transcript.challenge_field::<F>(b"alpha")?;
         let alpha = alpha_tower.to_hardware();
@@ -745,6 +775,70 @@ where
                 return Ok(None);
             }
         };
+
+        // Open `h` at r_final and pin every
+        // reported h_eval to the committed h.
+        if let (Some(h_comm), Some(h_proof)) = (
+            logup_aux.h_commitment.as_ref(),
+            logup_aux.h_eval_proof.as_ref(),
+        ) {
+            let num_buses = bus_specs.len();
+
+            if h_proof.point_evaluations.len() != 1 {
+                return Err(errors::Error::Protocol {
+                    protocol: "verifier",
+                    message: "logup h_eval_proof must carry exactly one point",
+                });
+            }
+
+            let (h_point, h_opened_canon) = &h_proof.point_evaluations[0];
+
+            if canonical_slice_to_flat(h_point) != r_final {
+                return Err(errors::Error::Protocol {
+                    protocol: "verifier",
+                    message: "logup h_eval_proof point mismatch with r_final",
+                });
+            }
+
+            if h_opened_canon.len() != num_buses {
+                return Err(errors::Error::Protocol {
+                    protocol: "verifier",
+                    message: "logup h_eval_proof opened value count mismatch",
+                });
+            }
+
+            let h_config = Config {
+                sumcheck_blinding_factor: 0,
+                ..*config
+            };
+
+            let h_layout = vec![ColumnType::B128; num_buses];
+            let h_ring_plan = RingSwitchPlan::new(&h_layout, None, 0)?;
+            let h_row_bytes = opened_row_bytes(num_buses * 16, 0, false);
+            let h_opened = canonical_slice_to_flat(h_opened_canon);
+
+            let ctx = EvalVerifyContext {
+                points: vec![r_final.as_slice()],
+                claimed_values_per_point: vec![h_opened.as_slice()],
+                num_vars,
+                row_bytes: h_row_bytes,
+                ring_plan: &h_ring_plan,
+                next_row: false,
+            };
+
+            if !EvaluatorVerifier::<F, H>::verify(h_comm, h_proof, transcript, ctx, &h_config)? {
+                warn!("LogUp h opening verification failed");
+                return Ok(None);
+            }
+
+            // Bind reported h_evals to the opened base values
+            for (spec_idx, (_, h_eval)) in logup_aux.h_evals.iter().enumerate() {
+                if *h_eval != h_opened_canon[spec_idx] {
+                    warn!("Reported h_eval does not match committed h opening");
+                    return Ok(None);
+                }
+            }
+        }
 
         // =========================================================
         // GLOBAL CONSTRAINT CONSISTENCY CHECK
