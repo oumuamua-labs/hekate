@@ -197,14 +197,17 @@ impl<F: TowerField> EvalBatchProof<F> {
 // LOGUP AUXILIARY
 // ===================================
 
-/// Per-table LogUp auxiliary payload keyed
-/// by `bus_id`. `claimed_sums[i]` is absorbed
-/// pre-`α`/`r_zerocheck`; `h_evals[i]` is
-/// absorbed post-sumcheck.
+/// Per-table LogUp auxiliary payload keyed by `bus_id`.
+/// `claimed_sums[i]` and `h_commitment` are absorbed
+/// pre-`α`/`r_zerocheck`; `h_evals[i]` post-sumcheck.
+/// `h_eval_proof` opens `h_commitment` at `r_final`.
+/// Both options are `None` iff the table carries no bus.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogUpAux<F: TowerField> {
     pub h_evals: Vec<(String, F)>,
     pub claimed_sums: Vec<(String, F)>,
+    pub h_commitment: Option<BrakedownCommitment>,
+    pub h_eval_proof: Option<EvalBatchProof<F>>,
 }
 
 impl<F: TowerField> LogUpAux<F> {
@@ -212,6 +215,8 @@ impl<F: TowerField> LogUpAux<F> {
         Self {
             h_evals,
             claimed_sums,
+            h_commitment: None,
+            h_eval_proof: None,
         }
     }
 }

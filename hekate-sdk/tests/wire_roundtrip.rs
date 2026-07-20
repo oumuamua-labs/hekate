@@ -1483,3 +1483,70 @@ fn proof_tensor_vec_ring_round_trips() {
         "chiplet tensor_vec_ring must survive the wire",
     );
 }
+
+#[test]
+fn proof_logup_h_binding_round_trips() {
+    let main_aux = LogUpAux {
+        h_evals: vec![("bus".to_string(), wide(42))],
+        claimed_sums: vec![("bus".to_string(), F::ZERO)],
+        h_commitment: Some(dummy_commitment()),
+        h_eval_proof: Some(eval_proof_with(vec![wide(7), wide(8)], vec![])),
+    };
+
+    let proof = InnerProof::new(
+        dummy_commitment(),
+        empty_sumcheck(),
+        main_aux,
+        eval_proof_with(vec![wide(1)], vec![]),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    );
+
+    let bytes = serialize_proof_bytes(&proof);
+    let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
+
+    let aux = &restored.main_logup_aux;
+
+    let comm = aux
+        .h_commitment
+        .as_ref()
+        .expect("h_commitment must survive the wire");
+    assert_eq!(comm.root, [7u8; 32]);
+    assert_eq!(comm.num_cols, 8);
+
+    let hp = aux
+        .h_eval_proof
+        .as_ref()
+        .expect("h_eval_proof must survive the wire");
+
+    let bytes_of = |v: &[F]| v.iter().map(|f| f.to_bytes()).collect::<Vec<_>>();
+
+    assert_eq!(
+        bytes_of(&hp.tensor_vec),
+        bytes_of(&[wide(7), wide(8)]),
+        "h_eval_proof payload must survive the wire",
+    );
+    assert_eq!(hp.point_evaluations.len(), 1);
+}
+
+#[test]
+fn proof_absent_h_binding_stays_none() {
+    let proof = InnerProof::new(
+        dummy_commitment(),
+        empty_sumcheck(),
+        LogUpAux::new(vec![], vec![]),
+        eval_proof_with(vec![wide(1)], vec![]),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    );
+
+    let bytes = serialize_proof_bytes(&proof);
+    let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
+
+    assert!(restored.main_logup_aux.h_commitment.is_none());
+    assert!(restored.main_logup_aux.h_eval_proof.is_none());
+}

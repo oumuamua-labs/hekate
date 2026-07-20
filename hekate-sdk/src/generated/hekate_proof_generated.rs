@@ -1300,6 +1300,8 @@ pub mod hekate {
         impl<'a> LogUpAux<'a> {
             pub const VT_H_EVALS: ::flatbuffers::VOffsetT = 4;
             pub const VT_CLAIMED_SUMS: ::flatbuffers::VOffsetT = 6;
+            pub const VT_H_COMMITMENT: ::flatbuffers::VOffsetT = 8;
+            pub const VT_H_EVAL_PROOF: ::flatbuffers::VOffsetT = 10;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1316,6 +1318,12 @@ pub mod hekate {
                 args: &'args LogUpAuxArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<LogUpAux<'bldr>> {
                 let mut builder = LogUpAuxBuilder::new(_fbb);
+                if let Some(x) = args.h_eval_proof {
+                    builder.add_h_eval_proof(x);
+                }
+                if let Some(x) = args.h_commitment {
+                    builder.add_h_commitment(x);
+                }
                 if let Some(x) = args.claimed_sums {
                     builder.add_claimed_sums(x);
                 }
@@ -1353,6 +1361,32 @@ pub mod hekate {
                     >>(LogUpAux::VT_CLAIMED_SUMS, None)
                 }
             }
+            #[inline]
+            pub fn h_commitment(&self) -> Option<BrakedownCommitment<'a>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<BrakedownCommitment>>(
+                            LogUpAux::VT_H_COMMITMENT,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn h_eval_proof(&self) -> Option<EvalBatchProof<'a>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<EvalBatchProof>>(
+                            LogUpAux::VT_H_EVAL_PROOF,
+                            None,
+                        )
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for LogUpAux<'_> {
@@ -1368,6 +1402,16 @@ pub mod hekate {
                     .visit_field::<::flatbuffers::ForwardsUOffset<
                         ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
                     >>("claimed_sums", Self::VT_CLAIMED_SUMS, false)?
+                    .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownCommitment>>(
+                        "h_commitment",
+                        Self::VT_H_COMMITMENT,
+                        false,
+                    )?
+                    .visit_field::<::flatbuffers::ForwardsUOffset<EvalBatchProof>>(
+                        "h_eval_proof",
+                        Self::VT_H_EVAL_PROOF,
+                        false,
+                    )?
                     .finish();
                 Ok(())
             }
@@ -1383,6 +1427,8 @@ pub mod hekate {
                     ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>,
                 >,
             >,
+            pub h_commitment: Option<::flatbuffers::WIPOffset<BrakedownCommitment<'a>>>,
+            pub h_eval_proof: Option<::flatbuffers::WIPOffset<EvalBatchProof<'a>>>,
         }
         impl<'a> Default for LogUpAuxArgs<'a> {
             #[inline]
@@ -1390,6 +1436,8 @@ pub mod hekate {
                 LogUpAuxArgs {
                     h_evals: None,
                     claimed_sums: None,
+                    h_commitment: None,
+                    h_eval_proof: None,
                 }
             }
         }
@@ -1422,6 +1470,28 @@ pub mod hekate {
                 );
             }
             #[inline]
+            pub fn add_h_commitment(
+                &mut self,
+                h_commitment: ::flatbuffers::WIPOffset<BrakedownCommitment<'b>>,
+            ) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<BrakedownCommitment>>(
+                        LogUpAux::VT_H_COMMITMENT,
+                        h_commitment,
+                    );
+            }
+            #[inline]
+            pub fn add_h_eval_proof(
+                &mut self,
+                h_eval_proof: ::flatbuffers::WIPOffset<EvalBatchProof<'b>>,
+            ) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<EvalBatchProof>>(
+                        LogUpAux::VT_H_EVAL_PROOF,
+                        h_eval_proof,
+                    );
+            }
+            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> LogUpAuxBuilder<'a, 'b, A> {
@@ -1443,6 +1513,8 @@ pub mod hekate {
                 let mut ds = f.debug_struct("LogUpAux");
                 ds.field("h_evals", &self.h_evals());
                 ds.field("claimed_sums", &self.claimed_sums());
+                ds.field("h_commitment", &self.h_commitment());
+                ds.field("h_eval_proof", &self.h_eval_proof());
                 ds.finish()
             }
         }

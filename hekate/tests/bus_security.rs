@@ -570,6 +570,41 @@ fn h_eval_corruption_after_sumcheck_rejected() {
 }
 
 // =====================================================
+// h binding omitted on a bused table (presence check)
+// =====================================================
+
+#[test]
+fn h_eval_proof_omitted_on_bused_table_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof();
+
+    let aux = &mut proof.chiplet_logup_aux[0];
+    assert!(aux.h_commitment.is_some() && aux.h_eval_proof.is_some());
+
+    // Keep h_commitment, the transcript stays synced
+    aux.h_eval_proof = None;
+
+    assert!(
+        verify_rejects(&air, &instance, &config, &proof),
+        "SECURITY FAILURE: bused table with no h opening accepted"
+    );
+}
+
+#[test]
+fn h_commitment_omitted_on_bused_table_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof();
+
+    let aux = &mut proof.chiplet_logup_aux[0];
+    assert!(aux.h_commitment.is_some());
+
+    aux.h_commitment = None;
+
+    assert!(
+        verify_rejects(&air, &instance, &config, &proof),
+        "SECURITY FAILURE: bused table with no h commitment accepted"
+    );
+}
+
+// =====================================================
 // bus_id label decoupled from bus_specs ordering
 // =====================================================
 
