@@ -61,6 +61,8 @@ hekate-prover-sys = { workspace = true, features = ["blake3"] }
 hekate-sdk = { workspace = true }
 hekate-keccak = { workspace = true, features = ["std", "blake3"] }
 hekate-aes = { workspace = true, features = ["std", "blake3"] }
+hekate-sha2 = { workspace = true, features = ["std", "blake3"] }
+hekate-rsa = { workspace = true, features = ["std", "blake3"] }
 hekate-pqc = { workspace = true, features = ["std", "blake3"] }
 hekate-scribble = { workspace = true }
 proptest = "1.9"

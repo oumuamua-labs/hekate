@@ -11,6 +11,8 @@ members = [
     "hekate-scribble",
     "hekate-keccak",
     "hekate-aes",
+    "hekate-sha2",
+    "hekate-rsa",
     "hekate-pqc",
     "hekate",
 ]
@@ -40,6 +42,8 @@ hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.34.0", default-f
 hekate-scribble = { path = "hekate-scribble", version = "=0.34.0", default-features = false }
 hekate-keccak = { path = "hekate-keccak", version = "=0.7.0", default-features = false }
 hekate-aes = { path = "hekate-aes", version = "=0.7.0", default-features = false }
+hekate-sha2 = { path = "hekate-sha2", version = "=0.1.0", default-features = false }
+hekate-rsa = { path = "hekate-rsa", version = "=0.1.0", default-features = false }
 hekate-pqc = { path = "hekate-pqc", version = "=0.8.0", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 zeroize = { version = "1.8", default-features = false, features = ["alloc", "derive"] }

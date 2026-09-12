@@ -34,6 +34,8 @@ exceptions = [
     { allow = ["AGPL-3.0-only"], crate = "hekate-scribble" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-keccak" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-aes" },
+    { allow = ["AGPL-3.0-only"], crate = "hekate-sha2" },
+    { allow = ["AGPL-3.0-only"], crate = "hekate-rsa" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-pqc" },
     { allow = ["AGPL-3.0-only"], crate = "hekate" },
 ]
