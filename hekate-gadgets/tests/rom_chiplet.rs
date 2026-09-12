@@ -2,14 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use hekate::core::config::Config;
-use hekate::core::trace::{ColumnTrace, TraceColumn};
-use hekate::crypto::DefaultHasher;
-use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
-use hekate_core::trace::IntoTraceColumn;
+use hekate_core::config::Config;
+use hekate_core::trace::{ColumnTrace, IntoTraceColumn, TraceColumn};
+use hekate_crypto::DefaultHasher;
+use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
-use hekate_math::{Bit, Block32};
+use hekate_math::{Bit, Block32, Block128, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
