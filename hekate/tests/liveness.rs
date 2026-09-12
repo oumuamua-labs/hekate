@@ -5,12 +5,13 @@
 use hekate::math::Block128;
 use hekate_aes::{Aes128Chiplet, Aes256Chiplet};
 use hekate_core::errors;
-use hekate_gadgets::{IntArithmeticChiplet, RamChiplet, RomChiplet};
+use hekate_gadgets::{IntArithmeticChiplet, ModexpChiplet, RamChiplet, RomChiplet};
 use hekate_keccak::KeccakChiplet;
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaLevel};
 use hekate_pqc::mlkem::{MlKemChiplet, MlKemLevel};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::{Air, FixedColumn};
+use hekate_sha2::Sha256Chiplet;
 
 type F = Block128;
 type Snapshot = (&'static str, errors::Result<Vec<ChipletDef<F>>>);
@@ -68,6 +69,16 @@ fn shipped_tables() -> Vec<Snapshot> {
                 .unwrap()
                 .composite()
                 .flatten_defs(),
+        ),
+        (
+            "Sha256Chiplet",
+            Sha256Chiplet::<F>::new(num_rows, 4, 4)
+                .and_then(|c| c.def())
+                .map(|d| vec![d]),
+        ),
+        (
+            "ModexpChiplet",
+            ModexpChiplet::new().and_then(|c| c.def()).map(|d| vec![d]),
         ),
         (
             "MlKemChiplet",
