@@ -36,3 +36,10 @@ hekate-math = { workspace = true }
 hekate-program = { workspace = true }
 once_cell = { workspace = true }
 rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+hekate-crypto = { workspace = true, features = ["std", "blake3"] }
+hekate-verifier = { workspace = true, features = ["std", "blake3"] }
+hekate-sdk = { workspace = true, features = ["std", "blake3"] }
+hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
+hekate-scribble = { workspace = true, features = ["parallel"] }

@@ -16,6 +16,8 @@ extern crate core;
 pub mod atoms;
 pub mod chiplets;
 
+pub use chiplets::bignum::cpu::CpuModexpBlock;
+pub use chiplets::bignum::modexp::{Modexp, ModexpChiplet};
 pub use chiplets::int::arith::{
     ArithmeticOpcode, CpuArithColumns, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
     generate_arithmetic_trace,
