@@ -1,0 +1,32 @@
+                    HEKATE PROVER LINKING EXCEPTION
+
+  Additional permission under section 7 of the GNU Affero General Public
+License, version 3.
+
+  The copyright holders of Hekate grant you permission to combine Hekate
+with the Hekate prover shared library (libhekate_prover_cdylib)
+distributed in binary form by Oumuamua Labs, and to convey the resulting
+combined work under terms of your choice, provided that you comply with
+the GNU Affero General Public License, version 3, in all respects for
+Hekate and for every other portion of the combined work that is not the
+Hekate prover shared library.
+
+  This permission covers the Hekate prover shared library and nothing
+else. It grants no right in that library, which is distributed under its
+own separate terms, and it extends to no other component that is not
+licensed under the GNU Affero General Public License.
+
+  For the purposes of sections 6 and 13 of the GNU Affero General Public
+License, the Corresponding Source of a combined work covered by this
+permission need not include the source code for the Hekate prover shared
+library.
+
+  Subject to the preceding paragraph, nothing in this permission
+relieves you of the obligations of section 13 of the GNU Affero General
+Public License with respect to Hekate itself. A network operator who
+deploys a combined work must still offer the Corresponding Source of the
+Hekate portion to its users.
+
+  If you modify Hekate, you may extend this exception to your version of
+it, but you are not obliged to do so. If you do not wish to do so,
+delete this exception statement from your version.
