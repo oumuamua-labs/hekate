@@ -21,7 +21,7 @@ use hekate_program::{
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
-const WIRE_FORMAT_VERSION: u32 = 4;
+const WIRE_FORMAT_VERSION: u32 = 5;
 
 pub struct DeserializedBundle<F: TowerField> {
     pub name: String,

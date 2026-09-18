@@ -23,14 +23,12 @@ pub fn absorb_chiplet_header<H: Hasher>(
     num_rows: usize,
     num_cols: usize,
     row_bytes: usize,
-    num_master_vectors: usize,
     root: &[u8; 32],
 ) {
     transcript.append_message(b"chiplet_name", name.as_bytes());
     transcript.append_u64(b"chiplet_num_rows", num_rows as u64);
     transcript.append_u64(b"chiplet_num_cols", num_cols as u64);
     transcript.append_u64(b"chiplet_row_bytes", row_bytes as u64);
-    transcript.append_u64(b"chiplet_master_vectors", num_master_vectors as u64);
     transcript.append_message(b"chiplet_root", root);
 }
 

@@ -63,7 +63,8 @@ enum SourceKind : byte {
   Columns,
   RowIndexLeBytes,
   RowIndexByte,
-  Constant
+  Constant,
+  PhaseColumn
 }
 
 table Source {

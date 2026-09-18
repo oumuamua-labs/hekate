@@ -8,7 +8,7 @@
 //! on a broken witness, which only an outer row can reject.
 
 use hekate::core::config::Config;
-use hekate::core::proofs::InnerProof;
+use hekate::core::proofs::{EvalBatchProof, InnerProof};
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
@@ -202,6 +202,12 @@ fn bump(value: &mut F) {
     *value += F::ONE;
 }
 
+fn first_h_claim(eval: &mut EvalBatchProof<F>, num_buses: usize) -> &mut F {
+    let half = eval.point_evaluation.1.len() / 2;
+
+    &mut eval.point_evaluation.1[half - num_buses]
+}
+
 #[test]
 fn honest_proofs_verify() {
     let (air, instance, proof) = pinned_case();
@@ -272,19 +278,13 @@ fn absorbed_bus_values_are_transcript_bound() {
         "chiplet claimed_sum"
     );
 
-    // The h_eval and its h-open claim share one pad entry;
-    // moving both keeps the pin, and the h opening rejects.
+    // Moving the h_eval and its base h claim together
+    // keeps the pin row, and the h opening rejects.
     let mut mutant = proof.clone();
+    let num_buses = mutant.main_logup_aux.h_evals.len();
+
     bump(&mut mutant.main_logup_aux.h_evals[0].1);
-    bump(
-        &mut mutant
-            .main_logup_aux
-            .h_eval_proof
-            .as_mut()
-            .unwrap()
-            .point_evaluation
-            .1[0],
-    );
+    bump(first_h_claim(&mut mutant.eval_proof, num_buses));
 
     assert!(
         !accepted(b"Tamper_Ram", &air, &instance, &mutant),
@@ -292,15 +292,10 @@ fn absorbed_bus_values_are_transcript_bound() {
     );
 
     let mut mutant = proof.clone();
+    let num_buses = mutant.chiplet_logup_aux[0].h_evals.len();
+
     bump(&mut mutant.chiplet_logup_aux[0].h_evals[0].1);
-    bump(
-        &mut mutant.chiplet_logup_aux[0]
-            .h_eval_proof
-            .as_mut()
-            .unwrap()
-            .point_evaluation
-            .1[0],
-    );
+    bump(first_h_claim(&mut mutant.chiplet_eval_proofs[0], num_buses));
 
     assert!(
         !accepted(b"Tamper_Ram", &air, &instance, &mutant),

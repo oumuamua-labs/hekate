@@ -119,10 +119,11 @@ where
     // Eval batch argument breakdown
     let eval_sc_sz = enc_size(&proof.eval_proof.sumcheck_proof, bin_cfg);
     let eval_tensor_sz = enc_size(&proof.eval_proof.tensor_vec, bin_cfg);
-    let eval_tensor_ring_sz = enc_size(&proof.eval_proof.tensor_vec_ring, bin_cfg);
+    let eval_master_sz = enc_size(&proof.eval_proof.master_evals, bin_cfg);
     let eval_pt_sz = enc_size(&proof.eval_proof.point_evaluation, bin_cfg);
     let ldt_batch_sz = enc_size(&proof.eval_proof.ldt_proof.batch_path, bin_cfg);
     let ldt_opened_sz = enc_size(&proof.eval_proof.ldt_proof.opened_columns, bin_cfg);
+    let eval_h_sz = enc_size(&proof.eval_proof.h_ldt_proof, bin_cfg);
 
     println!("--------------------------------------------------");
     println!("  PROOF COMPONENT BREAKDOWN (bincode)");
@@ -132,21 +133,28 @@ where
     println!("  Eval Batch Argument:");
     println!("    Eval Sumcheck:        {:>8} bytes", eval_sc_sz);
     println!("    Tensor Vector (q):    {:>8} bytes", eval_tensor_sz);
-    println!("    Ring Tensor Vector:   {:>8} bytes", eval_tensor_ring_sz);
+    println!("    Master Evals:         {:>8} bytes", eval_master_sz);
     println!("    Point Evaluation:     {:>8} bytes", eval_pt_sz);
     println!("    LDT Batch Path:       {:>8} bytes", ldt_batch_sz);
     println!("    LDT Opened Columns:   {:>8} bytes", ldt_opened_sz);
+    println!("    H Opening:            {:>8} bytes", eval_h_sz);
 
     if !proof.chiplet_commitments.is_empty() {
         let n = proof.chiplet_commitments.len();
         let chip_comm_sz = enc_size(&proof.chiplet_commitments, bin_cfg);
         let chip_zc_sz = enc_size(&proof.chiplet_zerocheck_proofs, bin_cfg);
         let chip_eval_sz = enc_size(&proof.chiplet_eval_proofs, bin_cfg);
+        let chip_h_sz = proof
+            .chiplet_eval_proofs
+            .iter()
+            .map(|p| enc_size(&p.h_ldt_proof, bin_cfg))
+            .sum::<usize>();
 
         println!("  Chiplets ({}):", n);
         println!("    Commitments:          {:>8} bytes", chip_comm_sz);
         println!("    ZeroChecks:           {:>8} bytes", chip_zc_sz);
         println!("    Eval Arguments:       {:>8} bytes", chip_eval_sz);
+        println!("      of which h openings:{:>8} bytes", chip_h_sz);
     }
 
     let main_bus_count = proof.main_logup_aux.h_evals.len();
@@ -160,19 +168,12 @@ where
         let main_logup_sz = enc_size(&proof.main_logup_aux, bin_cfg);
         let chip_logup_sz = enc_size(&proof.chiplet_logup_aux, bin_cfg);
 
-        let h_open_sz = core::iter::once(&proof.main_logup_aux)
-            .chain(&proof.chiplet_logup_aux)
-            .filter_map(|aux| aux.h_eval_proof.as_ref())
-            .map(|p| enc_size(p, bin_cfg))
-            .sum::<usize>();
-
         println!(
             "  LogUp Bus Aux ({} specs):",
             main_bus_count + chip_bus_count
         );
         println!("    Main:                 {:>8} bytes", main_logup_sz);
         println!("    Chiplets:             {:>8} bytes", chip_logup_sz);
-        println!("    of which h openings:  {:>8} bytes", h_open_sz);
     }
 
     let pad_root_sz = enc_size(&proof.pad_root, bin_cfg);

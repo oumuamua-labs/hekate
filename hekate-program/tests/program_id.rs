@@ -322,6 +322,18 @@ fn mutate_main_perm_source_changes_hash() {
 }
 
 #[test]
+fn mutate_main_perm_source_to_phase_changes_hash() {
+    let mut p = TestProgram::baseline();
+    let h1 = id(&p);
+
+    assert_eq!(p.permutation_checks[0].1.sources[0].0, Source::Column(0));
+
+    p.permutation_checks[0].1.sources[0].0 = Source::PhaseColumn(0);
+
+    assert_ne!(h1, id(&p));
+}
+
+#[test]
 fn mutate_main_fixed_column_col_changes_hash() {
     let mut p = TestProgram::baseline();
     let h1 = id(&p);

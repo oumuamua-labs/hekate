@@ -565,7 +565,7 @@ impl<F: TowerField> Program<F> for CircuitProgram<F> {
 
 fn validate_source_range(source: &Source, width: usize) -> errors::Result<()> {
     let out_of_range = match source {
-        Source::Column(idx) => *idx >= width,
+        Source::Column(idx) | Source::PhaseColumn(idx) => *idx >= width,
         Source::Columns(indices) => indices.iter().any(|&idx| idx >= width),
         Source::RowIndexLeBytes(_) | Source::RowIndexByte(_) | Source::Const(_) => false,
     };

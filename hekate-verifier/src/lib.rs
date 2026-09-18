@@ -29,7 +29,7 @@ use hekate_core::proofs::{
 };
 use hekate_core::protocol;
 use hekate_core::tensor::TensorProduct;
-use hekate_core::trace::{ColumnType, TraceCompatibleField};
+use hekate_core::trace::TraceCompatibleField;
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField};
@@ -37,8 +37,8 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::expander::RingSwitchPlan;
 use hekate_program::outer::{
-    EvalInputs, EvalRecord, OuterStatement, TableInputs, TablePads, TableRecord, TableShape,
-    eval_record, table_record,
+    EvalInputs, OuterStatement, TableInputs, TablePads, TableRecord, TableShape, eval_record,
+    table_record,
 };
 use hekate_program::permutation::{
     self, BusKind, eval_row_idx_byte_mle, eval_row_idx_le_mle, validate_fixed_selectors,
@@ -53,7 +53,6 @@ struct ZerocheckMasked<F: HardwareField> {
     alpha: Flat<F>,
     r_zerocheck: Vec<Flat<F>>,
     val_final: Flat<F>,
-    h_eval: Option<EvalRecord<F>>,
 }
 
 struct ZerocheckOutcome<F: HardwareField> {
@@ -120,9 +119,9 @@ where
     /// 2. Absorb each chiplet header (name, rows, cols, row_bytes, root).
     /// 3. Draw global LogUp challenges γ, β.
     /// 4. Per chiplet:
-    ///    verify ZeroCheck (with LogUp, opening the committed `h`
-    ///    at `r_final`) and the trace eval at `r_final`.
-    /// 5. Verify the main AIR ZeroCheck (with LogUp, same `h` opening).
+    ///    verify ZeroCheck (with LogUp) and the trace eval at
+    ///    `r_final`, which opens the committed `h` alongside.
+    /// 5. Verify the main AIR ZeroCheck (with LogUp).
     /// 6. Verify the main eval at `r_final`.
     /// 7. Check that LogUp `claimed_sum` totals cancel per `bus_id`.
     #[instrument(skip_all, name = "Hekate::verify")]
@@ -174,6 +173,7 @@ where
             program.column_layout(),
             main_entries.as_deref(),
             config.blind_units(),
+            program.permutation_checks().len(),
         )?;
 
         let main_grid_cols = 1 << main_plan.split_vars(num_vars, config);
@@ -256,6 +256,7 @@ where
                 Air::<F>::column_layout(def),
                 c_entries.as_deref(),
                 config.blind_units(),
+                def.permutation_checks.len(),
             )?;
 
             chiplet_tables.push(ChipletTable {
@@ -428,7 +429,6 @@ where
                 c_comm.num_rows,
                 def.num_columns(),
                 table.plan.opened_row_bytes(),
-                table.plan.num_master_vectors(),
                 &c_comm.root,
             );
 
@@ -613,6 +613,7 @@ where
             ring_plan,
             shifted_claims: true,
             masked: cursor.is_some(),
+            h_commitment: logup_aux.h_commitment.as_ref(),
         };
 
         let outcome = match EvaluatorVerifier::<F, H>::verify(
@@ -671,7 +672,6 @@ where
                 claims: claims_first,
             },
             trace_eval: eval.record,
-            h_eval: masked.h_eval,
             gadget: eval.gadget,
         })?);
 
@@ -702,10 +702,6 @@ where
         transcript.append_u64(b"num_queries", config.num_queries as u64);
         transcript.append_u64(b"outer_queries", config.outer_queries as u64);
         transcript.append_u64(b"main_row_bytes", main_plan.opened_row_bytes() as u64);
-        transcript.append_u64(
-            b"main_master_vectors",
-            main_plan.num_master_vectors() as u64,
-        );
 
         for val in instance.public_inputs() {
             transcript.append_field(b"public_input", *val);
@@ -787,12 +783,10 @@ where
             });
         }
 
-        // The `h` binding is present exactly
+        // The `h` commitment is present exactly
         // when the table carries a bus.
         let has_bus = !bus_specs.is_empty();
-        if logup_aux.h_commitment.is_some() != has_bus
-            || logup_aux.h_eval_proof.is_some() != has_bus
-        {
+        if logup_aux.h_commitment.is_some() != has_bus {
             return Err(errors::Error::Protocol {
                 protocol: "verifier",
                 message: "logup_aux h binding presence must match bus presence",
@@ -880,7 +874,7 @@ where
             transcript,
         )?;
 
-        let h_first = cursor.as_deref_mut().map(|c| c.take(num_buses));
+        let h_first = cursor.map(|c| c.take(num_buses));
 
         protocol::absorb_logup_h_evals(transcript, &logup_aux.h_evals);
 
@@ -891,85 +885,6 @@ where
                 return Ok(None);
             }
         };
-
-        // Open `h` at r_final and pin every
-        // reported h_eval to the committed h.
-        let mut h_eval_record = None;
-
-        if let (Some(h_comm), Some(h_proof)) = (
-            logup_aux.h_commitment.as_ref(),
-            logup_aux.h_eval_proof.as_ref(),
-        ) {
-            let (h_point, h_opened_canon) = &h_proof.point_evaluation;
-
-            if canonical_slice_to_flat(h_point) != r_final {
-                return Err(errors::Error::Protocol {
-                    protocol: "verifier",
-                    message: "logup h_eval_proof point mismatch with r_final",
-                });
-            }
-
-            if h_opened_canon.len() != num_buses + config.blind_units() {
-                return Err(errors::Error::Protocol {
-                    protocol: "verifier",
-                    message: "logup h_eval_proof opened value count mismatch",
-                });
-            }
-
-            let h_layout = vec![ColumnType::B128; num_buses];
-            let h_ring_plan = RingSwitchPlan::new(&h_layout, None, config.blind_units())?;
-            let h_opened = canonical_slice_to_flat(h_opened_canon);
-
-            let ctx = EvalVerifyContext {
-                point: r_final.as_slice(),
-                claimed_values: h_opened.as_slice(),
-                num_vars,
-                ring_plan: &h_ring_plan,
-                shifted_claims: false,
-                masked: cursor.is_some(),
-            };
-
-            let outcome = match EvaluatorVerifier::<F, H>::verify(
-                h_comm, h_proof, transcript, ctx, config,
-            )? {
-                Some(outcome) => outcome,
-                None => {
-                    warn!("LogUp h opening verification failed");
-                    return Ok(None);
-                }
-            };
-
-            // Bind reported h_evals to the opened base values
-            for (spec_idx, (_, h_eval)) in logup_aux.h_evals.iter().enumerate() {
-                if *h_eval != h_opened_canon[spec_idx] {
-                    warn!("Reported h_eval does not match committed h opening");
-                    return Ok(None);
-                }
-            }
-
-            if let (Some(cursor), Some(h_first)) = (cursor, h_first) {
-                let h_blind_first = cursor.take(config.blind_units());
-                let h_round_first = cursor.take(2 * num_vars);
-
-                let mut h_pads: Vec<u32> = (0..num_buses as u32).map(|k| h_first + k).collect();
-                h_pads.extend((0..config.blind_units() as u32).map(|k| h_blind_first + k));
-
-                let output = eval_record(&EvalInputs {
-                    plan: &h_ring_plan,
-                    eta: outcome.eta,
-                    r_mix: &outcome.r_mix,
-                    shifted_claims: false,
-                    challenges: &outcome.challenges,
-                    claim_masked: outcome.claim_masked,
-                    fin: outcome.fin,
-                    claim_pads: &h_pads,
-                    round_first: h_round_first,
-                    first_wire: 0,
-                })?;
-
-                h_eval_record = Some(output.record);
-            }
-        }
 
         // =========================================================
         // GLOBAL CONSTRAINT CONSISTENCY CHECK
@@ -989,9 +904,19 @@ where
                     alpha,
                     r_zerocheck,
                     val_final,
-                    h_eval: h_eval_record,
                 }),
             }));
+        }
+
+        // Every reported h_eval is the base h claim
+        // the eval argument binds to the committed h.
+        let h_claims = &trace_values[trace_values.len() - num_buses..];
+
+        for ((_, h_eval), &claim) in logup_aux.h_evals.iter().zip(h_claims) {
+            if h_eval.to_hardware() != claim {
+                warn!("Reported h_eval does not match the committed h claim");
+                return Ok(None);
+            }
         }
 
         let eq_zc_eval = TensorProduct::evaluate_eq_slice(&r_zerocheck, &r_final);
@@ -1109,7 +1034,8 @@ where
 
                 for (source, _) in &spec.sources {
                     match source {
-                        permutation::Source::Column(col_idx) => {
+                        permutation::Source::Column(col_idx)
+                        | permutation::Source::PhaseColumn(col_idx) => {
                             source_evals.push(current_row[*col_idx]);
                         }
                         permutation::Source::Columns(indices) => {

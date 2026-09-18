@@ -416,18 +416,19 @@ pub mod hekate {
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
-        pub const ENUM_MAX_SOURCE_KIND: i8 = 4;
+        pub const ENUM_MAX_SOURCE_KIND: i8 = 5;
         #[deprecated(
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
         #[allow(non_camel_case_types)]
-        pub const ENUM_VALUES_SOURCE_KIND: [SourceKind; 5] = [
+        pub const ENUM_VALUES_SOURCE_KIND: [SourceKind; 6] = [
             SourceKind::Column,
             SourceKind::Columns,
             SourceKind::RowIndexLeBytes,
             SourceKind::RowIndexByte,
             SourceKind::Constant,
+            SourceKind::PhaseColumn,
         ];
 
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -440,15 +441,17 @@ pub mod hekate {
             pub const RowIndexLeBytes: Self = Self(2);
             pub const RowIndexByte: Self = Self(3);
             pub const Constant: Self = Self(4);
+            pub const PhaseColumn: Self = Self(5);
 
             pub const ENUM_MIN: i8 = 0;
-            pub const ENUM_MAX: i8 = 4;
+            pub const ENUM_MAX: i8 = 5;
             pub const ENUM_VALUES: &'static [Self] = &[
                 Self::Column,
                 Self::Columns,
                 Self::RowIndexLeBytes,
                 Self::RowIndexByte,
                 Self::Constant,
+                Self::PhaseColumn,
             ];
             /// Returns the variant's name or "" if unknown.
             pub fn variant_name(self) -> Option<&'static str> {
@@ -458,6 +461,7 @@ pub mod hekate {
                     Self::RowIndexLeBytes => Some("RowIndexLeBytes"),
                     Self::RowIndexByte => Some("RowIndexByte"),
                     Self::Constant => Some("Constant"),
+                    Self::PhaseColumn => Some("PhaseColumn"),
                     _ => None,
                 }
             }

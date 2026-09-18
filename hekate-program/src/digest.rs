@@ -395,6 +395,10 @@ fn absorb_source(h: &mut Absorb, source: &Source) {
             h.update(&[4]);
             h.update(&(*n as u64).to_le_bytes());
         }
+        Source::PhaseColumn(idx) => {
+            h.update(&[5]);
+            h.update(&(*idx as u64).to_le_bytes());
+        }
     }
 }
 

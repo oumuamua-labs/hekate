@@ -60,12 +60,16 @@ pub enum Source {
     /// even-multiplicity parity collapse.
     RowIndexLeBytes(usize),
 
-    /// Constant byte for cross-table
-    /// domain separation.
+    /// Constant byte for cross-table domain separation.
     Const(u128),
 
     /// Virtual single byte `k` of the row index.
     RowIndexByte(usize),
+
+    /// Column replacing the top byte of
+    /// a requester's row-index clock;
+    /// must be an overlay `fixed_columns()` pin.
+    PhaseColumn(usize),
 }
 
 /// One endpoint of a LogUp bus.
@@ -168,7 +172,7 @@ impl PermutationCheckSpec {
     pub fn shift_column_indices(&mut self, offset: usize) {
         for (source, _) in &mut self.sources {
             match source {
-                Source::Column(idx) => *idx += offset,
+                Source::Column(idx) | Source::PhaseColumn(idx) => *idx += offset,
                 Source::Columns(indices) => {
                     for idx in indices {
                         *idx += offset;
@@ -208,7 +212,10 @@ impl PermutationCheckSpec {
             let width_ok = match src {
                 Source::RowIndexLeBytes(n) => *n >= 1 && *n <= MAX_ROW_INDEX_BYTES,
                 Source::RowIndexByte(k) => *k < MAX_ROW_INDEX_BYTES,
-                Source::Column(_) | Source::Columns(_) | Source::Const(_) => true,
+                Source::Column(_)
+                | Source::Columns(_)
+                | Source::Const(_)
+                | Source::PhaseColumn(_) => true,
             };
 
             if !width_ok {
@@ -330,24 +337,39 @@ impl Service {
         values: &[usize],
         selector: usize,
     ) -> errors::Result<PermutationCheckSpec> {
-        self.spec(values, None, selector)
+        self.spec(values, None, None, selector)
     }
 
-    /// Responder endpoint: `clock_cols` are the committed columns
-    /// carrying the requester's row index, one per `clock_columns()`.
+    /// Requester spec whose clock replaces the row index's
+    /// top byte with `phase_col`, leaving `8 · (num_bytes - 1)`
+    /// row-index bits. Unchecked: a phase another requester
+    /// on this bus repeats annihilates both emits.
+    pub fn request_phased(
+        &self,
+        values: &[usize],
+        phase_col: usize,
+        selector: usize,
+    ) -> errors::Result<PermutationCheckSpec> {
+        self.spec(values, None, Some(phase_col), selector)
+    }
+
+    /// Responder endpoint: `clock_cols` are the committed
+    /// columns mirroring the requester's clock sources,
+    /// one per `clock_columns()`.
     pub fn respond(
         &self,
         values: &[usize],
         clock_cols: &[usize],
         selector: usize,
     ) -> errors::Result<PermutationCheckSpec> {
-        self.spec(values, Some(clock_cols), selector)
+        self.spec(values, Some(clock_cols), None, selector)
     }
 
     fn spec(
         &self,
         values: &[usize],
         respond_idx: Option<&[usize]>,
+        phase: Option<usize>,
         selector: usize,
     ) -> errors::Result<PermutationCheckSpec> {
         let clock_slots = self
@@ -374,6 +396,31 @@ impl Service {
                 message: "Permutation schema needs exactly one clock slot or a \
                           clock_waiver, never both; Lookup schema must have neither",
             });
+        }
+
+        if phase.is_some() {
+            let clock_bytes = self.slots.iter().find_map(|s| match s {
+                ServiceSlot::RequestIdxBytes { num_bytes } => Some(*num_bytes),
+                _ => None,
+            });
+
+            match clock_bytes {
+                None => {
+                    return Err(errors::Error::Protocol {
+                        protocol: "service",
+                        message: "a phased clock needs a byte-split clock slot; \
+                                  a whole-word, waived or lookup schema has \
+                                  no top byte to replace",
+                    });
+                }
+                Some(num_bytes) if num_bytes < 2 => {
+                    return Err(errors::Error::Protocol {
+                        protocol: "service",
+                        message: "a phased clock needs at least two clock bytes",
+                    });
+                }
+                Some(_) => {}
+            }
         }
 
         if let Some(cols) = respond_idx
@@ -441,15 +488,17 @@ impl Service {
 
                     for (byte, label) in REQUEST_IDX_BYTE_LABELS.iter().enumerate().take(*num_bytes)
                     {
-                        let source = match respond_idx {
-                            Some(_) => Source::Column(*next_clock.next().ok_or(
+                        let top = byte + 1 == *num_bytes;
+                        let source = match (respond_idx, phase) {
+                            (Some(_), _) => Source::Column(*next_clock.next().ok_or(
                                 errors::Error::Protocol {
                                     protocol: "service",
                                     message: "byte-split clock binds one committed \
                                               column per byte on the responder",
                                 },
                             )?),
-                            None => Source::RowIndexByte(byte),
+                            (None, Some(col)) if top => Source::PhaseColumn(col),
+                            (None, _) => Source::RowIndexByte(byte),
                         };
 
                         sources.push((source, *label));
@@ -510,22 +559,31 @@ pub fn validate_fixed_selectors<F>(
             });
         }
 
-        for sel in [spec.selector, spec.recv_selector].into_iter().flatten() {
+        let phases = spec.sources.iter().filter_map(|(src, _)| match src {
+            Source::PhaseColumn(col) => Some(*col),
+            _ => None,
+        });
+
+        for sel in [spec.selector, spec.recv_selector]
+            .into_iter()
+            .flatten()
+            .chain(phases)
+        {
             let Some(fc) = fixed.iter().find(|fc| fc.col_idx == sel) else {
                 return Err(errors::Error::Protocol {
                     protocol: "logup_bus",
-                    message: "bus selector reads a witness column; every selector \
-                              and recv_selector must be None or a member of the \
-                              table's fixed_columns",
+                    message: "bus selector or clock phase reads a witness column; \
+                              every selector, recv_selector and PhaseColumn must be \
+                              None or a member of the table's fixed_columns",
                 });
             };
 
             if !fc.shape.is_overlay() {
                 return Err(errors::Error::Protocol {
                     protocol: "logup_bus",
-                    message: "bus selector is pinned to a substituted shape; \
-                              FirstRow/LastRow/Custom replace the committed column \
-                              with a virtual poly the bus cannot read; pin selectors \
+                    message: "bus selector or clock phase is pinned to a substituted \
+                              shape; FirstRow/LastRow/Custom replace the committed \
+                              column with a virtual poly the bus cannot read; pin \
                               with Cadence, Segments, Periodic, Sparse or Dense",
                 });
             }
@@ -661,6 +719,8 @@ pub fn is_request_idx_label(label: ChallengeLabel) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FixedShape;
+    use hekate_math::Block128;
 
     fn test_service() -> Service {
         Service {
@@ -670,6 +730,20 @@ mod tests {
                 ServiceSlot::Value(b"k_a"),
                 ServiceSlot::Const(b"k_dom", 7),
                 ServiceSlot::RequestIdx { num_bytes: 4 },
+                ServiceSlot::Value(b"k_dir"),
+            ],
+            clock_waiver: None,
+        }
+    }
+
+    fn byte_split_service() -> Service {
+        Service {
+            bus_id: "svc",
+            kind: BusKind::Permutation,
+            slots: vec![
+                ServiceSlot::Value(b"k_a"),
+                ServiceSlot::Const(b"k_dom", 7),
+                ServiceSlot::RequestIdxBytes { num_bytes: 4 },
                 ServiceSlot::Value(b"k_dir"),
             ],
             clock_waiver: None,
@@ -861,5 +935,105 @@ mod tests {
         assert_eq!(req.kind, BusKind::Lookup);
         assert_eq!(resp.kind, BusKind::Lookup);
         assert_eq!(req.sources.len(), 1);
+    }
+
+    #[test]
+    fn request_phased_replaces_only_top_clock_byte() {
+        let svc = byte_split_service();
+
+        let phased = svc.request_phased(&[10, 11], 60, 12).unwrap();
+        let plain = svc.request(&[10, 11], 12).unwrap();
+
+        let labels = |spec: &PermutationCheckSpec| -> Vec<ChallengeLabel> {
+            spec.sources.iter().map(|(_, l)| *l).collect()
+        };
+
+        assert_eq!(labels(&phased), labels(&plain));
+
+        assert_eq!(phased.sources[2].0, Source::RowIndexByte(0));
+        assert_eq!(phased.sources[3].0, Source::RowIndexByte(1));
+        assert_eq!(phased.sources[4].0, Source::RowIndexByte(2));
+        assert_eq!(phased.sources[5].0, Source::PhaseColumn(60));
+        assert_eq!(plain.sources[5].0, Source::RowIndexByte(3));
+
+        assert!(phased.has_real_clock_source());
+
+        phased.validate_clock_stitching("svc").unwrap();
+
+        let responder = svc.respond(&[20, 21], &[40, 41, 42, 43], 23).unwrap();
+
+        validate_bus_set(vec![("svc", &phased), ("svc", &responder)]).unwrap();
+    }
+
+    #[test]
+    fn request_phased_rejects_whole_word_clock() {
+        assert!(test_service().request_phased(&[10, 11], 60, 12).is_err());
+    }
+
+    #[test]
+    fn request_phased_rejects_clockless_schema() {
+        let waived = Service {
+            bus_id: "svc",
+            kind: BusKind::Permutation,
+            slots: vec![ServiceSlot::Value(b"k_a")],
+            clock_waiver: Some("see permutation.rs: a body constraint forces per-row uniqueness"),
+        };
+
+        assert!(waived.request_phased(&[10], 60, 12).is_err());
+        assert!(waived.request(&[10], 12).is_ok());
+
+        let lookup = Service {
+            bus_id: "svc",
+            kind: BusKind::Lookup,
+            slots: vec![ServiceSlot::Value(b"k_a")],
+            clock_waiver: None,
+        };
+
+        assert!(lookup.request_phased(&[10], 60, 12).is_err());
+        assert!(lookup.request(&[10], 12).is_ok());
+    }
+
+    #[test]
+    fn request_phased_rejects_one_byte_clock() {
+        let svc = Service {
+            slots: vec![ServiceSlot::RequestIdxBytes { num_bytes: 1 }],
+            ..byte_split_service()
+        };
+
+        assert!(svc.request_phased(&[], 60, 12).is_err());
+        assert!(svc.request(&[], 12).is_ok());
+    }
+
+    #[test]
+    fn witness_clock_phase_is_rejected() {
+        let svc = byte_split_service();
+        let phased = svc.request_phased(&[10, 11], 60, 12).unwrap();
+        let specs = vec![(String::from("svc"), phased)];
+
+        let selector_only = vec![FixedColumn::<Block128> {
+            col_idx: 12,
+            shape: FixedShape::Periodic {
+                period: 1,
+                values: vec![Block128::ONE],
+            },
+        }];
+
+        assert!(validate_fixed_selectors(&specs, &selector_only).is_err());
+
+        let mut pinned = selector_only;
+        pinned.push(FixedColumn {
+            col_idx: 60,
+            shape: FixedShape::Periodic {
+                period: 2,
+                values: vec![Block128::ZERO, Block128::ONE],
+            },
+        });
+
+        validate_fixed_selectors(&specs, &pinned).unwrap();
+
+        let mut substituted = pinned;
+        substituted[1].shape = FixedShape::LastRow;
+
+        assert!(validate_fixed_selectors(&specs, &substituted).is_err());
     }
 }

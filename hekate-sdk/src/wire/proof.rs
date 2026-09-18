@@ -9,14 +9,14 @@ use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::Result;
 use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::{
-    BrakedownCommitment, BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening,
-    OuterProof, SumcheckProof,
+    BrakedownCommitment, BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, MasterEvals,
+    OuterOpening, OuterProof, SumcheckProof,
 };
 use hekate_math::TowerField;
 
 use crate::generated::proof as fb;
 
-const WIRE_PROOF_VERSION: u32 = 5;
+const WIRE_PROOF_VERSION: u32 = 6;
 
 pub fn serialize_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -454,13 +454,23 @@ fn serialize_eval_batch<'a, F: TowerField>(
 
     let tensor = fbb.create_vector(&tv);
 
-    let tv_ring: Vec<fb::Block128> = proof
-        .tensor_vec_ring
-        .iter()
-        .map(|f| block128_from_field(f))
-        .collect();
+    let master_evals = proof.master_evals.as_ref().map(|evals| {
+        let whole = block128_from_field(&evals.whole);
+        let ring = block128_from_field(&evals.ring);
 
-    let tensor_ring = fbb.create_vector(&tv_ring);
+        fb::MasterEvals::create(
+            fbb,
+            &fb::MasterEvalsArgs {
+                whole: Some(&whole),
+                ring: Some(&ring),
+            },
+        )
+    });
+
+    let h_ldt_proof = proof
+        .h_ldt_proof
+        .as_ref()
+        .map(|p| serialize_brakedown_proof(fbb, p));
 
     fb::EvalBatchProof::create(
         fbb,
@@ -469,7 +479,8 @@ fn serialize_eval_batch<'a, F: TowerField>(
             ldt_proof: Some(ldt),
             point_evaluation: Some(pt_offset),
             tensor_vec: Some(tensor),
-            tensor_vec_ring: Some(tensor_ring),
+            master_evals,
+            h_ldt_proof,
         },
     )
 }
@@ -482,11 +493,6 @@ fn serialize_logup_aux<'a, F: TowerField>(
         .h_commitment
         .as_ref()
         .map(|c| serialize_brakedown_commitment(fbb, c));
-
-    let h_eval_proof = aux
-        .h_eval_proof
-        .as_ref()
-        .map(|p| serialize_eval_batch(fbb, p));
 
     let h_offsets: Vec<_> = aux
         .h_evals
@@ -530,7 +536,6 @@ fn serialize_logup_aux<'a, F: TowerField>(
             h_evals: Some(h_evals),
             claimed_sums: Some(claimed_sums),
             h_commitment,
-            h_eval_proof,
         },
     )
 }
@@ -644,24 +649,33 @@ fn deserialize_eval_batch<F: TowerField>(fb: fb::EvalBatchProof<'_>) -> Result<E
         None => Vec::new(),
     };
 
-    let tensor_vec_ring = match fb.tensor_vec_ring() {
-        Some(v) => {
-            let mut tv = Vec::with_capacity(v.len());
-            for i in 0..v.len() {
-                tv.push(field_from_block128::<F>(*v.get(i))?);
-            }
+    let master_evals = match fb.master_evals() {
+        Some(evals) => {
+            let whole = evals
+                .whole()
+                .ok_or(wire_err("missing master_evals.whole"))?;
+            let ring = evals.ring().ok_or(wire_err("missing master_evals.ring"))?;
 
-            tv
+            Some(MasterEvals {
+                whole: field_from_block128::<F>(*whole)?,
+                ring: field_from_block128::<F>(*ring)?,
+            })
         }
-        None => Vec::new(),
+        None => None,
     };
+
+    let h_ldt_proof = fb
+        .h_ldt_proof()
+        .map(|p| deserialize_brakedown_proof::<F>(p))
+        .transpose()?;
 
     Ok(EvalBatchProof {
         sumcheck_proof,
         ldt_proof,
         point_evaluation,
         tensor_vec,
-        tensor_vec_ring,
+        master_evals,
+        h_ldt_proof,
     })
 }
 
@@ -752,15 +766,9 @@ fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux
 
     let h_commitment = fb.h_commitment().map(deserialize_commitment);
 
-    let h_eval_proof = fb
-        .h_eval_proof()
-        .map(|p| deserialize_eval_batch::<F>(p))
-        .transpose()?;
-
     Ok(LogUpAux {
         h_evals,
         claimed_sums,
         h_commitment,
-        h_eval_proof,
     })
 }
