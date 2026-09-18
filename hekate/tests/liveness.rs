@@ -4,14 +4,18 @@
 
 use hekate::math::Block128;
 use hekate_aes::{Aes128Chiplet, Aes256Chiplet};
+use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_gadgets::{IntArithmeticChiplet, ModexpChiplet, RamChiplet, RomChiplet};
 use hekate_keccak::KeccakChiplet;
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaLevel};
 use hekate_pqc::mlkem::{MlKemChiplet, MlKemLevel};
 use hekate_program::chiplet::ChipletDef;
+use hekate_program::outer::TableShape;
 use hekate_program::{Air, FixedColumn};
 use hekate_sha2::Sha256Chiplet;
+
+const NUM_ROWS: usize = 256;
 
 type F = Block128;
 type Snapshot = (&'static str, errors::Result<Vec<ChipletDef<F>>>);
@@ -36,7 +40,7 @@ fn witness_selectors<A: Air<F>>(air: &A) -> Vec<String> {
 }
 
 fn shipped_tables() -> Vec<Snapshot> {
-    let num_rows = 256;
+    let num_rows = NUM_ROWS;
 
     vec![
         (
@@ -109,5 +113,46 @@ fn every_bus_selector_is_fixed_or_absent() {
         hits.is_empty(),
         "witness bus selectors:\n{}",
         hits.join("\n")
+    );
+}
+
+#[test]
+fn shipped_tables_fit_outer_statement() {
+    let config = Config::prod();
+    let blind_units = config.blind_units();
+    let num_vars = NUM_ROWS.trailing_zeros() as usize;
+
+    let mut per_table = Vec::new();
+    let mut mul_wires = 0;
+    let mut masked_scalars = 0;
+
+    for (label, snapshot) in shipped_tables() {
+        let defs = match snapshot {
+            Ok(defs) => defs,
+            Err(e) => panic!("{label}: snapshot rejected: {e}"),
+        };
+
+        let mut table_wires = 0;
+        for def in &defs {
+            let ast = def.constraint_ast();
+            let shape = TableShape::from_air(def, num_vars, &ast).unwrap();
+
+            table_wires += shape.mul_wires();
+            masked_scalars += shape.masked_scalars(blind_units);
+        }
+
+        mul_wires += table_wires;
+
+        per_table.push(format!("{label}: {table_wires}"));
+    }
+
+    let field_bits = size_of::<F>() * 8;
+
+    assert!(
+        config
+            .outer_geom(masked_scalars, mul_wires, field_bits)
+            .is_ok(),
+        "{mul_wires} mul wires exceed the outer statement:\n{}",
+        per_table.join("\n"),
     );
 }

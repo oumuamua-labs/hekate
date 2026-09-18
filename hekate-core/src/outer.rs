@@ -198,30 +198,21 @@ impl Config {
     }
 
     /// Query term only; pair with [`Config::outer_field_term_bits`].
-    /// Unique-decoding regime: proximity `e <= (n - k) / 3`,
-    /// interleaved test base `(2n + k) / 3n`, linear and quadratic test
-    /// base `(n + 5k) / 3n`, each raised to `t` (Ligero 2017 Fig 8-11).
+    /// Ligero journal Lemmas 4.6 and 4.10: at `e = (n - 2k) / 2`
+    /// interleaved `(n - e) / n` meets quadratic `(e + 2k) / n`.
     pub fn outer_security_bits(&self, field_bits: usize, geom: &OuterGeometry) -> usize {
         let n = geom.domain_len as u128;
         let k = geom.code_len as u128;
 
-        let interleaved = log2_ratio_fixed(3 * n, 2 * n + k);
-        let quadratic = log2_ratio_fixed(3 * n, n + 5 * k);
-
-        let per_query = interleaved.min(quadratic);
+        let per_query = log2_ratio_fixed(2 * n, n + 2 * k);
         let bits = ((geom.queries as u128 * per_query) >> LOG2_FRAC_BITS) as usize;
 
         bits.min(field_bits)
     }
 
-    /// Ligero 2017 Lemma 4.2's additive
-    /// term `(e + 1) / |F|`, in bits.
+    /// Ligero journal Lemma 4.6's additive term `n / |F|`, in bits.
     pub fn outer_field_term_bits(&self, field_bits: usize, geom: &OuterGeometry) -> usize {
-        let n = geom.domain_len as u128;
-        let k = geom.code_len as u128;
-        let e = (n.saturating_sub(k)) / 3;
-
-        field_bits.saturating_sub((e + 1).next_power_of_two().ilog2() as usize)
+        field_bits.saturating_sub(geom.domain_len.next_power_of_two().ilog2() as usize)
     }
 
     pub fn check_outer_security(
@@ -252,6 +243,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MIN_PRODUCTION_BITS;
 
     const FIELD_BITS: usize = 128;
 
@@ -338,12 +330,36 @@ mod tests {
         let geom = cfg.outer_geom(12_000, 20_000, FIELD_BITS).unwrap();
 
         let thinner = OuterGeometry {
-            queries: 236,
+            queries: 154,
             ..geom
         };
 
         assert!(cfg.outer_security_bits(FIELD_BITS, &thinner) < 128);
         assert!(cfg.outer_security_bits(FIELD_BITS, &geom) >= 128);
+    }
+
+    /// `128 - log2(2^18) = MIN_PRODUCTION_BITS` is the binding term;
+    /// one more mul wire doubles the domain and loses a bit.
+    #[test]
+    fn field_term_caps_outer_statement() {
+        let cfg = Config::prod();
+
+        let largest = cfg.outer_geom(12_000, 173_098, FIELD_BITS).unwrap();
+
+        assert_eq!(largest.domain_len, 1 << 18);
+        assert_eq!(
+            cfg.outer_field_term_bits(FIELD_BITS, &largest),
+            MIN_PRODUCTION_BITS
+        );
+
+        let doubled = OuterGeometry {
+            domain_len: 1 << 19,
+            ..largest
+        };
+
+        assert!(doubled.domain_len.ilog2() <= MAX_OUTER_DOMAIN_LOG2);
+        assert!(cfg.outer_field_term_bits(FIELD_BITS, &doubled) < MIN_PRODUCTION_BITS);
+        assert!(cfg.outer_geom(12_000, 173_099, FIELD_BITS).is_err());
     }
 
     #[test]
