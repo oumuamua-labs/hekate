@@ -420,9 +420,9 @@ impl<F: HardwareField> FixedShape<F> {
         }
     }
 
-    /// Shape value at integer row `row`. O(1);
-    /// prefer over `evaluate` at a vertex,
-    /// which is O(N) for `Dense`.
+    /// Shape value at integer row `row`. O(1); prefer over `evaluate`
+    /// at a vertex, which is O(N) for `Dense`. `Segments` unvalidated
+    /// by `validate_fixed_columns` diverge from `evaluate`.
     pub fn value_at_row(&self, row: usize, num_vars: usize) -> Flat<F> {
         let one = Flat::from_raw(F::ONE);
         let zero = Flat::from_raw(F::ZERO);
@@ -469,12 +469,18 @@ impl<F: HardwareField> FixedShape<F> {
                 values,
             } => cadence_value_at(row, *stride, *count, *origin, values),
             FixedShape::Segments(segments) => {
-                let mut acc = zero;
-                for seg in segments {
-                    acc += cadence_value_at(row, seg.stride, seg.count, seg.origin, &seg.values);
-                }
+                // validate_shape rejects unsorted or overlapping spans:
+                // at most one covers a row.
+                let at = segments.partition_point(|seg| seg.origin <= row);
 
-                acc
+                match at.checked_sub(1) {
+                    Some(i) => {
+                        let seg = &segments[i];
+
+                        cadence_value_at(row, seg.stride, seg.count, seg.origin, &seg.values)
+                    }
+                    None => zero,
+                }
             }
         }
     }
