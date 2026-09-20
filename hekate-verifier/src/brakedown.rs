@@ -16,11 +16,13 @@ use tracing::instrument;
 
 pub type OpenedRows<'a> = &'a [Vec<u8>];
 
-/// Distinct opened columns plus the per-query slot map.
-/// `slot_map[q]` indexes `columns` for the q-th query.
-pub struct VerifiedOpenings<'a> {
-    pub columns: OpenedRows<'a>,
+/// One eval argument's Fiat-Shamir column queries;
+/// `slot_map[q]` indexes `distinct` for the q-th query.
+pub struct QuerySet {
+    pub indices: Vec<usize>,
+    pub distinct: Vec<usize>,
     pub slot_map: Vec<usize>,
+    pub encoded_width: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -32,23 +34,19 @@ impl<F, H: Hasher> BrakedownVerifier<F, H>
 where
     F: HardwareField + PackableField + From<Block8> + From<u128>,
 {
-    /// Verifies the Brakedown LDT opening: hashes each
-    /// distinct opened column to a leaf and replays one
-    /// octopus multiproof against the commitment root.
-    /// Returns the columns plus a per-query slot map.
-    #[instrument(skip_all, name = "Brakedown::verify")]
-    pub fn verify<'a>(
-        commitment: &BrakedownCommitment,
-        proof: &'a BrakedownProof<F>,
+    /// Draws `num_queries` columns of the codeword domain;
+    /// every tree of the table opens at this one set.
+    #[instrument(skip_all, name = "Brakedown::draw_queries")]
+    pub fn draw_queries(
         transcript: &mut Transcript<H>,
         config: &Config,
         split_vars: usize,
-    ) -> errors::Result<VerifiedOpenings<'a>> {
+    ) -> errors::Result<QuerySet> {
         let grid_cols = 1 << split_vars;
         let encoded_width = config.encoded_width(grid_cols);
         let num_queries = config.num_queries;
 
-        let mut random_indices = Vec::with_capacity(num_queries);
+        let mut indices = Vec::with_capacity(num_queries);
         for _ in 0..num_queries {
             let bytes = transcript.challenge_field::<F>(b"idx_query")?.to_bytes();
 
@@ -57,14 +55,45 @@ where
                 rng_val |= (b as u64) << (8 * k);
             }
 
-            random_indices.push((rng_val % (encoded_width as u64)) as usize);
+            indices.push((rng_val % (encoded_width as u64)) as usize);
         }
 
         // One opened column and one octopus leaf
         // per distinct queried index, ascending.
-        let mut distinct = random_indices.clone();
+        let mut distinct = indices.clone();
         distinct.sort_unstable();
         distinct.dedup();
+
+        let mut slot_map = Vec::with_capacity(num_queries);
+        for col_idx in &indices {
+            let slot = distinct
+                .binary_search(col_idx)
+                .map_err(|_| errors::Error::Protocol {
+                    protocol: "brakedown",
+                    message: "query index missing from distinct set",
+                })?;
+
+            slot_map.push(slot);
+        }
+
+        Ok(QuerySet {
+            indices,
+            distinct,
+            slot_map,
+            encoded_width,
+        })
+    }
+
+    /// Verifies one tree's opening at the drawn queries:
+    /// hashes each distinct opened column to a leaf and
+    /// replays the octopus multiproof against the root.
+    #[instrument(skip_all, name = "Brakedown::verify_opening")]
+    pub fn verify_opening<'a>(
+        commitment: &BrakedownCommitment,
+        proof: &'a BrakedownProof<F>,
+        queries: &QuerySet,
+    ) -> errors::Result<OpenedRows<'a>> {
+        let distinct = &queries.distinct;
 
         if proof.opened_columns.len() != distinct.len() {
             return Err(errors::Error::Protocol {
@@ -91,7 +120,7 @@ where
             .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
             .collect();
 
-        let padded_leaves = encoded_width.next_power_of_two();
+        let padded_leaves = queries.encoded_width.next_power_of_two();
 
         if !MerkleTree::<F, H>::verify_batch(
             &commitment.root,
@@ -105,22 +134,7 @@ where
             });
         }
 
-        let mut slot_map = Vec::with_capacity(num_queries);
-        for &col_idx in &random_indices {
-            let slot = distinct
-                .binary_search(&col_idx)
-                .map_err(|_| errors::Error::Protocol {
-                    protocol: "brakedown",
-                    message: "query index missing from distinct set",
-                })?;
-
-            slot_map.push(slot);
-        }
-
-        Ok(VerifiedOpenings {
-            columns: &proof.opened_columns,
-            slot_map,
-        })
+        Ok(&proof.opened_columns)
     }
 }
 
@@ -160,7 +174,6 @@ mod tests {
             config.num_queries,
             config.ldt_support_size,
             128,
-            1,
         );
 
         let grid_cols = 1 << split_vars;
@@ -241,20 +254,14 @@ mod tests {
 
         // 4. Verify
         let mut verifier_transcript = Transcript::<H>::new(b"test_brakedown");
-        let result = BrakedownVerifier::<F, H>::verify(
-            &commitment,
-            &proof,
-            &mut verifier_transcript,
-            &config,
-            split_vars,
-        );
+        let queries =
+            BrakedownVerifier::<F, H>::draw_queries(&mut verifier_transcript, &config, split_vars)
+                .unwrap();
+        let result = BrakedownVerifier::<F, H>::verify_opening(&commitment, &proof, &queries);
 
         assert!(result.is_ok(), "Valid Brakedown proof should verify");
-
-        let openings = result.unwrap();
-
-        assert_eq!(openings.columns.len(), distinct.len());
-        assert_eq!(openings.slot_map.len(), config.num_queries);
+        assert_eq!(result.unwrap().len(), distinct.len());
+        assert_eq!(queries.slot_map.len(), config.num_queries);
     }
 
     #[test]
@@ -271,7 +278,6 @@ mod tests {
             config.num_queries,
             config.ldt_support_size,
             128,
-            1,
         );
         let grid_cols = 1 << split_vars;
         let encoded_width = config.encoded_width(grid_cols);
@@ -312,13 +318,9 @@ mod tests {
         let proof = BrakedownProof::new(vec![vec![4u8, 5, 6]; distinct.len()], Vec::new());
 
         let mut transcript = Transcript::<H>::new(b"test");
-        let result = BrakedownVerifier::<F, H>::verify(
-            &commitment,
-            &proof,
-            &mut transcript,
-            &config,
-            split_vars,
-        );
+        let queries =
+            BrakedownVerifier::<F, H>::draw_queries(&mut transcript, &config, split_vars).unwrap();
+        let result = BrakedownVerifier::<F, H>::verify_opening(&commitment, &proof, &queries);
 
         assert!(result.is_err(), "Tampered/Invalid proof should fail");
     }

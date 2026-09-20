@@ -587,14 +587,14 @@ fn h_eval_corruption_after_sumcheck_rejected() {
 // =====================================================
 
 #[test]
-fn h_eval_proof_omitted_on_bused_table_rejected() {
+fn h_opening_omitted_on_bused_table_rejected() {
     let (air, instance, config, mut proof) = multibus_proof();
 
-    let aux = &mut proof.chiplet_logup_aux[0];
-    assert!(aux.h_commitment.is_some() && aux.h_eval_proof.is_some());
+    assert!(proof.chiplet_logup_aux[0].h_commitment.is_some());
+    assert!(proof.chiplet_eval_proofs[0].h_ldt_proof.is_some());
 
     // Keep h_commitment, the transcript stays synced
-    aux.h_eval_proof = None;
+    proof.chiplet_eval_proofs[0].h_ldt_proof = None;
 
     assert!(
         verify_rejects(&air, &instance, &config, &proof),
@@ -816,4 +816,62 @@ fn zero_bus_main_injected_claimed_sum_rejected() {
              would enter cross-bus matching"
         ),
     }
+}
+
+// =====================================================
+// h binding present on a bus-free table
+// (presence check, opposite arm)
+// =====================================================
+
+#[test]
+fn h_opening_on_bus_free_table_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof();
+
+    assert!(proof.main_logup_aux.h_commitment.is_none());
+    assert!(proof.eval_proof.h_ldt_proof.is_none());
+
+    let borrowed = proof.chiplet_eval_proofs[0]
+        .h_ldt_proof
+        .clone()
+        .expect("a bused chiplet carries an h opening");
+
+    proof.eval_proof.h_ldt_proof = Some(borrowed);
+
+    assert!(
+        verify_rejects(&air, &instance, &config, &proof),
+        "SECURITY FAILURE: bus-free table with an h opening accepted"
+    );
+}
+
+// =====================================================
+// Corrupted Merkle path on the h and trace openings
+// =====================================================
+
+#[test]
+fn h_opening_batch_path_tamper_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof();
+
+    let opening = proof.chiplet_eval_proofs[0]
+        .h_ldt_proof
+        .as_mut()
+        .expect("a bused chiplet carries an h opening");
+
+    assert!(!opening.batch_path.is_empty());
+
+    opening.batch_path[0][0] ^= 1;
+
+    assert!(verify_rejects(&air, &instance, &config, &proof));
+}
+
+#[test]
+fn trace_opening_batch_path_tamper_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof();
+
+    let opening = &mut proof.chiplet_eval_proofs[0].ldt_proof;
+
+    assert!(!opening.batch_path.is_empty());
+
+    opening.batch_path[0][0] ^= 1;
+
+    assert!(verify_rejects(&air, &instance, &config, &proof));
 }

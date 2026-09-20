@@ -740,6 +740,134 @@ pub mod hekate {
                 ds.finish()
             }
         }
+        pub enum MasterEvalsOffset {}
+        #[derive(Copy, Clone, PartialEq)]
+
+        pub struct MasterEvals<'a> {
+            pub _tab: ::flatbuffers::Table<'a>,
+        }
+
+        impl<'a> ::flatbuffers::Follow<'a> for MasterEvals<'a> {
+            type Inner = MasterEvals<'a>;
+            #[inline]
+            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+                Self {
+                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
+                }
+            }
+        }
+
+        impl<'a> MasterEvals<'a> {
+            pub const VT_WHOLE: ::flatbuffers::VOffsetT = 4;
+            pub const VT_RING: ::flatbuffers::VOffsetT = 6;
+
+            #[inline]
+            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+                MasterEvals { _tab: table }
+            }
+            #[allow(unused_mut)]
+            pub fn create<
+                'bldr: 'args,
+                'args: 'mut_bldr,
+                'mut_bldr,
+                A: ::flatbuffers::Allocator + 'bldr,
+            >(
+                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+                args: &'args MasterEvalsArgs<'args>,
+            ) -> ::flatbuffers::WIPOffset<MasterEvals<'bldr>> {
+                let mut builder = MasterEvalsBuilder::new(_fbb);
+                if let Some(x) = args.ring {
+                    builder.add_ring(x);
+                }
+                if let Some(x) = args.whole {
+                    builder.add_whole(x);
+                }
+                builder.finish()
+            }
+
+            #[inline]
+            pub fn whole(&self) -> Option<&'a Block128> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe { self._tab.get::<Block128>(MasterEvals::VT_WHOLE, None) }
+            }
+            #[inline]
+            pub fn ring(&self) -> Option<&'a Block128> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe { self._tab.get::<Block128>(MasterEvals::VT_RING, None) }
+            }
+        }
+
+        impl ::flatbuffers::Verifiable for MasterEvals<'_> {
+            #[inline]
+            fn run_verifier(
+                v: &mut ::flatbuffers::Verifier,
+                pos: usize,
+            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+                v.visit_table(pos)?
+                    .visit_field::<Block128>("whole", Self::VT_WHOLE, false)?
+                    .visit_field::<Block128>("ring", Self::VT_RING, false)?
+                    .finish();
+                Ok(())
+            }
+        }
+        pub struct MasterEvalsArgs<'a> {
+            pub whole: Option<&'a Block128>,
+            pub ring: Option<&'a Block128>,
+        }
+        impl<'a> Default for MasterEvalsArgs<'a> {
+            #[inline]
+            fn default() -> Self {
+                MasterEvalsArgs {
+                    whole: None,
+                    ring: None,
+                }
+            }
+        }
+
+        pub struct MasterEvalsBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+        }
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MasterEvalsBuilder<'a, 'b, A> {
+            #[inline]
+            pub fn add_whole(&mut self, whole: &Block128) {
+                self.fbb_
+                    .push_slot_always::<&Block128>(MasterEvals::VT_WHOLE, whole);
+            }
+            #[inline]
+            pub fn add_ring(&mut self, ring: &Block128) {
+                self.fbb_
+                    .push_slot_always::<&Block128>(MasterEvals::VT_RING, ring);
+            }
+            #[inline]
+            pub fn new(
+                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            ) -> MasterEvalsBuilder<'a, 'b, A> {
+                let start = _fbb.start_table();
+                MasterEvalsBuilder {
+                    fbb_: _fbb,
+                    start_: start,
+                }
+            }
+            #[inline]
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<MasterEvals<'a>> {
+                let o = self.fbb_.end_table(self.start_);
+                ::flatbuffers::WIPOffset::new(o.value())
+            }
+        }
+
+        impl ::core::fmt::Debug for MasterEvals<'_> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut ds = f.debug_struct("MasterEvals");
+                ds.field("whole", &self.whole());
+                ds.field("ring", &self.ring());
+                ds.finish()
+            }
+        }
         pub enum PointEvaluationOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -913,7 +1041,8 @@ pub mod hekate {
             pub const VT_LDT_PROOF: ::flatbuffers::VOffsetT = 6;
             pub const VT_POINT_EVALUATION: ::flatbuffers::VOffsetT = 8;
             pub const VT_TENSOR_VEC: ::flatbuffers::VOffsetT = 10;
-            pub const VT_TENSOR_VEC_RING: ::flatbuffers::VOffsetT = 12;
+            pub const VT_MASTER_EVALS: ::flatbuffers::VOffsetT = 12;
+            pub const VT_H_LDT_PROOF: ::flatbuffers::VOffsetT = 14;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -930,8 +1059,11 @@ pub mod hekate {
                 args: &'args EvalBatchProofArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<EvalBatchProof<'bldr>> {
                 let mut builder = EvalBatchProofBuilder::new(_fbb);
-                if let Some(x) = args.tensor_vec_ring {
-                    builder.add_tensor_vec_ring(x);
+                if let Some(x) = args.h_ldt_proof {
+                    builder.add_h_ldt_proof(x);
+                }
+                if let Some(x) = args.master_evals {
+                    builder.add_master_evals(x);
                 }
                 if let Some(x) = args.tensor_vec {
                     builder.add_tensor_vec(x);
@@ -1001,14 +1133,27 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn tensor_vec_ring(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn master_evals(&self) -> Option<MasterEvals<'a>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
-                            EvalBatchProof::VT_TENSOR_VEC_RING,
+                        .get::<::flatbuffers::ForwardsUOffset<MasterEvals>>(
+                            EvalBatchProof::VT_MASTER_EVALS,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn h_ldt_proof(&self) -> Option<BrakedownProof<'a>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<BrakedownProof>>(
+                            EvalBatchProof::VT_H_LDT_PROOF,
                             None,
                         )
                 }
@@ -1026,7 +1171,8 @@ pub mod hekate {
      .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownProof>>("ldt_proof", Self::VT_LDT_PROOF, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<PointEvaluation>>("point_evaluation", Self::VT_POINT_EVALUATION, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("tensor_vec", Self::VT_TENSOR_VEC, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("tensor_vec_ring", Self::VT_TENSOR_VEC_RING, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<MasterEvals>>("master_evals", Self::VT_MASTER_EVALS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownProof>>("h_ldt_proof", Self::VT_H_LDT_PROOF, false)?
      .finish();
                 Ok(())
             }
@@ -1036,8 +1182,8 @@ pub mod hekate {
             pub ldt_proof: Option<::flatbuffers::WIPOffset<BrakedownProof<'a>>>,
             pub point_evaluation: Option<::flatbuffers::WIPOffset<PointEvaluation<'a>>>,
             pub tensor_vec: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
-            pub tensor_vec_ring:
-                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub master_evals: Option<::flatbuffers::WIPOffset<MasterEvals<'a>>>,
+            pub h_ldt_proof: Option<::flatbuffers::WIPOffset<BrakedownProof<'a>>>,
         }
         impl<'a> Default for EvalBatchProofArgs<'a> {
             #[inline]
@@ -1047,7 +1193,8 @@ pub mod hekate {
                     ldt_proof: None,
                     point_evaluation: None,
                     tensor_vec: None,
-                    tensor_vec_ring: None,
+                    master_evals: None,
+                    h_ldt_proof: None,
                 }
             }
         }
@@ -1101,14 +1248,26 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_tensor_vec_ring(
+            pub fn add_master_evals(
                 &mut self,
-                tensor_vec_ring: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                master_evals: ::flatbuffers::WIPOffset<MasterEvals<'b>>,
             ) {
-                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    EvalBatchProof::VT_TENSOR_VEC_RING,
-                    tensor_vec_ring,
-                );
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<MasterEvals>>(
+                        EvalBatchProof::VT_MASTER_EVALS,
+                        master_evals,
+                    );
+            }
+            #[inline]
+            pub fn add_h_ldt_proof(
+                &mut self,
+                h_ldt_proof: ::flatbuffers::WIPOffset<BrakedownProof<'b>>,
+            ) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<BrakedownProof>>(
+                        EvalBatchProof::VT_H_LDT_PROOF,
+                        h_ldt_proof,
+                    );
             }
             #[inline]
             pub fn new(
@@ -1134,7 +1293,8 @@ pub mod hekate {
                 ds.field("ldt_proof", &self.ldt_proof());
                 ds.field("point_evaluation", &self.point_evaluation());
                 ds.field("tensor_vec", &self.tensor_vec());
-                ds.field("tensor_vec_ring", &self.tensor_vec_ring());
+                ds.field("master_evals", &self.master_evals());
+                ds.field("h_ldt_proof", &self.h_ldt_proof());
                 ds.finish()
             }
         }
@@ -1294,7 +1454,6 @@ pub mod hekate {
             pub const VT_H_EVALS: ::flatbuffers::VOffsetT = 4;
             pub const VT_CLAIMED_SUMS: ::flatbuffers::VOffsetT = 6;
             pub const VT_H_COMMITMENT: ::flatbuffers::VOffsetT = 8;
-            pub const VT_H_EVAL_PROOF: ::flatbuffers::VOffsetT = 10;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1311,9 +1470,6 @@ pub mod hekate {
                 args: &'args LogUpAuxArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<LogUpAux<'bldr>> {
                 let mut builder = LogUpAuxBuilder::new(_fbb);
-                if let Some(x) = args.h_eval_proof {
-                    builder.add_h_eval_proof(x);
-                }
                 if let Some(x) = args.h_commitment {
                     builder.add_h_commitment(x);
                 }
@@ -1367,19 +1523,6 @@ pub mod hekate {
                         )
                 }
             }
-            #[inline]
-            pub fn h_eval_proof(&self) -> Option<EvalBatchProof<'a>> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<EvalBatchProof>>(
-                            LogUpAux::VT_H_EVAL_PROOF,
-                            None,
-                        )
-                }
-            }
         }
 
         impl ::flatbuffers::Verifiable for LogUpAux<'_> {
@@ -1400,11 +1543,6 @@ pub mod hekate {
                         Self::VT_H_COMMITMENT,
                         false,
                     )?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<EvalBatchProof>>(
-                        "h_eval_proof",
-                        Self::VT_H_EVAL_PROOF,
-                        false,
-                    )?
                     .finish();
                 Ok(())
             }
@@ -1421,7 +1559,6 @@ pub mod hekate {
                 >,
             >,
             pub h_commitment: Option<::flatbuffers::WIPOffset<BrakedownCommitment<'a>>>,
-            pub h_eval_proof: Option<::flatbuffers::WIPOffset<EvalBatchProof<'a>>>,
         }
         impl<'a> Default for LogUpAuxArgs<'a> {
             #[inline]
@@ -1430,7 +1567,6 @@ pub mod hekate {
                     h_evals: None,
                     claimed_sums: None,
                     h_commitment: None,
-                    h_eval_proof: None,
                 }
             }
         }
@@ -1474,17 +1610,6 @@ pub mod hekate {
                     );
             }
             #[inline]
-            pub fn add_h_eval_proof(
-                &mut self,
-                h_eval_proof: ::flatbuffers::WIPOffset<EvalBatchProof<'b>>,
-            ) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<EvalBatchProof>>(
-                        LogUpAux::VT_H_EVAL_PROOF,
-                        h_eval_proof,
-                    );
-            }
-            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> LogUpAuxBuilder<'a, 'b, A> {
@@ -1507,7 +1632,6 @@ pub mod hekate {
                 ds.field("h_evals", &self.h_evals());
                 ds.field("claimed_sums", &self.claimed_sums());
                 ds.field("h_commitment", &self.h_commitment());
-                ds.field("h_eval_proof", &self.h_eval_proof());
                 ds.finish()
             }
         }

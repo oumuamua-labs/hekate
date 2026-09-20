@@ -151,7 +151,7 @@ impl Config {
             num_queries: 176,
             ldt_support_size: 200,
             min_security_bits: MIN_PRODUCTION_BITS,
-            outer_queries: 240,
+            outer_queries: 155,
             zero_knowledge: true,
         }
     }

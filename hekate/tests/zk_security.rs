@@ -158,7 +158,6 @@ fn noise_entropy_inspection() {
             config.num_queries,
             config.ldt_support_size,
             bytes_per_row,
-            1,
         );
 
         1 << (num_vars - split_vars)

@@ -22,7 +22,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
 use hekate_program::outer::OuterStatement;
-use hekate_program::{Air, FixedShape, Program, ProgramInstance, ProgramWitness};
+use hekate_program::{FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 
@@ -30,6 +30,17 @@ type F = Block128;
 type H = DefaultHasher;
 
 const NUM_VARS: usize = 4;
+
+#[derive(Default)]
+struct Census {
+    padded: usize,
+    running_claim: usize,
+    fold: usize,
+    master_evals: usize,
+    outer: usize,
+    challenge_point: usize,
+    opened_bytes: usize,
+}
 
 fn step_air(num_rows: usize) -> CircuitProgram<F> {
     let mut cx = Circuit::<F>::new("Step", num_rows).unwrap();
@@ -94,17 +105,6 @@ fn keccak_cpu_program(num_rows: usize, chiplet_rows: usize) -> CircuitProgram<F>
     cx.compile().unwrap()
 }
 
-#[derive(Default)]
-struct Census {
-    padded: usize,
-    running_claim: usize,
-    whole_fold: usize,
-    ring_fold: usize,
-    outer: usize,
-    challenge_point: usize,
-    opened_bytes: usize,
-}
-
 fn config() -> Config {
     Config {
         num_queries: 4,
@@ -146,18 +146,22 @@ fn eval_batch(proof: &EvalBatchProof<F>, census: &mut Census) {
         ldt_proof,
         point_evaluation,
         tensor_vec,
-        tensor_vec_ring,
+        master_evals,
+        h_ldt_proof,
     } = proof;
 
     let rounds = sumcheck(sumcheck_proof, census);
 
     assert_eq!(point_evaluation.0.len(), rounds);
 
-    census.opened_bytes += ldt_proof.opened_columns.iter().map(Vec::len).sum::<usize>();
+    for opening in core::iter::once(ldt_proof).chain(h_ldt_proof.iter()) {
+        census.opened_bytes += opening.opened_columns.iter().map(Vec::len).sum::<usize>();
+    }
+
     census.challenge_point += point_evaluation.0.len();
     census.padded += point_evaluation.1.len();
-    census.whole_fold += tensor_vec.len();
-    census.ring_fold += tensor_vec_ring.len();
+    census.fold += tensor_vec.len();
+    census.master_evals += 2 * usize::from(master_evals.is_some());
 }
 
 fn logup(aux: &LogUpAux<F>, census: &mut Census) {
@@ -165,14 +169,9 @@ fn logup(aux: &LogUpAux<F>, census: &mut Census) {
         h_evals,
         claimed_sums,
         h_commitment: _,
-        h_eval_proof,
     } = aux;
 
     census.padded += h_evals.len() + claimed_sums.len();
-
-    if let Some(proof) = h_eval_proof {
-        eval_batch(proof, census);
-    }
 }
 
 fn outer(proof: &OuterProof<F>, census: &mut Census) {
@@ -232,18 +231,6 @@ fn census(proof: &InnerProof<F>) -> Census {
     census
 }
 
-/// The `h` opening's bus claims ride the `h_eval`
-/// entries, hence one repeat per bus of a bus table.
-fn pad_reuse<P: Program<F>>(program: &P) -> usize {
-    program
-        .chiplet_defs()
-        .unwrap()
-        .iter()
-        .map(|def| def.permutation_checks().len())
-        .sum::<usize>()
-        + program.permutation_checks().len()
-}
-
 fn pad_budget<P: Program<F> + Sync>(program: &P, chiplet_num_vars: &[usize]) -> usize {
     let defs = program.chiplet_defs().unwrap();
 
@@ -256,7 +243,7 @@ fn pad_budget<P: Program<F> + Sync>(program: &P, chiplet_num_vars: &[usize]) -> 
     )
     .unwrap();
 
-    statement.masked_scalars + pad_reuse(program)
+    statement.masked_scalars
 }
 
 #[test]
@@ -304,9 +291,9 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
 
     assert_eq!(counted.padded, pad_budget(&air, &[]));
     assert_eq!(counted.running_claim, 2);
-    assert_eq!(counted.ring_fold, 0);
+    assert_eq!(counted.master_evals, 0);
     assert!(counted.padded > 0);
-    assert!(counted.whole_fold > 0);
+    assert!(counted.fold > 0);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
     assert!(counted.opened_bytes > 0);
@@ -375,12 +362,11 @@ fn every_scalar_of_bus_proof_is_accounted() {
     let counted = census(&proof);
     let budget = pad_budget(&air, &[NUM_VARS]);
 
-    assert!(pad_reuse(&air) > 0);
     assert_eq!(counted.padded, budget);
-    assert_eq!(counted.running_claim, 6);
+    assert_eq!(counted.running_claim, 4);
     assert!(counted.padded > 0);
-    assert!(counted.whole_fold > 0);
-    assert!(counted.ring_fold > 0);
+    assert!(counted.fold > 0);
+    assert!(counted.master_evals > 0);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
     assert!(counted.opened_bytes > 0);
@@ -462,10 +448,10 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
     let counted = census(&proof);
 
     assert_eq!(counted.padded, pad_budget(&air, &[CHIPLET_VARS]));
-    assert_eq!(counted.running_claim, 6);
+    assert_eq!(counted.running_claim, 4);
     assert!(counted.padded > 0);
-    assert!(counted.whole_fold > 0);
-    assert!(counted.ring_fold > 0);
+    assert!(counted.fold > 0);
+    assert!(counted.master_evals > 0);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
     assert!(counted.opened_bytes > 0);

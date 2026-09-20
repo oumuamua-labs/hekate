@@ -571,7 +571,7 @@ fn resolve_source<F: TraceCompatibleField>(
     current_beta: Flat<F>,
 ) -> (Flat<F>, Flat<F>) {
     match source {
-        Source::Column(col_idx) => {
+        Source::Column(col_idx) | Source::PhaseColumn(col_idx) => {
             let val = row[*col_idx];
             (val * current_beta, current_beta * beta)
         }
@@ -1146,7 +1146,9 @@ fn separating_clock_mask(spec: &PermutationCheckSpec, num_vars: usize) -> Option
         let (lo, hi) = match source {
             Source::RowIndexLeBytes(n) => (0, 8 * (*n).min(8)),
             Source::RowIndexByte(k) => (8 * *k, 8 * *k + 8),
-            Source::Column(_) | Source::Columns(_) | Source::Const(_) => continue,
+            Source::Column(_) | Source::Columns(_) | Source::Const(_) | Source::PhaseColumn(_) => {
+                continue;
+            }
         };
 
         has_clock = true;

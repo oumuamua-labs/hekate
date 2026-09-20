@@ -110,7 +110,7 @@ impl TableShape {
         }
 
         let entries = air.virtual_expander().map(|e| e.expansion_entries());
-        let plan = RingSwitchPlan::new(air.column_layout(), entries.as_deref(), 0)?;
+        let plan = RingSwitchPlan::new(air.column_layout(), entries.as_deref(), 0, 0)?;
 
         Ok(Self {
             num_vars,
@@ -122,15 +122,15 @@ impl TableShape {
         })
     }
 
-    /// Eval claims per half: virtual columns, whole
-    /// blind units, the ring blind unit's planes.
+    /// Eval claims per half: virtual columns, whole blind
+    /// units, the ring blind unit's planes, one `h` per bus.
     pub fn eval_claims(&self, blinding_columns: usize) -> usize {
         let ring_blind = match self.ring_units && blinding_columns > 0 {
             true => RING_BLIND_BITS,
             false => 0,
         };
 
-        self.num_columns + blinding_columns + ring_blind
+        self.num_columns + blinding_columns + ring_blind + self.num_buses
     }
 
     /// Final sumcheck values are the masked running
@@ -140,14 +140,7 @@ impl TableShape {
         let claims = 2 * self.eval_claims(blinding_columns);
         let trace_eval = 2 * self.num_vars;
 
-        // The h opening's bus claims
-        // reuse the h_eval pad entries.
-        let h_open = match self.num_buses {
-            0 => 0,
-            _ => blinding_columns + 2 * self.num_vars,
-        };
-
-        2 * self.num_buses + zerocheck + h_open + claims + trace_eval
+        2 * self.num_buses + zerocheck + claims + trace_eval
     }
 
     /// Each bus contributes one `h · key` product;
@@ -311,7 +304,6 @@ pub struct TableRecord<F> {
     pub fixed: Vec<(u32, u32, Flat<F>)>,
 
     pub trace_eval: EvalRecord<F>,
-    pub h_eval: Option<EvalRecord<F>>,
     pub gadget: Option<RingGadget<F>>,
 
     /// `(bus id, pad, masked claimed sum)` per bus.
@@ -387,7 +379,6 @@ pub struct TableInputs<'a, F: TowerField, A> {
 
     pub pads: TablePads,
     pub trace_eval: EvalRecord<F>,
-    pub h_eval: Option<EvalRecord<F>>,
     pub gadget: Option<RingGadget<F>>,
 }
 
@@ -559,7 +550,9 @@ where
         let mut sources = Vec::new();
         for (source, _) in &spec.sources {
             match source {
-                Source::Column(col) => sources.push(BusSource::Claim(*col as u32)),
+                Source::Column(col) | Source::PhaseColumn(col) => {
+                    sources.push(BusSource::Claim(*col as u32))
+                }
                 Source::Columns(indices) => {
                     sources.extend(indices.iter().map(|&col| BusSource::Claim(col as u32)));
                 }
@@ -632,7 +625,6 @@ where
         consistency,
         fixed,
         trace_eval: inputs.trace_eval,
-        h_eval: inputs.h_eval,
         gadget: inputs.gadget,
         claimed_sums: inputs
             .claimed_sums_masked
@@ -682,8 +674,25 @@ pub fn assemble<F: TowerField + HardwareField>(
             affine.push(fixed_column_row(pad, claim, public));
         }
 
-        for eval in core::iter::once(&record.trace_eval).chain(record.h_eval.iter()) {
-            affine.push(eval_final_row(&eval.mask_form, eval.claim_masked, eval.fin));
+        affine.push(eval_final_row(
+            &record.trace_eval.mask_form,
+            record.trace_eval.claim_masked,
+            record.trace_eval.fin,
+        ));
+
+        let half = (record.claims_masked.len() / 2) as u32;
+        let num_buses = record.consistency.buses.len() as u32;
+        let pad_first = record.consistency.pad_first;
+
+        for (k, bus) in record.consistency.buses.iter().enumerate() {
+            let claim = half - num_buses + k as u32;
+
+            affine.push(h_claim_pin_row(
+                bus.h_pad,
+                bus.h_masked,
+                pad_first + claim,
+                claim,
+            ));
         }
 
         if let Some(mut gadget) = record.gadget {
@@ -889,6 +898,23 @@ pub fn fixed_column_row<F: TowerField + HardwareField>(
         unknowns: vec![(Unknown::Pad(pad), one)],
         claims: vec![(claim, one)],
         constant: public,
+    }
+}
+
+/// `c[claim] = h_eval`: the eval argument's base `h`
+/// claim and the reported `h_eval` unmask to one value.
+pub fn h_claim_pin_row<F: TowerField + HardwareField>(
+    h_pad: u32,
+    h_masked: Flat<F>,
+    claim_pad: u32,
+    claim: u32,
+) -> AffineRow<F> {
+    let one = Flat::from_raw(F::ONE);
+
+    AffineRow {
+        unknowns: vec![(Unknown::Pad(h_pad), one), (Unknown::Pad(claim_pad), one)],
+        claims: vec![(claim, one)],
+        constant: h_masked,
     }
 }
 
@@ -1202,6 +1228,9 @@ mod tests {
     const BUS_H_PAD: u32 = 20;
     const BUS_PUBLIC: u128 = 77;
 
+    /// `half - num_buses` at `bus_record`'s `half = 2` and one bus.
+    const H_CLAIM: usize = 1;
+
     fn shape(num_vars: usize, num_columns: usize, degree: usize, buses: usize) -> TableShape {
         TableShape {
             num_vars,
@@ -1279,7 +1308,6 @@ mod tests {
                 claim_masked: mix(5),
                 fin: mix(6),
             },
-            h_eval: None,
             gadget: None,
             claimed_sums: vec![(String::from("bus"), 0, mix(7))],
             mul_wires,
@@ -1411,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn busless_table_pays_for_no_h_opening() {
+    fn busless_table_pays_for_no_h_claims() {
         let with_bus = shape(12, 100, 3, 1);
         let without = TableShape {
             num_buses: 0,
@@ -1420,11 +1448,11 @@ mod tests {
 
         let blind_units = 1;
         let claimed_sum_and_h_eval = 2;
-        let h_open = blind_units + 2 * 12;
+        let h_claim_halves = 2;
 
         assert_eq!(
             with_bus.masked_scalars(blind_units) - without.masked_scalars(blind_units),
-            claimed_sum_and_h_eval + h_open
+            claimed_sum_and_h_eval + h_claim_halves
         );
     }
 
@@ -1435,13 +1463,12 @@ mod tests {
         let blind_units = 1;
         let claimed_sums_and_h_evals = 2 * 3;
         let zerocheck_rounds = 12 * 5;
-        let h_open = blind_units + 2 * 12;
-        let claims = 2 * (1977 + blind_units);
+        let claims = 2 * (1977 + blind_units + 3);
         let trace_eval_rounds = 2 * 12;
 
         assert_eq!(
             s.masked_scalars(blind_units),
-            claimed_sums_and_h_evals + zerocheck_rounds + h_open + claims + trace_eval_rounds
+            claimed_sums_and_h_evals + zerocheck_rounds + claims + trace_eval_rounds
         );
     }
 
@@ -1701,5 +1728,49 @@ mod tests {
             sumcheck_mask_form(&initial, &round_refs, &challenges, degree),
             expected
         );
+    }
+
+    #[test]
+    fn h_claim_pin_row_ties_h_eval_to_committed_claim() {
+        let pad: Vec<Flat<F>> = (0..32).map(|i| mix(300 + i)).collect();
+        let one = Flat::from_raw(F::ONE);
+        let h = mix(400);
+        let h_masked = h + pad[BUS_H_PAD as usize];
+
+        let pin_form = [
+            (Unknown::Pad(BUS_H_PAD), one),
+            (Unknown::Pad(BUS_PAD_FIRST + H_CLAIM as u32), one),
+        ];
+
+        for (h_claim, holds) in [(h, true), (h + one, false)] {
+            let mut plain: Vec<Flat<F>> = (0..4).map(|i| mix(200 + i)).collect();
+            plain[H_CLAIM] = h_claim;
+
+            let claims_masked: Vec<Flat<F>> = plain
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| c + pad[BUS_PAD_FIRST as usize + i])
+                .collect();
+
+            let record = bus_record(claims_masked.clone(), h_masked, mix(9));
+            let statement = OuterStatement {
+                masked_scalars: 32,
+                mul_wires: record.mul_wires as usize,
+            };
+
+            let rows = assemble(vec![record], &statement).unwrap();
+            let pins: Vec<&AffineRow<F>> = rows
+                .affine
+                .iter()
+                .filter(|r| r.unknowns == pin_form)
+                .collect();
+
+            assert_eq!(pins.len(), 1, "one pin row per bus");
+            assert_eq!(pins[0].constant, h_masked + claims_masked[H_CLAIM]);
+
+            let left = pad[BUS_H_PAD as usize] + pad[BUS_PAD_FIRST as usize + H_CLAIM];
+
+            assert_eq!(left == pins[0].constant, holds);
+        }
     }
 }

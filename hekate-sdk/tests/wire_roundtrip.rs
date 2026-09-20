@@ -12,8 +12,8 @@
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::proofs::{
-    BrakedownCommitment, BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening,
-    OuterProof, SumcheckProof,
+    BrakedownCommitment, BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, MasterEvals,
+    OuterOpening, OuterProof, SumcheckProof,
 };
 use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
@@ -31,7 +31,7 @@ use hekate_program::constraint::{
 };
 use hekate_program::define_columns;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
+use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, ServiceSlot, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_sdk::{
     BundleProgram, DeserializedBundle, deserialize_bundle, deserialize_proof, serialize_bundle,
@@ -1416,7 +1416,116 @@ fn paired_lookup_spec_round_trips() {
 }
 
 // =================================================================
-// Proof wire round-trip (tensor_vec / tensor_vec_ring)
+// PhaseColumn round-trip
+// =================================================================
+
+define_columns! {
+    PhasedRtCols {
+        KEY: B32,
+        PHASE: B32,
+        SEL: Bit,
+    }
+}
+
+#[derive(Clone)]
+struct PhasedRtProgram;
+
+impl Air<F> for PhasedRtProgram {
+    fn num_columns(&self) -> usize {
+        PhasedRtCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(PhasedRtCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        let service = Service {
+            bus_id: "rt_phased_bus",
+            kind: BusKind::Permutation,
+            slots: vec![
+                ServiceSlot::Value(b"k_key"),
+                ServiceSlot::RequestIdxBytes { num_bytes: 4 },
+            ],
+            clock_waiver: None,
+        };
+
+        let spec = service
+            .request_phased(&[PhasedRtCols::KEY], PhasedRtCols::PHASE, PhasedRtCols::SEL)
+            .unwrap();
+
+        vec![("rt_phased_bus".into(), spec)]
+    }
+
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        vec![
+            FixedColumn::periodic(PhasedRtCols::PHASE, 2, vec![F::ZERO, F::ONE]),
+            FixedColumn::sparse(PhasedRtCols::SEL, vec![(0, F::ONE)]),
+        ]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+impl Program<F> for PhasedRtProgram {}
+
+#[test]
+fn phased_clock_spec_round_trips() {
+    let num_vars = 3;
+    let num_rows = 1 << num_vars;
+
+    let program = PhasedRtProgram;
+    let trace = TraceBuilder::new(&PhasedRtCols::build_layout(), num_vars)
+        .unwrap()
+        .build();
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::new(trace);
+    let config = Config::default();
+
+    let bytes = serialize_bundle(&program, &instance, &witness, &config).unwrap();
+    let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
+
+    assert_bundle_eq(&program, &restored, &witness, "phased_spec");
+
+    let (_, spec) = restored
+        .permutation_checks
+        .iter()
+        .find(|(id, _)| id == "rt_phased_bus")
+        .expect("phased bus must round-trip");
+
+    let sources: Vec<Source> = spec.sources.iter().map(|(s, _)| s.clone()).collect();
+
+    assert_eq!(
+        sources,
+        vec![
+            Source::Column(PhasedRtCols::KEY),
+            Source::RowIndexByte(0),
+            Source::RowIndexByte(1),
+            Source::RowIndexByte(2),
+            Source::PhaseColumn(PhasedRtCols::PHASE),
+        ],
+    );
+
+    let origin = program.permutation_checks();
+    let labels: Vec<&[u8]> = spec.sources.iter().map(|(_, l)| *l).collect();
+
+    assert_eq!(
+        labels,
+        origin[0]
+            .1
+            .sources
+            .iter()
+            .map(|(_, l)| *l)
+            .collect::<Vec<&[u8]>>(),
+    );
+}
+
+// =================================================================
+// Proof wire round-trip (tensor_vec / master_evals)
 // =================================================================
 
 fn empty_sumcheck() -> SumcheckProof<F> {
@@ -1426,13 +1535,18 @@ fn empty_sumcheck() -> SumcheckProof<F> {
     }
 }
 
-fn eval_proof_with(tensor_vec: Vec<F>, tensor_vec_ring: Vec<F>) -> EvalBatchProof<F> {
+fn eval_proof_with(
+    tensor_vec: Vec<F>,
+    master_evals: Option<MasterEvals<F>>,
+    h_ldt_proof: Option<BrakedownProof<F>>,
+) -> EvalBatchProof<F> {
     EvalBatchProof::new(
         empty_sumcheck(),
         BrakedownProof::new(vec![], vec![]),
         (vec![wide(1)], vec![wide(2), wide(3)]),
         tensor_vec,
-        tensor_vec_ring,
+        master_evals,
+        h_ldt_proof,
     )
 }
 
@@ -1445,9 +1559,14 @@ fn dummy_commitment() -> BrakedownCommitment {
 }
 
 #[test]
-fn proof_tensor_vec_ring_round_trips() {
-    let main_eval = eval_proof_with(vec![wide(1), wide(2)], vec![wide(10), wide(11), wide(12)]);
-    let chiplet_eval = eval_proof_with(vec![wide(5)], vec![wide(20), wide(21)]);
+fn proof_master_evals_round_trip() {
+    let evals = MasterEvals {
+        whole: wide(10),
+        ring: wide(11),
+    };
+
+    let main_eval = eval_proof_with(vec![wide(1), wide(2)], Some(evals), None);
+    let chiplet_eval = eval_proof_with(vec![wide(5)], None, None);
 
     let proof = InnerProof::new(
         dummy_commitment(),
@@ -1473,14 +1592,9 @@ fn proof_tensor_vec_ring_round_trips() {
         "main tensor_vec must survive the wire",
     );
     assert_eq!(
-        bytes_of(&restored.eval_proof.tensor_vec_ring),
-        bytes_of(&[wide(10), wide(11), wide(12)]),
-        "main tensor_vec_ring must survive the wire",
-    );
-    assert_ne!(
-        bytes_of(&restored.eval_proof.tensor_vec),
-        bytes_of(&restored.eval_proof.tensor_vec_ring),
-        "tensor_vec and tensor_vec_ring must not be conflated",
+        restored.eval_proof.master_evals,
+        Some(evals),
+        "main master_evals must survive the wire",
     );
 
     let chip = &restored.chiplet_eval_proofs[0];
@@ -1490,10 +1604,9 @@ fn proof_tensor_vec_ring_round_trips() {
         bytes_of(&[wide(5)]),
         "chiplet tensor_vec must survive the wire",
     );
-    assert_eq!(
-        bytes_of(&chip.tensor_vec_ring),
-        bytes_of(&[wide(20), wide(21)]),
-        "chiplet tensor_vec_ring must survive the wire",
+    assert!(
+        chip.master_evals.is_none(),
+        "absent master_evals must stay absent",
     );
 }
 
@@ -1503,14 +1616,15 @@ fn proof_logup_h_binding_round_trips() {
         h_evals: vec![("bus".to_string(), wide(42))],
         claimed_sums: vec![("bus".to_string(), F::ZERO)],
         h_commitment: Some(dummy_commitment()),
-        h_eval_proof: Some(eval_proof_with(vec![wide(7), wide(8)], vec![])),
     };
+
+    let h_opening = BrakedownProof::new(vec![vec![1u8, 2, 3], vec![4, 5, 6]], vec![[9u8; 32]]);
 
     let proof = InnerProof::new(
         dummy_commitment(),
         empty_sumcheck(),
         main_aux,
-        eval_proof_with(vec![wide(1)], vec![]),
+        eval_proof_with(vec![wide(1)], None, Some(h_opening)),
         vec![],
         vec![],
         vec![],
@@ -1522,28 +1636,23 @@ fn proof_logup_h_binding_round_trips() {
     let bytes = serialize_proof_bytes(&proof);
     let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
 
-    let aux = &restored.main_logup_aux;
-
-    let comm = aux
+    let comm = restored
+        .main_logup_aux
         .h_commitment
         .as_ref()
         .expect("h_commitment must survive the wire");
+
     assert_eq!(comm.root, [7u8; 32]);
     assert_eq!(comm.num_cols, 8);
 
-    let hp = aux
-        .h_eval_proof
+    let opening = restored
+        .eval_proof
+        .h_ldt_proof
         .as_ref()
-        .expect("h_eval_proof must survive the wire");
+        .expect("h opening must survive the wire");
 
-    let bytes_of = |v: &[F]| v.iter().map(|f| f.to_bytes()).collect::<Vec<_>>();
-
-    assert_eq!(
-        bytes_of(&hp.tensor_vec),
-        bytes_of(&[wide(7), wide(8)]),
-        "h_eval_proof payload must survive the wire",
-    );
-    assert_eq!(hp.point_evaluation.0.len(), 1);
+    assert_eq!(opening.opened_columns, vec![vec![1u8, 2, 3], vec![4, 5, 6]]);
+    assert_eq!(opening.batch_path, vec![[9u8; 32]]);
 }
 
 #[test]
@@ -1552,7 +1661,7 @@ fn proof_absent_h_binding_stays_none() {
         dummy_commitment(),
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
-        eval_proof_with(vec![wide(1)], vec![]),
+        eval_proof_with(vec![wide(1)], None, None),
         vec![],
         vec![],
         vec![],
@@ -1565,7 +1674,7 @@ fn proof_absent_h_binding_stays_none() {
     let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
 
     assert!(restored.main_logup_aux.h_commitment.is_none());
-    assert!(restored.main_logup_aux.h_eval_proof.is_none());
+    assert!(restored.eval_proof.h_ldt_proof.is_none());
     assert!(restored.pad_root.is_none());
     assert!(restored.outer.is_none());
 }
@@ -1591,7 +1700,7 @@ fn proof_outer_segment_round_trips() {
         dummy_commitment(),
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
-        eval_proof_with(vec![wide(1)], vec![]),
+        eval_proof_with(vec![wide(1)], None, None),
         vec![],
         vec![],
         vec![],

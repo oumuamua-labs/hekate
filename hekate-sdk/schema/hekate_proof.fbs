@@ -39,6 +39,11 @@ table BrakedownProof {
 
 // ===== Evaluation Argument =====
 
+table MasterEvals {
+  whole: Block128;
+  ring: Block128;
+}
+
 table PointEvaluation {
   point: [Block128];
   column_values: [Block128];
@@ -49,7 +54,8 @@ table EvalBatchProof {
   ldt_proof: BrakedownProof;
   point_evaluation: PointEvaluation;
   tensor_vec: [Block128];
-  tensor_vec_ring: [Block128];
+  master_evals: MasterEvals;
+  h_ldt_proof: BrakedownProof;
 }
 
 // ===== LogUp Auxiliary =====
@@ -63,7 +69,6 @@ table LogUpAux {
   h_evals: [LogUpEntry];
   claimed_sums: [LogUpEntry];
   h_commitment: BrakedownCommitment;
-  h_eval_proof: EvalBatchProof;
 }
 
 // ===== Outer Argument =====

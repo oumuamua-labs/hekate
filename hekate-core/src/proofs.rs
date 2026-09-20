@@ -13,9 +13,8 @@ use serde::{Deserialize, Serialize};
 // PROGRAM INNER PROOF
 // ===================================
 
-/// The prover's full transcript-independent
-/// output. Main-trace and chiplet-trace
-/// sub-vectors are parallel:
+/// The prover's full transcript-independent output.
+/// Main-trace and chiplet-trace sub-vectors are parallel:
 /// the k-th chiplet contributes
 /// `(chiplet_commitments[k], chiplet_zerocheck_proofs[k],
 /// chiplet_logup_aux[k], chiplet_eval_proofs[k])`.
@@ -29,8 +28,7 @@ pub struct InnerProof<F: TowerField> {
     pub zerocheck_proof: SumcheckProof<F>,
 
     /// `h_k(r_final)` and `Σ h_k[i]` for main-trace
-    /// bus endpoints. `h_k` is not Merkle-committed
-    /// so its evaluation must travel with the proof.
+    /// bus endpoints, pinned to the committed `h`.
     pub main_logup_aux: LogUpAux<F>,
 
     /// Pins trace evaluations to `trace_commitment`.
@@ -137,10 +135,9 @@ impl<F: TowerField> BrakedownProof<F> {
     }
 }
 
-/// Merkle root plus the dimensions it was
-/// taken over. `num_rows` and `num_cols`
-/// must be absorbed into the transcript
-/// before any challenge is drawn.
+/// Merkle root plus the dimensions it was taken over.
+/// `num_rows` and `num_cols` must be absorbed into
+/// the transcript before any challenge is drawn.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrakedownCommitment {
     pub root: [u8; 32],
@@ -152,9 +149,8 @@ pub struct BrakedownCommitment {
 // SUMCHECK PROOF
 // ===================================
 
-/// Per-round univariates `g_j(X)` plus
-/// the prover's terminal evaluation at
-/// the random challenge point `r`.
+/// Per-round univariates `g_j(X)` plus the prover's
+/// terminal evaluation at the random challenge point `r`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SumcheckProof<F: TowerField> {
     /// Per-round univariate `g_j(X)`.
@@ -168,9 +164,17 @@ pub struct SumcheckProof<F: TowerField> {
 // EVALUATION BATCH PROOF
 // ===================================
 
+/// The two master evaluations at `r'`, fixed before
+/// the line challenge `λ` binds them to one vector.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MasterEvals<F: TowerField> {
+    pub whole: F,
+    pub ring: F,
+}
+
 /// Single-point evaluation argument binding
 /// trace-column evaluations at one challenge
-/// point to one Brakedown commitment.
+/// point to the table's Brakedown commitments.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvalBatchProof<F: TowerField> {
     /// Sumcheck reducing the batched claim
@@ -184,19 +188,17 @@ pub struct EvalBatchProof<F: TowerField> {
     /// `(r_final, claimed_column_evals)`.
     pub point_evaluation: (Vec<F>, Vec<F>),
 
-    /// TensorPCS row-fold of the whole-column master
-    /// (pass-through / control / blinding columns),
-    /// `q_whole = M_whole · r_col`, length
-    /// `grid_cols + support_size`.
-    #[serde(default)]
+    /// `q_whole = M_whole · r_col`, or the line
+    /// `q_ring + λ · q_whole` with a ring unit.
+    /// Length `grid_cols + support_size`.
     pub tensor_vec: Vec<F>,
 
-    /// TensorPCS row-fold of the ring-switch
-    /// master (bit-expanded physical columns),
-    /// `q_ring = M_bit · r_col`. Empty when the
-    /// ring-switch plan carries no ring unit.
-    #[serde(default)]
-    pub tensor_vec_ring: Vec<F>,
+    /// Present iff the ring-switch plan carries a ring unit.
+    pub master_evals: Option<MasterEvals<F>>,
+
+    /// The table's `h` tree opened at the same query
+    /// columns; present iff the table carries a bus.
+    pub h_ldt_proof: Option<BrakedownProof<F>>,
 }
 
 impl<F: TowerField> EvalBatchProof<F> {
@@ -205,14 +207,16 @@ impl<F: TowerField> EvalBatchProof<F> {
         ldt_proof: BrakedownProof<F>,
         point_evaluation: (Vec<F>, Vec<F>),
         tensor_vec: Vec<F>,
-        tensor_vec_ring: Vec<F>,
+        master_evals: Option<MasterEvals<F>>,
+        h_ldt_proof: Option<BrakedownProof<F>>,
     ) -> Self {
         Self {
             sumcheck_proof,
             ldt_proof,
             point_evaluation,
             tensor_vec,
-            tensor_vec_ring,
+            master_evals,
+            h_ldt_proof,
         }
     }
 }
@@ -224,14 +228,13 @@ impl<F: TowerField> EvalBatchProof<F> {
 /// Per-table LogUp auxiliary payload keyed by `bus_id`.
 /// `claimed_sums[i]` and `h_commitment` are absorbed
 /// pre-`α`/`r_zerocheck`; `h_evals[i]` post-sumcheck.
-/// `h_eval_proof` opens `h_commitment` at `r_final`.
-/// Both options are `None` iff the table carries no bus.
+/// `h_commitment` is `None` iff the table carries no bus;
+/// the table's eval argument opens it at `r_final`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogUpAux<F: TowerField> {
     pub h_evals: Vec<(String, F)>,
     pub claimed_sums: Vec<(String, F)>,
     pub h_commitment: Option<BrakedownCommitment>,
-    pub h_eval_proof: Option<EvalBatchProof<F>>,
 }
 
 impl<F: TowerField> LogUpAux<F> {
@@ -240,7 +243,6 @@ impl<F: TowerField> LogUpAux<F> {
             h_evals,
             claimed_sums,
             h_commitment: None,
-            h_eval_proof: None,
         }
     }
 }

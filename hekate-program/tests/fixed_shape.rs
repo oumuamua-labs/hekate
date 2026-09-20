@@ -254,6 +254,26 @@ fn value_at_row_matches_evaluate_at_vertices() {
                 values: vec![F::ONE, F::ZERO, F::from(6u128)],
             },
         ]),
+        FixedShape::Segments(vec![
+            CadenceSegment {
+                stride: 1,
+                count: 4,
+                origin: 0,
+                values: vec![F::from(2u128)],
+            },
+            CadenceSegment {
+                stride: 1,
+                count: 4,
+                origin: 4,
+                values: vec![F::from(3u128)],
+            },
+            CadenceSegment {
+                stride: 1,
+                count: 1,
+                origin: n - 1,
+                values: vec![F::from(5u128)],
+            },
+        ]),
     ];
 
     for shape in &shapes {

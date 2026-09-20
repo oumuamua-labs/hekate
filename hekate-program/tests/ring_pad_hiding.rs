@@ -39,7 +39,7 @@ fn pad_contribution_to_ring_target_is_horner_delta() {
         .unwrap();
 
     let entries = expander.expansion_entries();
-    let plan = RingSwitchPlan::new(&layout, Some(&entries), 2).unwrap();
+    let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
     let total = 2 * plan.total_claims();
 
     let mut state = 0x0101_0202_0303_0404_0505_0606_0707_0808u128;

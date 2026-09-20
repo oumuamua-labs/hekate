@@ -69,6 +69,14 @@ pub fn serialize_source<'a>(
                 },
             )
         }
+        Source::PhaseColumn(idx) => fb::Source::create(
+            fbb,
+            &fb::SourceArgs {
+                kind: fb::SourceKind::PhaseColumn,
+                column_index: *idx as u32,
+                ..Default::default()
+            },
+        ),
     };
 
     let label_str = fbb.create_string(core::str::from_utf8(label).unwrap_or(""));
@@ -239,6 +247,7 @@ fn deserialize_source(entry: &fb::SourceEntry<'_>) -> Result<Source> {
             Ok(Source::RowIndexLeBytes(fb_source.byte_index() as usize))
         }
         fb::SourceKind::RowIndexByte => Ok(Source::RowIndexByte(fb_source.byte_index() as usize)),
+        fb::SourceKind::PhaseColumn => Ok(Source::PhaseColumn(fb_source.column_index() as usize)),
         fb::SourceKind::Constant => {
             let block = fb_source.constant_value().ok_or(Error::Protocol {
                 protocol: "wire",

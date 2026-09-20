@@ -42,6 +42,9 @@ pub struct EvalVerifyContext<'a, F: HardwareField> {
     /// Masked claims: the ring-switch final
     /// check is left to the outer argument.
     pub masked: bool,
+
+    /// The table's `h` tree, opened alongside the trace.
+    pub h_commitment: Option<&'a BrakedownCommitment>,
 }
 
 /// What the outer argument needs from an accepted
@@ -63,8 +66,8 @@ where
     /// Brakedown commitment. A degree-2 sumcheck reduces
     /// `[A + η^U·A_next]·master_bit + [Eq + η^U·K_P]·master_whole`
     /// to `r_final`; the final check pairs the transparent weight
-    /// evals at `r'` with two whole-column openings that the
-    /// proximity test binds to the committed codewords.
+    /// evals at `r'` with the two master evaluations, which the
+    /// λ-line fold and the proximity test bind to the codewords.
     #[instrument(skip_all, name = "Evaluator::verify")]
     pub fn verify(
         commitment: &BrakedownCommitment,
@@ -90,6 +93,21 @@ where
                 message: "ring-switch plan claim count does not match the claimed evaluations",
             });
         }
+
+        let h_tree = match (
+            ctx.h_commitment,
+            proof.h_ldt_proof.as_ref(),
+            plan.h_cols > 0,
+        ) {
+            (Some(h_comm), Some(h_opening), true) => Some((h_comm, h_opening)),
+            (None, None, false) => None,
+            _ => {
+                return Err(errors::Error::Protocol {
+                    protocol: "evaluator_verifier",
+                    message: "h opening present iff the plan carries h columns",
+                });
+            }
+        };
 
         transcript.append_message(b"eval_batch_start", b"");
 
@@ -136,14 +154,30 @@ where
             }
         };
 
-        let q_whole = &proof.tensor_vec;
-        let q_ring = &proof.tensor_vec_ring;
+        // Both master evaluations precede λ
+        let line = match (proof.master_evals.as_ref(), has_ring) {
+            (Some(evals), true) => {
+                transcript.append_field(b"eval_master_whole", evals.whole);
+                transcript.append_field(b"eval_master_ring", evals.ring);
 
-        transcript.append_field_list(b"tensor_q", q_whole);
+                let lambda = transcript
+                    .challenge_field::<F>(b"eval_lambda")?
+                    .to_hardware();
 
-        if has_ring {
-            transcript.append_field_list(b"tensor_q_ring", q_ring);
-        }
+                Some((evals.whole.to_hardware(), evals.ring.to_hardware(), lambda))
+            }
+            (None, false) => None,
+            _ => {
+                return Err(errors::Error::Protocol {
+                    protocol: "evaluator_verifier",
+                    message: "master evaluations present iff the plan carries a ring unit",
+                });
+            }
+        };
+
+        let q = &proof.tensor_vec;
+
+        transcript.append_field_list(b"tensor_q", q);
 
         let split_vars = plan.split_vars(num_vars, config);
 
@@ -151,7 +185,8 @@ where
         let grid_rows = 1 << (num_vars - split_vars);
         let geom = config.table_geom(grid_cols);
         let encoded_width = geom.encoded_width;
-        let phys_row_bytes = plan.opened_row_bytes();
+        let phys_row_bytes = plan.leaf_row_bytes();
+        let h_row_bytes = plan.h_leaf_row_bytes();
 
         debug!(
             num_vars,
@@ -160,6 +195,7 @@ where
             encoded_width,
             support = geom.support_size,
             row_bytes = phys_row_bytes,
+            h_row_bytes,
             fractional = encoded_width == grid_cols * INV_RATE,
             "table geometry"
         );
@@ -172,69 +208,48 @@ where
         config.check_security(size_of::<F>() * 8, grid_cols)?;
 
         let expected_len = grid_cols + geom.support_size;
-        let expected_ring_len = if has_ring { expected_len } else { 0 };
 
-        if q_whole.len() != expected_len || q_ring.len() != expected_ring_len {
+        if q.len() != expected_len {
             warn!("tensor_q length mismatch");
             return Ok(None);
         }
 
-        let q_whole_flat: Vec<Flat<F>> = q_whole.iter().map(|v| v.to_hardware()).collect();
-        let q_ring_flat: Vec<Flat<F>> = if has_ring {
-            q_ring.iter().map(|v| v.to_hardware()).collect()
-        } else {
-            Vec::new()
-        };
-
-        // Two independent encodes
-        #[cfg(feature = "parallel")]
-        let (q_whole_res, q_ring_res) = rayon::join(
-            || rs_encode_row::<F>(&q_whole_flat, grid_cols, config),
-            || {
-                if has_ring {
-                    rs_encode_row::<F>(&q_ring_flat, grid_cols, config)
-                } else {
-                    Ok(Vec::new())
-                }
-            },
-        );
-
-        #[cfg(feature = "parallel")]
-        let (q_whole_encoded, q_ring_encoded) = (q_whole_res?, q_ring_res?);
-
-        #[cfg(not(feature = "parallel"))]
-        let q_whole_encoded = rs_encode_row::<F>(&q_whole_flat, grid_cols, config)?;
-
-        #[cfg(not(feature = "parallel"))]
-        let q_ring_encoded = if has_ring {
-            rs_encode_row::<F>(&q_ring_flat, grid_cols, config)?
-        } else {
-            Vec::new()
-        };
+        let q_flat: Vec<Flat<F>> = q.iter().map(|v| v.to_hardware()).collect();
+        let q_encoded = rs_encode_row::<F>(&q_flat, grid_cols, config)?;
 
         let r_col_low = &r_row[..split_vars];
         let tensor_col = build_tensor_table::<F>(r_col_low);
 
-        let master_eval = |q: &[Flat<F>]| {
-            let mut acc = zero;
-            for (&val, &t) in q.iter().take(grid_cols).zip(&tensor_col) {
-                acc += val * t;
+        let mut q_eval = zero;
+        for (&val, &t) in q_flat.iter().take(grid_cols).zip(&tensor_col) {
+            q_eval += val * t;
+        }
+
+        let (master_whole_eval, master_bit_eval) = match line {
+            Some((whole, ring, lambda)) => {
+                if q_eval != ring + lambda * whole {
+                    warn!("line fold disagrees with the master evaluations");
+                    return Ok(None);
+                }
+
+                (whole, ring)
             }
-
-            acc
-        };
-
-        let master_whole_eval = master_eval(&q_whole_flat);
-        let master_bit_eval = match has_ring {
-            true => master_eval(&q_ring_flat),
-            false => zero,
+            None => (q_eval, zero),
         };
 
         let (coeff_bit, coeff_whole, eta_shift) = plan.column_coeffs::<F>(eta);
 
-        // The weight evals at r' are transparent;
-        // the two master evals are bound by the
-        // whole-column proximity check below.
+        let coeff_line = match line {
+            Some((_, _, lambda)) => coeff_bit
+                .iter()
+                .zip(&coeff_whole)
+                .map(|(&bit, &whole)| bit + lambda * whole)
+                .collect(),
+            None => coeff_whole,
+        };
+
+        // The weight evals at r' are transparent; the two
+        // master evals are bound by the proximity check below.
         let (whole_weight_at_r, ring_weight_at_r) =
             master_weights_at::<F>(point, &r_row, &r_mix, eta_shift, has_ring, shifted_claims);
 
@@ -245,37 +260,24 @@ where
             return Ok(None);
         }
 
-        // Fork transcript to reproduce
-        // exact random queries generated by LDT
         transcript.append_message(b"eval_batch_ldt", b"");
 
-        let mut ldt_transcript = transcript.clone();
+        let queries = BrakedownVerifier::<F, H>::draw_queries(transcript, config, split_vars)?;
+        let opened_columns =
+            BrakedownVerifier::<F, H>::verify_opening(commitment, &proof.ldt_proof, &queries)?;
 
-        let openings = BrakedownVerifier::<F, H>::verify(
-            commitment,
-            &proof.ldt_proof,
-            transcript, // advances the real transcript
-            config,
-            split_vars,
-        )?;
+        let h_opened = match h_tree {
+            Some((h_commitment, h_opening)) => Some(BrakedownVerifier::<F, H>::verify_opening(
+                h_commitment,
+                h_opening,
+                &queries,
+            )?),
+            None => None,
+        };
 
-        let opened_columns = openings.columns;
-        let slot_map = &openings.slot_map;
-
-        // Replay randomness generation
-        let mut random_indices = Vec::with_capacity(config.num_queries);
-        for _ in 0..config.num_queries {
-            let bytes = ldt_transcript
-                .challenge_field::<F>(b"idx_query")?
-                .to_bytes();
-
-            let mut rng_val: u64 = 0;
-            for (k, &b) in bytes.iter().take(8).enumerate() {
-                rng_val |= (b as u64) << (8 * k);
-            }
-
-            random_indices.push((rng_val % (encoded_width as u64)) as usize);
-        }
+        let slot_map = &queries.slot_map;
+        let random_indices = &queries.indices;
+        let h_rs = vec![ColumnType::B128; plan.h_cols];
 
         let r_row_high = &r_row[split_vars..];
         let tensor_row = TensorProduct::<F>::new(r_row_high.to_vec());
@@ -285,11 +287,11 @@ where
             tensor_row_evals.push(tensor_row.evaluate_at_index(r));
         }
 
-        let num_phys = plan.phys_rs.len();
+        let num_fold_cols = plan.phys_rs.len() + plan.h_cols;
 
-        // Re-derive both folded openings from the physical columns in the
+        // Re-derive the folded opening from the physical columns in the
         // opened leaf; RS commutes with a whole-column fold, this must
-        // match the RS re-encodings of the prover's committed q vectors.
+        // match the RS re-encoding of the prover's committed q vector.
         let check_query =
             |q_idx: usize, col_idx: usize, phys_row: &mut Vec<Flat<F>>| -> errors::Result<bool> {
                 let col_bytes = &opened_columns[slot_map[q_idx]];
@@ -299,8 +301,14 @@ where
                     return Ok(false);
                 }
 
-                let mut q_whole_val = zero;
-                let mut q_ring_val = zero;
+                let h_bytes = h_opened.map(|h| &h[slot_map[q_idx]]);
+
+                if h_bytes.is_some_and(|h| h.len() != grid_rows * h_row_bytes) {
+                    warn!("opened h column length does not match the h row layout");
+                    return Ok(false);
+                }
+
+                let mut q_val = zero;
 
                 for r in 0..grid_rows {
                     let row_data = &col_bytes[r * phys_row_bytes..(r + 1) * phys_row_bytes];
@@ -309,25 +317,20 @@ where
 
                     parse_physical_row::<F>(row_data, &plan.phys_rs, phys_row);
 
-                    let mut fold_whole = zero;
-                    let mut fold_bit = zero;
-
-                    for p in 0..num_phys {
-                        let base = phys_row[p];
-                        fold_whole += base * coeff_whole[p];
-
-                        if has_ring {
-                            fold_bit += base * coeff_bit[p];
-                        }
+                    if let Some(h) = h_bytes {
+                        let h_row = &h[r * h_row_bytes..(r + 1) * h_row_bytes];
+                        parse_physical_row::<F>(h_row, &h_rs, phys_row);
                     }
 
-                    let tr = tensor_row_evals[r];
-                    q_whole_val += fold_whole * tr;
-                    q_ring_val += fold_bit * tr;
+                    let mut fold = zero;
+                    for (&base, &coeff) in phys_row.iter().zip(&coeff_line) {
+                        fold += base * coeff;
+                    }
+
+                    q_val += fold * tensor_row_evals[r];
                 }
 
-                let ok = q_whole_val == q_whole_encoded[col_idx]
-                    && (!has_ring || q_ring_val == q_ring_encoded[col_idx]);
+                let ok = q_val == q_encoded[col_idx];
 
                 if !ok {
                     warn!("TensorPCS proximity mismatch for column {}", col_idx);
@@ -337,7 +340,7 @@ where
             };
 
         let run_sequential = |indices: &[usize]| -> errors::Result<bool> {
-            let mut phys_row = Vec::with_capacity(num_phys);
+            let mut phys_row = Vec::with_capacity(num_fold_cols);
             for (q_idx, &col_idx) in indices.iter().enumerate() {
                 if !check_query(q_idx, col_idx, &mut phys_row)? {
                     return Ok(false);
@@ -349,8 +352,7 @@ where
 
         #[cfg(feature = "parallel")]
         let all_matched = {
-            let per_row_cols = num_phys * if has_ring { 3 } else { 2 };
-            let proximity_work = config.num_queries * grid_rows * per_row_cols;
+            let proximity_work = config.num_queries * grid_rows * 2 * num_fold_cols;
 
             if proximity_work >= PARALLEL_PROXIMITY_THRESHOLD {
                 use rayon::prelude::*;
@@ -359,17 +361,17 @@ where
                     .par_iter()
                     .enumerate()
                     .map_init(
-                        || Vec::<Flat<F>>::with_capacity(num_phys),
+                        || Vec::<Flat<F>>::with_capacity(num_fold_cols),
                         |phys_row, (q_idx, &col_idx)| check_query(q_idx, col_idx, phys_row),
                     )
                     .try_reduce(|| true, |a, b| Ok(a && b))?
             } else {
-                run_sequential(&random_indices)?
+                run_sequential(random_indices)?
             }
         };
 
         #[cfg(not(feature = "parallel"))]
-        let all_matched = run_sequential(&random_indices)?;
+        let all_matched = run_sequential(random_indices)?;
 
         if !all_matched {
             return Ok(None);
@@ -386,7 +388,7 @@ where
 }
 
 /// `q_flat = [q_data(grid_cols), q_support(ldt)]`. Layout must
-/// match the prover's `rs_encode_grid`; `master_eval` reads `q_data`
+/// match the prover's `rs_encode_grid`; `q_eval` reads `q_data`
 /// alone, the support masks openings without entering the claim.
 fn rs_encode_row<F: HardwareField + BinaryFieldExtras>(
     q_flat: &[Flat<F>],
@@ -813,5 +815,36 @@ mod tests {
             .count();
 
         assert!(zeros < len);
+    }
+
+    /// A drift in `CantorBasis` or `AdditiveFft` silently
+    /// changes the code the proximity bound is stated over.
+    #[test]
+    fn rs_encode_row_realises_cantor_subspace_chain() {
+        let config = Config::prod();
+        let geom = config.table_geom(GRID_COLS);
+        let ldt = geom.support_size;
+        let len = GRID_COLS + ldt;
+
+        let zero = Flat::from_raw(Block128::ZERO);
+
+        for j in 0..=len.ilog2() as usize {
+            let at = 1usize << j;
+            let slot = match at < ldt {
+                true => GRID_COLS + at,
+                false => at - ldt,
+            };
+
+            let mut row = vec![zero; len];
+            row[slot] = Flat::from_raw(Block128::ONE);
+
+            let code = rs_encode_row::<Block128>(&row, GRID_COLS, &config).unwrap();
+
+            let zeros: Vec<usize> = (0..geom.encoded_width)
+                .filter(|&x| code[x] == zero)
+                .collect();
+
+            assert_eq!(zeros, (0..at).collect::<Vec<usize>>(), "s_{j}");
+        }
     }
 }

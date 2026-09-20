@@ -540,9 +540,11 @@ pub struct RingSwitchPlan {
     pub units: Vec<(bool, usize)>,
     pub phys_rs: Vec<ColumnType>,
     pub blind_slots: usize,
+    pub h_cols: usize,
 
     phys_bit: Vec<Vec<usize>>,
     phys_whole: Vec<Vec<usize>>,
+    h_whole: Vec<usize>,
 }
 
 impl RingSwitchPlan {
@@ -550,6 +552,7 @@ impl RingSwitchPlan {
         layout: &[ColumnType],
         entries: Option<&[ExpansionEntry]>,
         num_blind: usize,
+        num_h: usize,
     ) -> Result<Self, Error> {
         let num_phys = layout.len();
         let total = num_phys + num_blind;
@@ -662,14 +665,22 @@ impl RingSwitchPlan {
             blind_slots += 1;
         }
 
+        let mut h_whole = Vec::with_capacity(num_h);
+        for _ in 0..num_h {
+            h_whole.push(units.len());
+            units.push((false, 1));
+        }
+
         let num_units = units.len();
 
         Ok(Self {
             units,
             phys_bit,
             phys_whole,
+            h_whole,
             phys_rs,
             blind_slots,
+            h_cols: num_h,
             num_units,
         })
     }
@@ -686,12 +697,16 @@ impl RingSwitchPlan {
         self.units.iter().map(|(_, n)| n).sum()
     }
 
-    pub fn opened_row_bytes(&self) -> usize {
+    pub fn leaf_row_bytes(&self) -> usize {
         self.phys_rs.iter().map(|ct| ct.byte_size()).sum()
     }
 
-    pub fn num_master_vectors(&self) -> usize {
-        1 + usize::from(self.has_ring())
+    pub fn h_leaf_row_bytes(&self) -> usize {
+        self.h_cols * ColumnType::B128.byte_size()
+    }
+
+    pub fn opened_row_bytes(&self) -> usize {
+        self.leaf_row_bytes() + self.h_leaf_row_bytes()
     }
 
     pub fn split_vars(&self, num_vars: usize, config: &Config) -> usize {
@@ -700,11 +715,10 @@ impl RingSwitchPlan {
             config.num_queries,
             config.ldt_support_size,
             self.opened_row_bytes(),
-            self.num_master_vectors(),
         )
     }
 
-    /// Per committed column:
+    /// Per committed column, trace leaf then h leaf:
     /// its base `eta` coefficients in the ring and whole
     /// masters, plus `eta^U` (the next-row shift multiplier).
     pub fn column_coeffs<F>(&self, eta: Flat<F>) -> (Vec<Flat<F>>, Vec<Flat<F>>, Flat<F>)
@@ -719,12 +733,13 @@ impl RingSwitchPlan {
             e *= eta;
         }
 
-        let total = self.phys_rs.len();
+        let num_phys = self.phys_rs.len();
+        let total = num_phys + self.h_cols;
 
         let mut coeff_bit = vec![Flat::from_raw(F::ZERO); total];
         let mut coeff_whole = vec![Flat::from_raw(F::ZERO); total];
 
-        for p in 0..total {
+        for p in 0..num_phys {
             for &u in &self.phys_bit[p] {
                 coeff_bit[p] += eta_pows[u];
             }
@@ -732,6 +747,10 @@ impl RingSwitchPlan {
             for &u in &self.phys_whole[p] {
                 coeff_whole[p] += eta_pows[u];
             }
+        }
+
+        for (p, &u) in self.h_whole.iter().enumerate() {
+            coeff_whole[num_phys + p] += eta_pows[u];
         }
 
         (coeff_bit, coeff_whole, eta_pows[self.num_units])
@@ -1095,11 +1114,11 @@ mod tests {
         let mut layout = keccak_physical_layout();
 
         assert_eq!(expander.num_physical_columns(), layout.len());
-        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0).is_ok());
+        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0, 0).is_ok());
 
         layout.push(ColumnType::B64);
 
-        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0).is_err());
+        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0, 0).is_err());
     }
 
     #[test]
@@ -1107,7 +1126,7 @@ mod tests {
         let entries = keccak_expander().expansion_entries();
         let layout = keccak_physical_layout();
 
-        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2).unwrap();
+        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
 
         let zero = Flat::from_raw(Block128::ZERO);
         let eta = Block128(0x2545F4914F6CDD1D_517CC1B727220A95).to_hardware();
@@ -1122,13 +1141,50 @@ mod tests {
     }
 
     #[test]
+    fn h_units_trail_ring_blind() {
+        let layout = [ColumnType::B32, ColumnType::B64];
+        let expander = VirtualExpander::new()
+            .expand_bits(1, ColumnType::B32)
+            .pass_through(1, ColumnType::B64)
+            .build()
+            .unwrap();
+        let entries = expander.expansion_entries();
+
+        let bare = RingSwitchPlan::new(&layout, Some(&entries), 1, 0).unwrap();
+        let plan = RingSwitchPlan::new(&layout, Some(&entries), 1, 2).unwrap();
+
+        assert_eq!(plan.h_cols, 2);
+        assert_eq!(plan.phys_rs, bare.phys_rs);
+        assert_eq!(plan.total_claims(), bare.total_claims() + 2);
+        assert_eq!(&plan.units[plan.num_units - 2..], &[(false, 1), (false, 1)]);
+        assert_eq!(plan.units[plan.num_units - 3], (true, RING_BLIND_BITS));
+        assert_eq!(plan.leaf_row_bytes(), bare.opened_row_bytes());
+        assert_eq!(plan.opened_row_bytes(), bare.opened_row_bytes() + 32);
+
+        let eta = Block128::from(0x9E37_79B9u128).to_hardware();
+        let (coeff_bit, coeff_whole, eta_shift) = plan.column_coeffs::<Block128>(eta);
+        let n = plan.phys_rs.len();
+
+        let mut first_h = Flat::from_raw(Block128::ONE);
+        for _ in 0..plan.num_units - 2 {
+            first_h *= eta;
+        }
+
+        assert_eq!(coeff_whole.len(), n + 2);
+        assert_eq!(coeff_bit[n..], [Flat::from_raw(Block128::ZERO); 2]);
+        assert_eq!(coeff_whole[n], first_h);
+        assert_eq!(coeff_whole[n + 1], first_h * eta);
+        assert_eq!(eta_shift, first_h * eta * eta);
+    }
+
+    #[test]
     fn blinded_ring_plan_ends_in_ring_blind_unit() {
         let entries = keccak_expander().expansion_entries();
         let layout = keccak_physical_layout();
 
-        let raw = RingSwitchPlan::new(&layout, Some(&entries), 0).unwrap();
-        let blinded = RingSwitchPlan::new(&layout, Some(&entries), 2).unwrap();
-        let whole_only = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 2).unwrap();
+        let raw = RingSwitchPlan::new(&layout, Some(&entries), 0, 0).unwrap();
+        let blinded = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
+        let whole_only = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 2, 0).unwrap();
 
         assert_eq!(raw.blind_slots, 0);
         assert_eq!(raw.phys_rs.len(), layout.len());
@@ -1333,7 +1389,7 @@ mod tests {
             .unwrap();
 
         let entries = expander.expansion_entries();
-        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2).unwrap();
+        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
 
         let mut state = 0x9e37_79b9_7f4a_7c15_0123_4567_89ab_cdefu128;
         let mut next = || {

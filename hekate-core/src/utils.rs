@@ -25,7 +25,7 @@ impl Instant {
 }
 
 /// Splitting variable `c` minimising proof bytes,
-/// tensor vectors against opened rows at `rs_field`
+/// the tensor vector against opened rows at `rs_field`
 /// widths. `table_geom`'s commit width is not priced.
 #[inline(always)]
 pub fn compute_split_vars(
@@ -33,13 +33,12 @@ pub fn compute_split_vars(
     num_queries: usize,
     support_size: usize,
     row_bytes: usize,
-    num_vectors: usize,
 ) -> usize {
     if num_vars == 0 {
         return 0;
     }
 
-    let vector_cost = (Q_VECTOR_ELEM_BYTES * num_vectors.max(1)) as u128;
+    let vector_cost = Q_VECTOR_ELEM_BYTES as u128;
     let opened_cost = ((num_queries * row_bytes).max(1)) as u128;
 
     let factor = (opened_cost / vector_cost).max(1);
@@ -70,16 +69,14 @@ mod tests {
     const QUERIES: [usize; 4] = [8, 32, 128, 176];
     const SUPPORTS: [usize; 4] = [4, 32, 128, 512];
     const ROW_BYTES: [usize; 7] = [4, 12, 44, 244, 1024, 4096, 27056];
-    const VECTORS: [usize; 2] = [1, 2];
 
     fn scan_argmin(
         num_vars: usize,
         num_queries: usize,
         support_size: usize,
         row_bytes: usize,
-        num_vectors: usize,
     ) -> usize {
-        let vector_cost = (Q_VECTOR_ELEM_BYTES * num_vectors.max(1)) as u128;
+        let vector_cost = Q_VECTOR_ELEM_BYTES as u128;
         let opened_cost = ((num_queries * row_bytes).max(1)) as u128;
 
         let support_floor = if support_size > 1 {
@@ -95,14 +92,12 @@ mod tests {
             .unwrap()
     }
 
-    fn cases() -> Vec<(usize, usize, usize, usize, usize)> {
+    fn cases() -> Vec<(usize, usize, usize, usize)> {
         let mut out = Vec::new();
         for num_vars in 1..=24 {
             for &q in &QUERIES {
                 for &s in &SUPPORTS {
-                    for &rb in &ROW_BYTES {
-                        out.extend(VECTORS.iter().map(|&v| (num_vars, q, s, rb, v)));
-                    }
+                    out.extend(ROW_BYTES.iter().map(|&rb| (num_vars, q, s, rb)));
                 }
             }
         }
@@ -112,19 +107,19 @@ mod tests {
 
     #[test]
     fn split_vars_hits_the_discrete_argmin() {
-        for (num_vars, q, s, rb, v) in cases() {
+        for (num_vars, q, s, rb) in cases() {
             assert_eq!(
-                compute_split_vars(num_vars, q, s, rb, v),
-                scan_argmin(num_vars, q, s, rb, v),
-                "n={num_vars} q={q} s={s} rb={rb} v={v}"
+                compute_split_vars(num_vars, q, s, rb),
+                scan_argmin(num_vars, q, s, rb),
+                "n={num_vars} q={q} s={s} rb={rb}"
             );
         }
     }
 
     #[test]
     fn split_vars_respects_the_support_floor() {
-        for (num_vars, q, s, rb, v) in cases() {
-            let c = compute_split_vars(num_vars, q, s, rb, v);
+        for (num_vars, q, s, rb) in cases() {
+            let c = compute_split_vars(num_vars, q, s, rb);
             let floor = if s > 1 {
                 (s - 1).ilog2() as usize + 1
             } else {
@@ -133,13 +128,13 @@ mod tests {
 
             assert!(
                 c >= floor.min(num_vars),
-                "n={num_vars} q={q} s={s} rb={rb} v={v} gave c={c}"
+                "n={num_vars} q={q} s={s} rb={rb} gave c={c}"
             );
         }
     }
 
     #[test]
     fn split_vars_collapses_for_a_single_row() {
-        assert_eq!(compute_split_vars(0, 176, 128, 244, 2), 0);
+        assert_eq!(compute_split_vars(0, 176, 128, 244), 0);
     }
 }

@@ -286,8 +286,8 @@ All numbers on Apple M3 Max (16 cores, 48 GB RAM), `--release`, features
 `std parallel blake3 table-math`, `Config::prod()`. Cells read zero-knowledge / base,
 the second value being the same run under `HEKATE_ZK=0`. Measured with the example
 binaries in `hekate/examples/` on an otherwise idle machine; every figure is the
-mean of at least three runs. Peak memory is the process peak physical footprint, which
-equals resident set size for any run that fits in RAM.
+best of three runs. Peak memory is the larger of the process peak physical footprint
+and its peak resident set size.
 
 Reproduce:
 
@@ -307,15 +307,15 @@ Cells: ZK / base.
 
 |              | ML-KEM-768        | ML-DSA-44         | ML-DSA-65         | ML-DSA-87         | AES-128           | AES-256           |
 |:-------------|:------------------|:------------------|:------------------|:------------------|:------------------|:------------------|
-| Proving      | 629 / 579 ms      | 857 / 777 ms      | 892 / 820 ms      | 1.35 / 1.25 s     | 1.29 / 1.23 s     | 1.41 / 1.34 s     |
-| Verification | 38.4 / 19.1 ms    | 59.5 / 22.5 ms    | 59.7 / 22.6 ms    | 62.1 / 26.7 ms    | 20.7 / 16.4 ms    | 21.7 / 16.7 ms    |
-| Proof Size   | 3,942 / 3,335 KiB | 4,781 / 4,031 KiB | 4,789 / 4,051 KiB | 6,253 / 5,371 KiB | 5,902 / 5,243 KiB | 6,241 / 5,598 KiB |
-| Peak memory  | 450 / 422 MiB     | 451 / 435 MiB     | 450 / 401 MiB     | 800 / 749 MiB     | 1,183 / 1,121 MiB | 1,478 / 1,421 MiB |
+| Proving      | 611 / 568 ms      | 852 / 781 ms      | 913 / 830 ms      | 1.33 / 1.23 s     | 1.31 / 1.21 s     | 1.63 / 1.34 s     |
+| Verification | 35.8 / 15.4 ms    | 55.4 / 19.1 ms    | 57.0 / 19.2 ms    | 64.0 / 22.6 ms    | 17.4 / 14.6 ms    | 21.4 / 14.1 ms    |
+| Proof Size   | 2,732 / 2,360 KiB | 3,328 / 2,850 KiB | 3,338 / 2,870 KiB | 4,280 / 3,776 KiB | 3,726 / 3,396 KiB | 3,923 / 3,599 KiB |
+| Peak memory  | 460 / 458 MiB     | 456 / 462 MiB     | 458 / 439 MiB     | 806 / 785 MiB     | 1,200 / 1,183 MiB | 1,497 / 1,466 MiB |
 | Chiplets     | 6                 | 7                 | 7                 | 7                 | 2                 | 2                 |
 
 AES note: both AES-128 and AES-256 prove **31,250 blocks** (~500 KB plaintext) per run.
 CPU trace 2^16 rows; Round-AIR and S-box ROM chiplets at 2^19. Per-block proving cost:
-~41 µs (AES-128) / ~45 µs (AES-256).
+~42 µs (AES-128) / ~52 µs (AES-256).
 
 ### Keccak-f[1600], scaling
 
@@ -323,8 +323,8 @@ CPU trace 2^16 rows; Round-AIR and S-box ROM chiplets at 2^19. Per-block proving
 
 | Scale (rows) | Permutations | Hashed  | Proving       | Verify         | Proof Size        | Peak memory       |
 |:-------------|:-------------|:--------|:--------------|:---------------|:------------------|:------------------|
-| 2^15         | 1,310        | ~178 KB | 211 / 186 ms  | 16.4 / 5.1 ms  | 1,083 / 782 KiB   | 169 / 131 MiB     |
-| 2^20         | 41,943       | ~5.4 MB | 3.73 / 3.79 s | 24.4 / 12.3 ms | 4,502 / 3,985 KiB | 2,486 / 2,457 MiB |
+| 2^15         | 1,310        | ~178 KB | 198 / 175 ms  | 14.1 / 4.3 ms  | 759 / 546 KiB     | 166 / 136 MiB     |
+| 2^20         | 41,943       | ~5.4 MB | 3.79 / 3.72 s | 19.5 / 8.9 ms  | 2,735 / 2,439 KiB | 2,457 / 2,457 MiB |
 
 ### Fibonacci (32-bit integer add), scaling
 
@@ -333,8 +333,8 @@ explicit carry chain, virtual-expanded into 32 bit + 32 sum + 32 carry columns. 
 
 | Scale (rows) | Proving         | Verify         | Proof Size        | Peak memory        |
 |:-------------|:----------------|:---------------|:------------------|:-------------------|
-| 2^20         | 336 / 287 ms    | 6.1 / 2.5 ms   | 1,295 / 738 KiB   | 250 / 165 MiB      |
-| 2^24         | 5.13 / 4.47 s   | 11.6 / 5.7 ms  | 4,558 / 2,841 KiB | 3,508 / 2,215 MiB  |
+| 2^20         | 332 / 284 ms    | 6.84 / 2.76 ms | 962 / 522 KiB     | 263 / 167 MiB      |
+| 2^24         | 5.35 / 4.43 s   | 12.1 / 6.77 ms | 3,369 / 1,958 KiB | 3,563 / 2,218 MiB  |
 | 2^26         | 23.05 / 18.42 s | 18.9 / 9.3 ms  | 8,903 / 5,630 KiB | 13,846 / 8,712 MiB |
 
 ---
