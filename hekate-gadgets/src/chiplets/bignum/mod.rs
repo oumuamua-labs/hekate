@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-pub mod bignum;
-pub mod int;
-pub mod ram;
-pub mod rom;
+pub mod bigint;
+pub mod cpu;
+pub mod modexp;

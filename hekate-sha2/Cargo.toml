@@ -1,13 +1,13 @@
 [package]
-name = "hekate-gadgets"
-version.workspace = true
+name = "hekate-sha2"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Base AIR gadgets for the Hekate ZK proving system."
-keywords = ["zk", "cryptography", "air", "chiplet", "no-std"]
+repository = "https://github.com/oumuamua-labs/hekate/tree/main/hekate-sha2"
+description = "SHA-256 compression AIR chiplet for the Hekate ZK proving system."
+keywords = ["zk", "cryptography", "sha256", "air", "no-std"]
 categories = ["cryptography", "no-std"]
 readme = "README.md"
 
@@ -15,7 +15,7 @@ readme = "README.md"
 crate-type = ["rlib"]
 
 [features]
-default = ["std", "parallel", "blake3"]
+default = ["std", "blake3"]
 std = [
     "hekate-core/std",
     "hekate-program/std",
@@ -24,18 +24,11 @@ std = [
 blake3 = ["hekate-core/blake3"]
 sha2 = ["hekate-core/sha2"]
 sha3 = ["hekate-core/sha3"]
-parallel = [
-    "dep:rayon",
-    "hekate-core/parallel",
-    "hekate-math/parallel",
-]
 
 [dependencies]
-hekate-core = { workspace = true }
 hekate-math = { workspace = true }
+hekate-core = { workspace = true }
 hekate-program = { workspace = true }
-once_cell = { workspace = true }
-rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 hekate-crypto = { workspace = true, features = ["std", "blake3"] }
@@ -43,3 +36,5 @@ hekate-verifier = { workspace = true, features = ["std", "blake3"] }
 hekate-sdk = { workspace = true, features = ["std", "blake3"] }
 hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
 hekate-scribble = { workspace = true, features = ["parallel"] }
+rand = "0.10"
+sha2 = "0.11"

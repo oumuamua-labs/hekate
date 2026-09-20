@@ -768,6 +768,83 @@ pub fn get_col_views(columns: &[TraceColumn]) -> Vec<(&[u8], usize)> {
 // TRACE BUILDER
 // =========================================================
 
+macro_rules! impl_width_writes {
+    (
+        $(
+            $block:ty {
+                set: $set:ident,
+                set_array: $set_array:ident,
+                push: $push:ident,
+                set_flat: $set_flat:ident,
+                set_array_flat: $set_array_flat:ident,
+                column: $expect:ident,
+            }
+        )*
+    ) => {
+        $(
+            #[inline]
+            pub fn $set(&mut self, col: usize, row: usize, val: $block) -> errors::Result<()> {
+                self.$set_flat(col, row, val.to_hardware())
+            }
+
+            #[inline]
+            pub fn $set_flat(
+                &mut self,
+                col: usize,
+                row: usize,
+                val: Flat<$block>,
+            ) -> errors::Result<()> {
+                let num_rows = self.num_rows;
+                let data = self.$expect(col)?;
+                let slot = data.get_mut(row).ok_or(Error::RowIndexOutOfBounds {
+                    row_idx: row,
+                    num_rows,
+                })?;
+
+                *slot = val;
+
+                Ok(())
+            }
+
+            #[inline]
+            pub fn $push(&mut self, col: usize, val: $block) -> errors::Result<()> {
+                let row = self.cursor(col)?;
+                self.$set(col, row, val)?;
+
+                self.cursors[col] = row + 1;
+
+                Ok(())
+            }
+
+            pub fn $set_array(
+                &mut self,
+                base: usize,
+                row: usize,
+                values: &[$block],
+            ) -> errors::Result<()> {
+                for (i, &val) in values.iter().enumerate() {
+                    self.$set(base + i, row, val)?;
+                }
+
+                Ok(())
+            }
+
+            pub fn $set_array_flat(
+                &mut self,
+                base: usize,
+                row: usize,
+                values: &[Flat<$block>],
+            ) -> errors::Result<()> {
+                for (i, &val) in values.iter().enumerate() {
+                    self.$set_flat(base + i, row, val)?;
+                }
+
+                Ok(())
+            }
+        )*
+    };
+}
+
 /// Schema-driven builder. Every column
 /// is allocated zero-filled from the layout;
 /// unfilled rows stay zero, so padding is implicit.
@@ -808,7 +885,7 @@ impl TraceBuilder {
     }
 
     // =========================================================
-    // Indexed write (random access)
+    // Column writes: indexed, cursor-push, array
     // =========================================================
 
     #[inline]
@@ -825,79 +902,13 @@ impl TraceBuilder {
         Ok(())
     }
 
-    #[inline]
-    pub fn set_b8(&mut self, col: usize, row: usize, val: Block8) -> errors::Result<()> {
-        let num_rows = self.num_rows;
-        let data = self.expect_b8_col(col)?;
-        let slot = data.get_mut(row).ok_or(Error::RowIndexOutOfBounds {
-            row_idx: row,
-            num_rows,
-        })?;
-
-        *slot = val.to_hardware();
+    pub fn set_bit_array(&mut self, base: usize, row: usize, values: &[Bit]) -> errors::Result<()> {
+        for (i, &val) in values.iter().enumerate() {
+            self.set_bit(base + i, row, val)?;
+        }
 
         Ok(())
     }
-
-    #[inline]
-    pub fn set_b16(&mut self, col: usize, row: usize, val: Block16) -> errors::Result<()> {
-        let num_rows = self.num_rows;
-        let data = self.expect_b16_col(col)?;
-        let slot = data.get_mut(row).ok_or(Error::RowIndexOutOfBounds {
-            row_idx: row,
-            num_rows,
-        })?;
-
-        *slot = val.to_hardware();
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn set_b32(&mut self, col: usize, row: usize, val: Block32) -> errors::Result<()> {
-        let num_rows = self.num_rows;
-        let data = self.expect_b32_col(col)?;
-        let slot = data.get_mut(row).ok_or(Error::RowIndexOutOfBounds {
-            row_idx: row,
-            num_rows,
-        })?;
-
-        *slot = val.to_hardware();
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn set_b64(&mut self, col: usize, row: usize, val: Block64) -> errors::Result<()> {
-        let num_rows = self.num_rows;
-        let data = self.expect_b64_col(col)?;
-        let slot = data.get_mut(row).ok_or(Error::RowIndexOutOfBounds {
-            row_idx: row,
-            num_rows,
-        })?;
-
-        *slot = val.to_hardware();
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn set_b128(&mut self, col: usize, row: usize, val: Block128) -> errors::Result<()> {
-        let num_rows = self.num_rows;
-        let data = self.expect_b128_col(col)?;
-        let slot = data.get_mut(row).ok_or(Error::RowIndexOutOfBounds {
-            row_idx: row,
-            num_rows,
-        })?;
-
-        *slot = val.to_hardware();
-
-        Ok(())
-    }
-
-    // =========================================================
-    // Push write (sequential overwrite-at-cursor)
-    // =========================================================
 
     #[inline]
     pub fn push_bit(&mut self, col: usize, val: Bit) -> errors::Result<()> {
@@ -909,131 +920,51 @@ impl TraceBuilder {
         Ok(())
     }
 
-    #[inline]
-    pub fn push_b8(&mut self, col: usize, val: Block8) -> errors::Result<()> {
-        let row = self.cursor(col)?;
-        self.set_b8(col, row, val)?;
-
-        self.cursors[col] = row + 1;
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn push_b16(&mut self, col: usize, val: Block16) -> errors::Result<()> {
-        let row = self.cursor(col)?;
-        self.set_b16(col, row, val)?;
-
-        self.cursors[col] = row + 1;
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn push_b32(&mut self, col: usize, val: Block32) -> errors::Result<()> {
-        let row = self.cursor(col)?;
-        self.set_b32(col, row, val)?;
-
-        self.cursors[col] = row + 1;
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn push_b64(&mut self, col: usize, val: Block64) -> errors::Result<()> {
-        let row = self.cursor(col)?;
-        self.set_b64(col, row, val)?;
-
-        self.cursors[col] = row + 1;
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn push_b128(&mut self, col: usize, val: Block128) -> errors::Result<()> {
-        let row = self.cursor(col)?;
-        self.set_b128(col, row, val)?;
-
-        self.cursors[col] = row + 1;
-
-        Ok(())
-    }
-
-    // =========================================================
-    // Array column helpers
-    // =========================================================
-
-    pub fn set_bit_array(&mut self, base: usize, row: usize, values: &[Bit]) -> errors::Result<()> {
-        for (i, &val) in values.iter().enumerate() {
-            self.set_bit(base + i, row, val)?;
+    impl_width_writes! {
+        Block8 {
+            set: set_b8,
+            set_array: set_b8_array,
+            push: push_b8,
+            set_flat: set_b8_flat,
+            set_array_flat: set_b8_array_flat,
+            column: expect_b8_col,
         }
 
-        Ok(())
-    }
-
-    pub fn set_b8_array(
-        &mut self,
-        base: usize,
-        row: usize,
-        values: &[Block8],
-    ) -> errors::Result<()> {
-        for (i, &val) in values.iter().enumerate() {
-            self.set_b8(base + i, row, val)?;
+        Block16 {
+            set: set_b16,
+            set_array: set_b16_array,
+            push: push_b16,
+            set_flat: set_b16_flat,
+            set_array_flat: set_b16_array_flat,
+            column: expect_b16_col,
         }
 
-        Ok(())
-    }
-
-    pub fn set_b16_array(
-        &mut self,
-        base: usize,
-        row: usize,
-        values: &[Block16],
-    ) -> errors::Result<()> {
-        for (i, &val) in values.iter().enumerate() {
-            self.set_b16(base + i, row, val)?;
+        Block32 {
+            set: set_b32,
+            set_array: set_b32_array,
+            push: push_b32,
+            set_flat: set_b32_flat,
+            set_array_flat: set_b32_array_flat,
+            column: expect_b32_col,
         }
 
-        Ok(())
-    }
-
-    pub fn set_b32_array(
-        &mut self,
-        base: usize,
-        row: usize,
-        values: &[Block32],
-    ) -> errors::Result<()> {
-        for (i, &val) in values.iter().enumerate() {
-            self.set_b32(base + i, row, val)?;
+        Block64 {
+            set: set_b64,
+            set_array: set_b64_array,
+            push: push_b64,
+            set_flat: set_b64_flat,
+            set_array_flat: set_b64_array_flat,
+            column: expect_b64_col,
         }
 
-        Ok(())
-    }
-
-    pub fn set_b64_array(
-        &mut self,
-        base: usize,
-        row: usize,
-        values: &[Block64],
-    ) -> errors::Result<()> {
-        for (i, &val) in values.iter().enumerate() {
-            self.set_b64(base + i, row, val)?;
+        Block128 {
+            set: set_b128,
+            set_array: set_b128_array,
+            push: push_b128,
+            set_flat: set_b128_flat,
+            set_array_flat: set_b128_array_flat,
+            column: expect_b128_col,
         }
-
-        Ok(())
-    }
-
-    pub fn set_b128_array(
-        &mut self,
-        base: usize,
-        row: usize,
-        values: &[Block128],
-    ) -> errors::Result<()> {
-        for (i, &val) in values.iter().enumerate() {
-            self.set_b128(base + i, row, val)?;
-        }
-
-        Ok(())
     }
 
     // =========================================================

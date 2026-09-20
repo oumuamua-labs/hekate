@@ -44,6 +44,8 @@ and fuzzer ship as independent crates you compose as needed.
 | [`hekate-prover-sys`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-prover-sys) | Open FFI shim. Links the signed prover cdylib over a stable C ABI; the only crate that can call the prover. |
 | [`hekate-keccak`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-keccak)         | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~16x memory savings.                            |
 | [`hekate-aes`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-aes)               | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
+| [`hekate-sha2`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-sha2)             | SHA-256 compression chiplet (FIPS 180-4). Bit-expanded B32 columns, degree 2, 1-16 rounds per row.          |
+| [`hekate-rsa`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-rsa)               | RSA-2048 PKCS#1 v1.5 signature statements (RFC 8017) over the modexp and SHA-256 chiplets.                  |
 | [`hekate-pqc`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-pqc)               | ML-KEM decapsulation and ML-DSA verification (FIPS 203 / 204), with NTT, basemul, norm-check.               |
 | [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile)                          | Wraps a Rust prover into a signed iOS `.xcframework` / Android `.aar` with a typed Swift / Kotlin API.      |
 | [`hekate-scribble`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-scribble)     | Trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.                   |

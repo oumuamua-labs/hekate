@@ -8,13 +8,15 @@ publish-all:
         hekate-crypto
         hekate-core
         hekate-program
-        hekate-gadgets
         hekate-verifier
         hekate-sdk
         hekate-prover-sys
         hekate-scribble
+        hekate-gadgets
         hekate-keccak
         hekate-aes
+        hekate-sha2
+        hekate-rsa
         hekate-pqc
     )
     for c in "${crates[@]}"; do
