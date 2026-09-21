@@ -6,7 +6,7 @@ use crate::errors;
 use core::fmt;
 
 /// Production soundness floor.
-pub const MIN_PRODUCTION_BITS: usize = 110;
+pub const MIN_PRODUCTION_BITS: usize = 100;
 
 /// Brakedown row-code rate `1/INV_RATE`;
 /// small grids fall back to `1/(2·INV_RATE)`.
@@ -23,9 +23,6 @@ pub const OUTER_ROWS: usize = 32;
 /// 32 holds the truncation error below
 /// `num_queries · 2⁻³²`, under one bit.
 pub(crate) const LOG2_FRAC_BITS: u32 = 32;
-
-/// Fractional-mode target of `table_geom`.
-const FRACTIONAL_MODE_BITS: usize = 128;
 
 /// Failures produced by `Config::check_security`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,14 +92,24 @@ pub struct SecurityMetrics {
     /// LDT spot-check count.
     pub num_queries: usize,
 
-    /// LDT proximity bound: `-log₂((1 - δ)^q)`.
+    /// LDT query bound: `-log₂(((1 + ρ)/2)^q)`.
     pub ldt_bits: usize,
 
-    /// Proximity-gap term `n / |F|`.
+    /// Proximity-gap term `(log2(rows) + units - 1) · n / |F|`.
     pub proximity_bits: usize,
 
     /// `min(ldt_bits, proximity_bits)`.
     pub security_bits: usize,
+}
+
+/// Fold the proximity term is stated over: the committed
+/// grid, the eq-tensor's row count and the `eta` walk's
+/// unit count. Both sides derive it from `RingSwitchPlan`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FoldShape {
+    pub grid_cols: usize,
+    pub grid_rows: usize,
+    pub units: usize,
 }
 
 /// Per-table row-code geometry chosen by `Config::table_geom`.
@@ -148,10 +155,10 @@ impl Config {
     /// `MIN_PRODUCTION_BITS` acceptance threshold. The `Default`.
     pub fn prod() -> Self {
         Self {
-            num_queries: 176,
-            ldt_support_size: 200,
+            num_queries: 287,
+            ldt_support_size: 287,
             min_security_bits: MIN_PRODUCTION_BITS,
-            outer_queries: 155,
+            outer_queries: 121,
             zero_knowledge: true,
         }
     }
@@ -190,7 +197,7 @@ impl Config {
         let frac_msg = frac.support_size + grid_cols;
 
         if frac.support_size <= grid_cols
-            && self.ldt_bits(frac_msg, frac.encoded_width) >= FRACTIONAL_MODE_BITS
+            && self.ldt_bits(frac_msg, frac.encoded_width) >= MIN_PRODUCTION_BITS
         {
             return frac;
         }
@@ -201,43 +208,50 @@ impl Config {
         }
     }
 
-    /// `min(-log₂((1 - δ)^q), proximity_gap_bits)`
-    /// where δ = relative distance, q = num_queries.
+    /// `min(-log₂(((1 + ρ)/2)^q), proximity_gap_bits)`
+    /// where ρ = msg_len / code_width, q = num_queries.
     ///
-    /// Brakedown (Golovnev et al. 2022), Section 3.2.
-    pub fn estimated_security_bits(&self, field_bits: usize, grid_cols: usize) -> usize {
-        let g = self.table_geom(grid_cols);
+    /// Brakedown (Golovnev et al. 2022), Appendix B Theorem 7.
+    pub fn estimated_security_bits(&self, field_bits: usize, shape: FoldShape) -> usize {
+        let g = self.table_geom(shape.grid_cols);
 
-        self.ldt_bits(g.support_size + grid_cols, g.encoded_width)
-            .min(self.proximity_gap_bits(field_bits, grid_cols))
+        self.ldt_bits(g.support_size + shape.grid_cols, g.encoded_width)
+            .min(self.proximity_gap_bits(field_bits, shape))
     }
 
-    /// Proximity-gap term `n / |F|` of the
-    /// random column fold (BCIKS20), in bits.
-    pub fn proximity_gap_bits(&self, field_bits: usize, grid_cols: usize) -> usize {
-        let width = self.table_geom(grid_cols).encoded_width;
+    /// `(log2(rows) + units - 1) · n / |F|`: BCIKS20's `n / |F|`,
+    /// Diamond-Gruen 2024/1351's eq-tensor factor over the rows,
+    /// BCIKS20 Thm 1.5's curve factor over the `eta` walk.
+    pub fn proximity_gap_bits(&self, field_bits: usize, shape: FoldShape) -> usize {
+        let width = self.table_geom(shape.grid_cols).encoded_width;
 
-        field_bits.saturating_sub(width.next_power_of_two().ilog2() as usize)
+        let theta = shape.grid_rows.next_power_of_two().ilog2() as usize;
+        let fold_terms = (theta + shape.units.saturating_sub(1)).max(1);
+
+        field_bits
+            .saturating_sub(width.next_power_of_two().ilog2() as usize)
+            .saturating_sub(fold_terms.next_power_of_two().ilog2() as usize)
     }
 
-    /// `field_bits`: `size_of::<F>() * 8`.
-    pub fn security_metrics(&self, field_bits: usize, grid_cols: usize) -> SecurityMetrics {
-        let g = self.table_geom(grid_cols);
+    /// Per-table terms at `shape`; the LogUp `γ` term is
+    /// charged separately by [`Config::logup_gamma_bits`].
+    pub fn security_metrics(&self, field_bits: usize, shape: FoldShape) -> SecurityMetrics {
+        let g = self.table_geom(shape.grid_cols);
 
         SecurityMetrics {
-            relative_distance: self.estimate_relative_distance(grid_cols),
+            relative_distance: self.estimate_relative_distance(shape.grid_cols),
             num_queries: self.num_queries,
-            ldt_bits: self.ldt_bits(g.support_size + grid_cols, g.encoded_width),
-            proximity_bits: self.proximity_gap_bits(field_bits, grid_cols),
-            security_bits: self.estimated_security_bits(field_bits, grid_cols),
+            ldt_bits: self.ldt_bits(g.support_size + shape.grid_cols, g.encoded_width),
+            proximity_bits: self.proximity_gap_bits(field_bits, shape),
+            security_bits: self.estimated_security_bits(field_bits, shape),
         }
     }
 
     /// Rejects configs whose estimated soundness at
     /// `grid_cols` falls below `min_security_bits`.
-    pub fn check_security(&self, field_bits: usize, grid_cols: usize) -> errors::Result<()> {
+    pub fn check_security(&self, field_bits: usize, shape: FoldShape) -> errors::Result<()> {
         // dev (min_security_bits == 0) waives the ZK floor
-        let support = self.table_geom(grid_cols).support_size;
+        let support = self.table_geom(shape.grid_cols).support_size;
         if self.min_security_bits > 0 && support < self.num_queries {
             return Err(Error::InsufficientSupport {
                 ldt_support_size: support,
@@ -246,10 +260,30 @@ impl Config {
             .into());
         }
 
-        let est_bits = self.estimated_security_bits(field_bits, grid_cols);
+        let est_bits = self.estimated_security_bits(field_bits, shape);
         if est_bits < self.min_security_bits {
             return Err(Error::SecurityTooLow {
                 estimated_bits: est_bits,
+                min_bits: self.min_security_bits,
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
+    /// Rejects a proof whose total bus height drops
+    /// the `γ` term below `min_security_bits`.
+    pub fn check_logup_security(&self, field_bits: usize, bus_rows: u64) -> errors::Result<()> {
+        if self.min_security_bits == 0 {
+            return Ok(());
+        }
+
+        let bits = self.logup_gamma_bits(field_bits, bus_rows);
+
+        if bits < self.min_security_bits {
+            return Err(Error::SecurityTooLow {
+                estimated_bits: bits,
                 min_bits: self.min_security_bits,
             }
             .into());
@@ -268,7 +302,7 @@ impl Config {
         g.encoded_width.saturating_sub(g.support_size + grid_cols) as f64 / g.encoded_width as f64
     }
 
-    /// `floor(-log₂((msg_len / code_width)^q))` in bits.
+    /// `floor(-log₂(((1 + ρ)/2)^q))` in bits, ρ = msg_len / code_width.
     /// Integer-only, prover and verifier derive identical geometry;
     /// libm `powf`/`log2` are not bit-reproducible across platforms.
     fn ldt_bits(&self, msg_len: usize, code_width: usize) -> usize {
@@ -276,9 +310,19 @@ impl Config {
             return 0;
         }
 
-        let log2_ratio = log2_ratio_fixed(code_width as u128, msg_len as u128);
+        let log2_ratio =
+            log2_ratio_fixed(2 * code_width as u128, code_width as u128 + msg_len as u128);
 
         ((self.num_queries as u128 * log2_ratio) >> LOG2_FRAC_BITS) as usize
+    }
+
+    /// Schwartz-Zippel over the global LogUp `γ`, in bits:
+    /// the bus argument collapses if `γ` roots any one of the
+    /// `γ + key[i]` denominators, over every bus row in the proof.
+    pub fn logup_gamma_bits(&self, field_bits: usize, bus_rows: u64) -> usize {
+        let rows = bus_rows.max(1).next_power_of_two().ilog2() as usize;
+
+        field_bits.saturating_sub(rows)
     }
 }
 
@@ -318,6 +362,16 @@ mod tests {
 
     const GRID_COLS: usize = 1024;
 
+    /// A single-row, single-unit fold contributes no tensor
+    /// and no curve factor, isolating the terms under test.
+    fn flat(grid_cols: usize) -> FoldShape {
+        FoldShape {
+            grid_cols,
+            grid_rows: 1,
+            units: 1,
+        }
+    }
+
     #[test]
     fn default_is_prod() {
         assert_eq!(Config::default().min_security_bits, MIN_PRODUCTION_BITS);
@@ -328,16 +382,16 @@ mod tests {
     fn prod_meets_production_floor() {
         let prod = Config::prod();
 
-        assert!(prod.estimated_security_bits(128, GRID_COLS) >= MIN_PRODUCTION_BITS);
-        assert!(prod.check_security(128, GRID_COLS).is_ok());
+        assert!(prod.estimated_security_bits(128, flat(GRID_COLS)) >= MIN_PRODUCTION_BITS);
+        assert!(prod.check_security(128, flat(GRID_COLS)).is_ok());
     }
 
     #[test]
     fn dev_is_lenient_on_weak_params() {
         let dev = Config::dev();
 
-        assert!(dev.estimated_security_bits(128, GRID_COLS) < MIN_PRODUCTION_BITS);
-        assert!(dev.check_security(128, GRID_COLS).is_ok());
+        assert!(dev.estimated_security_bits(128, flat(GRID_COLS)) < MIN_PRODUCTION_BITS);
+        assert!(dev.check_security(128, flat(GRID_COLS)).is_ok());
     }
 
     #[test]
@@ -347,17 +401,17 @@ mod tests {
             ..Config::prod()
         };
 
-        assert!(weak.check_security(128, GRID_COLS).is_err());
+        assert!(weak.check_security(128, flat(GRID_COLS)).is_err());
     }
 
     #[test]
     fn full_half_fallback_admits_ml_dsa_grid() {
-        assert!(Config::prod().check_security(128, 512).is_ok());
+        assert!(Config::prod().check_security(128, flat(512)).is_ok());
     }
 
     #[test]
     fn grid_below_num_queries_rejected() {
-        assert!(Config::prod().check_security(128, 128).is_err());
+        assert!(Config::prod().check_security(128, flat(128)).is_err());
     }
 
     #[test]
@@ -373,8 +427,9 @@ mod tests {
                 continue;
             }
 
-            let one_minus_delta = msg as f64 / g.encoded_width as f64;
-            let reference = (-one_minus_delta.powf(cfg.num_queries as f64).log2()).floor();
+            let rho = msg as f64 / g.encoded_width as f64;
+            let per_query = (1.0 + rho) / 2.0;
+            let reference = (-per_query.powf(cfg.num_queries as f64).log2()).floor();
             let integer = cfg.ldt_bits(msg, g.encoded_width) as f64;
 
             assert!(
@@ -395,5 +450,62 @@ mod tests {
         let small = prod.table_geom(512);
         assert_eq!(small.support_size, 512);
         assert_eq!(small.encoded_width, INV_RATE * 512 * 2);
+    }
+
+    #[test]
+    fn prod_queries_sit_on_fractional_mode_edge() {
+        let at = |t: usize| Config {
+            num_queries: t,
+            ldt_support_size: t,
+            ..Config::prod()
+        };
+
+        let binding = 1usize << 11;
+
+        assert_eq!(Config::prod().num_queries, 287);
+        assert_eq!(at(287).encoded_width(binding), binding * INV_RATE);
+        assert_eq!(at(286).encoded_width(binding), binding * INV_RATE * 2);
+    }
+
+    #[test]
+    fn grid_1024_never_clears_floor_fractionally() {
+        let best = (200..=1200)
+            .map(|t| {
+                let cfg = Config {
+                    num_queries: t,
+                    ldt_support_size: t,
+                    ..Config::prod()
+                };
+
+                cfg.ldt_bits(t + 1024, 2048)
+            })
+            .max()
+            .unwrap();
+
+        assert!(best < MIN_PRODUCTION_BITS, "peaked at {best}");
+    }
+
+    #[test]
+    fn proximity_gap_charges_tensor_and_curve_factors() {
+        let cfg = Config::prod();
+        let grid_cols = 1usize << 14;
+
+        let width_only = cfg.proximity_gap_bits(128, flat(grid_cols));
+
+        let charged = cfg.proximity_gap_bits(
+            128,
+            FoldShape {
+                grid_cols,
+                grid_rows: 1 << 7,
+                units: 80,
+            },
+        );
+
+        assert_eq!(cfg.encoded_width(grid_cols), 1 << 15);
+        assert_eq!(width_only, 128 - 15);
+        assert_eq!(
+            width_only - charged,
+            (7 + 79usize).next_power_of_two().ilog2() as usize
+        );
     }
 }

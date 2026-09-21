@@ -52,13 +52,19 @@ pub fn compute_split_vars(
         optimal_c += 1;
     }
 
-    let support_floor = if support_size > 1 {
-        (support_size - 1).ilog2() as usize + 1
-    } else {
-        1
-    };
+    optimal_c
+        .max(support_floor_vars(support_size))
+        .clamp(1, num_vars)
+}
 
-    optimal_c.max(support_floor).clamp(1, num_vars)
+/// Fewest split variables whose grid holds the support block.
+/// Narrower, the grid falls to full-half and `check_security`
+/// rejects `support_size = grid_cols` below `num_queries`.
+pub fn support_floor_vars(support_size: usize) -> usize {
+    match support_size > 1 {
+        true => (support_size - 1).ilog2() as usize + 1,
+        false => 1,
+    }
 }
 
 #[cfg(test)]
