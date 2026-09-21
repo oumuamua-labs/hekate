@@ -18,7 +18,9 @@ use hekate_core::protocol;
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{BinaryFieldExtras, Flat, HardwareField, TowerField};
-use hekate_program::outer::{OuterLayout, OuterStatement, TableRecord, assemble, linear_weights};
+use hekate_program::outer::{
+    OuterLayout, OuterStatement, TableRecord, assemble, linear_tensor_vars, linear_weights,
+};
 use tracing::{debug_span, instrument, warn};
 
 /// Next unconsumed pad index;
@@ -70,7 +72,7 @@ where
         }
     };
 
-    let field_bits = size_of::<F>() * 8;
+    let field_bits = F::BITS;
     let geom = config.outer_geom(statement.masked_scalars, statement.mul_wires, field_bits)?;
     let layout = OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires)?;
 
@@ -88,12 +90,14 @@ where
     transcript.append_field_list(b"outer_w", &outer.interleaved);
 
     let rows = assemble(records, &statement)?;
+    let lin_vars = linear_tensor_vars(&rows);
 
-    let r_lin: Vec<F> = debug_span!("r_lin", rows = rows.affine.len()).in_scope(|| {
-        (0..rows.affine.len())
-            .map(|_| transcript.challenge_field::<F>(b"outer_r_lin"))
-            .collect::<Result<_, _>>()
-    })?;
+    let r_lin: Vec<F> =
+        debug_span!("r_lin", rows = rows.affine.len(), lin_vars).in_scope(|| {
+            (0..lin_vars)
+                .map(|_| transcript.challenge_field::<F>(b"outer_r_lin"))
+                .collect::<Result<_, _>>()
+        })?;
 
     transcript.append_field_list(b"outer_q", &outer.linear);
 

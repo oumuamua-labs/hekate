@@ -1131,15 +1131,22 @@ pub fn aux_filler_len(layout: &OuterLayout, code_len: usize) -> usize {
     count * (code_len - layout.message_len) + code_len - 1 + 3 * layout.message_len
 }
 
+/// Challenge count for `outer_r_lin`. The tensor
+/// batches the affine rows at `k / |F|`, not the
+/// `1 / |F|` of one challenge per row.
+pub fn linear_tensor_vars<F>(rows: &OuterRows<F>) -> usize {
+    rows.affine.len().next_power_of_two().ilog2() as usize
+}
+
 pub fn linear_weights<F: TowerField + HardwareField>(
     layout: &OuterLayout,
     rows: &OuterRows<F>,
-    batch: &[F],
+    tensor: &[F],
 ) -> errors::Result<LinearBatch<F>> {
-    if batch.len() != rows.affine.len() {
+    if tensor.len() != linear_tensor_vars(rows) {
         return Err(errors::Error::Protocol {
             protocol: "outer",
-            message: "one batch challenge per affine row",
+            message: "linear batch takes ceil(log2(affine rows)) challenges",
         });
     }
 
@@ -1150,7 +1157,7 @@ pub fn linear_weights<F: TowerField + HardwareField>(
         });
     }
 
-    let scales: Vec<Flat<F>> = batch.iter().map(|r| r.to_hardware()).collect();
+    let scales = expand_batch_tensor(tensor, rows.affine.len());
 
     let mut weights = vec![vec![Flat::from_raw(F::ZERO); layout.message_len]; layout.total_rows()];
     let mut target = Flat::from_raw(F::ZERO);
@@ -1202,6 +1209,27 @@ fn scale_into<F: TowerField + HardwareField>(dst: &mut AffineRow<F>, src: &Form<
     }
 
     dst.constant += src.constant * c;
+}
+
+fn expand_batch_tensor<F: TowerField + HardwareField>(tensor: &[F], len: usize) -> Vec<Flat<F>> {
+    let mut scales = vec![Flat::from_raw(F::ZERO); len];
+
+    if len == 0 {
+        return scales;
+    }
+
+    scales[0] = Flat::from_raw(F::ONE);
+
+    for (j, &r) in tensor.iter().enumerate() {
+        let half = 1usize << j;
+        let scale = r.to_hardware();
+
+        for i in half..len.min(half << 1) {
+            scales[i] = scales[i - half] * scale;
+        }
+    }
+
+    scales
 }
 
 fn lagrange_weights<F: TowerField + HardwareField>(degree: usize, r: Flat<F>) -> Vec<Flat<F>> {
@@ -1771,6 +1799,37 @@ mod tests {
             let left = pad[BUS_H_PAD as usize] + pad[BUS_PAD_FIRST as usize + H_CLAIM];
 
             assert_eq!(left == pins[0].constant, holds);
+        }
+    }
+
+    #[test]
+    fn batch_tensor_is_product_over_set_bits() {
+        let a = F::from(0x1234_5678_9abc_def0u128);
+        let b = F::from(0x0fed_cba9_8765_4321u128);
+        let c = F::from(0xdead_beef_cafe_babeu128);
+
+        let (fa, fb, fc) = (a.to_hardware(), b.to_hardware(), c.to_hardware());
+        let one = Flat::from_raw(F::ONE);
+
+        assert_eq!(expand_batch_tensor::<F>(&[], 1), vec![one]);
+        assert_eq!(expand_batch_tensor(&[a], 2), vec![one, fa]);
+        assert_eq!(expand_batch_tensor(&[a, b], 4), vec![one, fa, fb, fa * fb]);
+
+        assert_eq!(
+            expand_batch_tensor(&[a, b, c], 8),
+            vec![one, fa, fb, fa * fb, fc, fa * fc, fb * fc, fa * fb * fc,],
+        );
+    }
+
+    #[test]
+    fn batch_tensor_truncates_below_power_of_two() {
+        let a = F::from(0x1234_5678_9abc_def0u128);
+        let b = F::from(0x0fed_cba9_8765_4321u128);
+
+        let full = expand_batch_tensor(&[a, b], 4);
+
+        for len in 1..=4 {
+            assert_eq!(expand_batch_tensor(&[a, b], len), full[..len]);
         }
     }
 }
