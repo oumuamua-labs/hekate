@@ -508,4 +508,33 @@ mod tests {
             (7 + 79usize).next_power_of_two().ilog2() as usize
         );
     }
+
+    #[test]
+    fn logup_gamma_sits_on_production_floor_edge() {
+        let prod = Config::prod();
+        let edge = 1u64 << (128 - MIN_PRODUCTION_BITS);
+
+        assert_eq!(prod.logup_gamma_bits(128, edge), MIN_PRODUCTION_BITS);
+        assert_eq!(
+            prod.logup_gamma_bits(128, edge + 1),
+            MIN_PRODUCTION_BITS - 1
+        );
+
+        assert!(prod.check_logup_security(128, edge).is_ok());
+        assert!(prod.check_logup_security(128, edge + 1).is_err());
+    }
+
+    #[test]
+    fn logup_gamma_clears_for_busless_and_dev_proofs() {
+        let prod = Config::prod();
+
+        assert_eq!(prod.logup_gamma_bits(128, 0), 128);
+        assert_eq!(prod.logup_gamma_bits(128, 1), 128);
+        assert!(prod.check_logup_security(128, 0).is_ok());
+
+        let dev = Config::dev();
+
+        assert_eq!(dev.min_security_bits, 0);
+        assert!(dev.check_logup_security(128, 1 << 60).is_ok());
+    }
 }
