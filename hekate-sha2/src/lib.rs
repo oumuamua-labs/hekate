@@ -134,11 +134,13 @@ pub fn pad_message(msg: &[u8]) -> Vec<[u32; BLOCK_WORDS]> {
     bytes.extend_from_slice(&bit_len.to_be_bytes());
 
     bytes
-        .chunks_exact(64)
+        .as_chunks::<64>()
+        .0
+        .iter()
         .map(|chunk| {
             let mut words = [0u32; BLOCK_WORDS];
-            for (word, quad) in words.iter_mut().zip(chunk.chunks_exact(4)) {
-                *word = u32::from_be_bytes([quad[0], quad[1], quad[2], quad[3]]);
+            for (word, quad) in words.iter_mut().zip(chunk.as_chunks::<4>().0) {
+                *word = u32::from_be_bytes(*quad);
             }
 
             words
@@ -154,8 +156,8 @@ pub fn sha256_words(msg: &[u8]) -> [u32; STATE_WORDS] {
 
 pub fn digest_bytes(words: &[u32; STATE_WORDS]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    for (quad, word) in out.chunks_exact_mut(4).zip(words) {
-        quad.copy_from_slice(&word.to_be_bytes());
+    for (quad, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *quad = word.to_be_bytes();
     }
 
     out
