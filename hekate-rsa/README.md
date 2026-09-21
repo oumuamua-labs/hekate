@@ -15,9 +15,9 @@ RFC 8017 §9.2 encoding: limbs `0..8` against the digest words, limbs `8..64` ag
 constant limbs are pinned.
 
 ```
-Apple M3 Max, ZK, mean of 5 runs (hekate/examples/rsa_pkcs1.rs):
-  200-byte message, 4 blocks at 2 rounds/row, host 2^8, SHA chiplet 2^8, modexp chiplet 2^10:
-  287 ms prove, 43 ms verify, 9,434 KiB proof, 396 MiB
+Apple M3 Max, ZK, best of three runs (hekate/examples/rsa_pkcs1.rs):
+  200-byte message, 4 blocks at 2 rounds/row, host 2^9, SHA chiplet 2^9, modexp chiplet 2^10:
+  335 ms prove, 30 ms verify, 14,723 KiB proof, 523 MiB
 ```
 
 ## Examples

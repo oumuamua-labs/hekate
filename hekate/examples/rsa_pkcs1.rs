@@ -23,8 +23,8 @@ use rand::{TryRngCore, rngs::OsRng};
 type F = Block128;
 type H = DefaultHasher;
 
-const SHA_ROWS: usize = 256;
-const CPU_ROWS: usize = 256;
+const SHA_ROWS: usize = 512;
+const CPU_ROWS: usize = 512;
 
 /// A real RSA-2048 key and PKCS#1 v1.5 signature over
 /// `(0..200u8)`, from CPython (`genkey.py`, seed 81030311).

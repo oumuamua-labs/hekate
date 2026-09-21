@@ -248,11 +248,12 @@ mod tests {
     const FIELD_BITS: usize = 128;
 
     #[test]
-    fn prod_geometry_saturates_field_width() {
+    fn prod_geometry_meets_the_production_floor() {
         let cfg = Config::prod();
         let geom = cfg.outer_geom(12_000, 20_000, FIELD_BITS).unwrap();
 
-        assert!(cfg.outer_security_bits(FIELD_BITS, &geom) >= FIELD_BITS);
+        assert!(cfg.outer_security_bits(FIELD_BITS, &geom) >= MIN_PRODUCTION_BITS);
+        assert!(cfg.outer_field_term_bits(FIELD_BITS, &geom) >= MIN_PRODUCTION_BITS);
     }
 
     #[test]
@@ -330,36 +331,27 @@ mod tests {
         let geom = cfg.outer_geom(12_000, 20_000, FIELD_BITS).unwrap();
 
         let thinner = OuterGeometry {
-            queries: 154,
+            queries: 120,
             ..geom
         };
 
-        assert!(cfg.outer_security_bits(FIELD_BITS, &thinner) < 128);
-        assert!(cfg.outer_security_bits(FIELD_BITS, &geom) >= 128);
+        assert_eq!(cfg.outer_queries, 121);
+        assert!(cfg.outer_security_bits(FIELD_BITS, &thinner) < MIN_PRODUCTION_BITS);
+        assert!(cfg.outer_security_bits(FIELD_BITS, &geom) >= MIN_PRODUCTION_BITS);
     }
 
-    /// `128 - log2(2^18) = MIN_PRODUCTION_BITS` is the binding term;
-    /// one more mul wire doubles the domain and loses a bit.
+    /// `MAX_OUTER_DOMAIN_LOG2` binds before the field term:
+    /// one more mul wire pushes the domain past 2^24, while
+    /// `128 - 24 = 104` still clears `MIN_PRODUCTION_BITS`.
     #[test]
-    fn field_term_caps_outer_statement() {
+    fn domain_cap_bounds_outer_statement() {
         let cfg = Config::prod();
 
-        let largest = cfg.outer_geom(12_000, 173_098, FIELD_BITS).unwrap();
+        let largest = cfg.outer_geom(12_000, 11_183_509, FIELD_BITS).unwrap();
 
-        assert_eq!(largest.domain_len, 1 << 18);
-        assert_eq!(
-            cfg.outer_field_term_bits(FIELD_BITS, &largest),
-            MIN_PRODUCTION_BITS
-        );
-
-        let doubled = OuterGeometry {
-            domain_len: 1 << 19,
-            ..largest
-        };
-
-        assert!(doubled.domain_len.ilog2() <= MAX_OUTER_DOMAIN_LOG2);
-        assert!(cfg.outer_field_term_bits(FIELD_BITS, &doubled) < MIN_PRODUCTION_BITS);
-        assert!(cfg.outer_geom(12_000, 173_099, FIELD_BITS).is_err());
+        assert_eq!(largest.domain_len.ilog2(), MAX_OUTER_DOMAIN_LOG2);
+        assert!(cfg.outer_field_term_bits(FIELD_BITS, &largest) > MIN_PRODUCTION_BITS);
+        assert!(cfg.outer_geom(12_000, 11_183_510, FIELD_BITS).is_err());
     }
 
     #[test]

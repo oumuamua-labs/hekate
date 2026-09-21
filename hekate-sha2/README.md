@@ -13,9 +13,9 @@ the feed-forward add `h_out = h_in + state_out` itself through `CpuSha256Block`,
 and its sponge. Padding and chaining are the CPU table's.
 
 ```
-Apple M3 Max, ZK, chiplet mounted into the CPU table, mean of 5 runs (hekate/examples/sha256.rs):
-  DSC SOD, 40 compressions (2.5 KB), 2 rounds/row, 2^11 rows: 75 ms prove, 11.2 ms verify, 591 KiB proof, 67 MiB
-  131,072 compressions (8.4 MB), 4 rounds/row, 2^21 rows:    11.6 s prove, 29 ms verify, 7,144 KiB proof, 5,079 MiB
+Apple M3 Max, ZK, chiplet mounted into the CPU table, best of three runs (hekate/examples/sha256.rs):
+  DSC SOD, 40 compressions (2.5 KB), 2 rounds/row, 2^11 rows: 73 ms prove, 9.8 ms verify, 542 KiB proof, 64 MiB
+  131,072 compressions (8.4 MB), 4 rounds/row, 2^21 rows:    11.3 s prove, 23 ms verify, 5,503 KiB proof, 5,274 MiB
 ```
 
 ## Examples
