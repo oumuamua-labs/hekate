@@ -5,11 +5,11 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::iter::repeat_n;
-use hekate_core::config::Config;
+use hekate_core::config::{Config, FoldShape, MIN_PRODUCTION_BITS};
 use hekate_core::errors::Error;
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{ColumnType, Trace, TraceColumn, TraceCompatibleField};
-use hekate_core::utils::compute_split_vars;
+use hekate_core::utils::{compute_split_vars, support_floor_vars};
 use hekate_math::{
     Bit, Block8, Block16, Block32, Block64, Block128, Flat, HardwareField, TowerField,
 };
@@ -709,13 +709,38 @@ impl RingSwitchPlan {
         self.leaf_row_bytes() + self.h_leaf_row_bytes()
     }
 
-    pub fn split_vars(&self, num_vars: usize, config: &Config) -> usize {
-        compute_split_vars(
+    /// `log2(grid_cols)` for this table: the proof-size optimum,
+    /// stepped down, narrowing the grid to buy proximity bits,
+    /// to the widest split that clears `MIN_PRODUCTION_BITS`.
+    pub fn split_vars(&self, num_vars: usize, field_bits: usize, config: &Config) -> usize {
+        let split = compute_split_vars(
             num_vars,
             config.num_queries,
             config.ldt_support_size,
             self.opened_row_bytes(),
-        )
+        );
+
+        let floor = support_floor_vars(config.ldt_support_size)
+            .clamp(1, num_vars.max(1))
+            .min(split);
+
+        let bits = |c: usize| {
+            config.estimated_security_bits(
+                field_bits,
+                FoldShape {
+                    grid_cols: 1 << c,
+                    grid_rows: 1 << (num_vars - c),
+                    units: self.num_units,
+                },
+            )
+        };
+
+        // Never config.min_security_bits: unabsorbed, leaving the
+        // two sides free to derive different grids for one proof.
+        (floor..=split)
+            .rev()
+            .find(|&c| bits(c) >= MIN_PRODUCTION_BITS)
+            .unwrap_or(split)
     }
 
     /// Per committed column, trace leaf then h leaf:
@@ -1058,6 +1083,10 @@ mod tests {
         layout.extend(repeat_n(ColumnType::Bit, 2));
 
         layout
+    }
+
+    fn plan_of(cols: usize) -> RingSwitchPlan {
+        RingSwitchPlan::new(&vec![ColumnType::B128; cols], None, 1, 1).unwrap()
     }
 
     #[test]
@@ -1422,5 +1451,61 @@ mod tests {
         }
 
         assert_eq!(sum, target);
+    }
+
+    /// The scan is only correct if it finds the best split, not
+    /// merely a better one: `bits` is not unimodal in the split,
+    /// and a plateau must not end the search on a local peak.
+    #[test]
+    fn adaptive_split_clears_floor_whenever_any_split_can() {
+        let config = Config::prod();
+
+        let mut stepped_down = 0;
+        for cols in [1usize, 4, 16, 64, 128] {
+            let plan = plan_of(cols);
+            for num_vars in 10usize..=30 {
+                let chosen = plan.split_vars(num_vars, 128, &config);
+                let bits = |c: usize| {
+                    config.estimated_security_bits(
+                        128,
+                        FoldShape {
+                            grid_cols: 1 << c,
+                            grid_rows: 1 << (num_vars - c),
+                            units: plan.num_units,
+                        },
+                    )
+                };
+
+                let optimal = compute_split_vars(
+                    num_vars,
+                    config.num_queries,
+                    config.ldt_support_size,
+                    plan.opened_row_bytes(),
+                );
+
+                assert!(chosen <= optimal, "cols={cols} n={num_vars}: stepped up");
+                assert!(
+                    chosen >= support_floor_vars(config.ldt_support_size).min(optimal),
+                    "cols={cols} n={num_vars}: below the support floor"
+                );
+
+                if chosen < optimal {
+                    stepped_down += 1;
+                }
+
+                let best = (1..=optimal).map(bits).max().unwrap();
+
+                if best >= MIN_PRODUCTION_BITS {
+                    assert!(
+                        bits(chosen) >= MIN_PRODUCTION_BITS,
+                        "cols={cols} n={num_vars}: chose {chosen} at {} bits, \
+                         but some split reaches {best}",
+                        bits(chosen),
+                    );
+                }
+            }
+        }
+
+        assert!(stepped_down > 0, "the adaptive walk never fired");
     }
 }
