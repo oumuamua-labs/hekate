@@ -7,7 +7,7 @@ use crate::sumcheck::verify;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use hekate_core::config::{Config, INV_RATE};
+use hekate_core::config::{Config, FoldShape, INV_RATE};
 use hekate_core::errors;
 use hekate_core::proofs::{BrakedownCommitment, EvalBatchProof};
 use hekate_core::tensor::TensorProduct;
@@ -179,7 +179,8 @@ where
 
         transcript.append_field_list(b"tensor_q", q);
 
-        let split_vars = plan.split_vars(num_vars, config);
+        let field_bits = F::BITS;
+        let split_vars = plan.split_vars(num_vars, field_bits, config);
 
         let grid_cols = 1 << split_vars;
         let grid_rows = 1 << (num_vars - split_vars);
@@ -187,6 +188,12 @@ where
         let encoded_width = geom.encoded_width;
         let phys_row_bytes = plan.leaf_row_bytes();
         let h_row_bytes = plan.h_leaf_row_bytes();
+
+        let shape = FoldShape {
+            grid_cols,
+            grid_rows,
+            units: plan.num_units,
+        };
 
         debug!(
             num_vars,
@@ -200,12 +207,20 @@ where
             "table geometry"
         );
 
+        debug!(
+            bits = config.estimated_security_bits(field_bits, shape),
+            ldt_query = config.security_metrics(field_bits, shape).ldt_bits,
+            fold_gap = config.proximity_gap_bits(field_bits, shape),
+            units = plan.num_units,
+            "table security"
+        );
+
         if grid_cols + geom.support_size > encoded_width {
             warn!("support + data message exceeds the codeword width");
             return Ok(None);
         }
 
-        config.check_security(size_of::<F>() * 8, grid_cols)?;
+        config.check_security(field_bits, shape)?;
 
         let expected_len = grid_cols + geom.support_size;
 
@@ -828,8 +843,8 @@ mod tests {
 
         let zero = Flat::from_raw(Block128::ZERO);
 
-        for j in 0..=len.ilog2() as usize {
-            let at = 1usize << j;
+        let mut at = 1usize;
+        while at < len {
             let slot = match at < ldt {
                 true => GRID_COLS + at,
                 false => at - ldt,
@@ -844,7 +859,9 @@ mod tests {
                 .filter(|&x| code[x] == zero)
                 .collect();
 
-            assert_eq!(zeros, (0..at).collect::<Vec<usize>>(), "s_{j}");
+            assert_eq!(zeros, (0..at).collect::<Vec<usize>>(), "s_{}", at.ilog2());
+
+            at <<= 1;
         }
     }
 }

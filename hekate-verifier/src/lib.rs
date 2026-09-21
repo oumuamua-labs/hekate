@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use hekate_core::config::Config;
+use hekate_core::config::{Config, FoldShape};
 use hekate_core::errors;
 use hekate_core::proofs::{
     BrakedownCommitment, EvalBatchProof, InnerProof, LogUpAux, SumcheckProof,
@@ -176,21 +176,18 @@ where
             program.permutation_checks().len(),
         )?;
 
-        let main_grid_cols = 1 << main_plan.split_vars(num_vars, config);
+        let field_bits = F::BITS;
+        let main_split = main_plan.split_vars(num_vars, field_bits, config);
 
-        let field_bits = size_of::<F>() * 8;
-        let metrics = config.security_metrics(field_bits, main_grid_cols);
+        let main_shape = FoldShape {
+            grid_cols: 1 << main_split,
+            grid_rows: 1 << (num_vars - main_split),
+            units: main_plan.num_units,
+        };
 
-        info!(
-            "System Security: ~{} bits (LDT: {}, Proximity: {}, Field: {}, Distance: {:.4})",
-            metrics.security_bits,
-            metrics.ldt_bits,
-            metrics.proximity_bits,
-            field_bits,
-            metrics.relative_distance,
-        );
+        let metrics = config.security_metrics(field_bits, main_shape);
 
-        config.check_security(field_bits, main_grid_cols)?;
+        config.check_security(field_bits, main_shape)?;
 
         let expected_trace_len = main_plan.total_claims();
         let combined_vals = &proof.eval_proof.point_evaluation.1;
@@ -306,6 +303,27 @@ where
         // =========================================================
         // PHASE 3: DRAW GLOBAL γ, β, AND r_bus PER LOOKUP BUS
         // =========================================================
+        let bus_rows = main_perm.len() as u64 * proof.trace_commitment.num_rows as u64
+            + chiplet_tables
+                .iter()
+                .zip(proof.chiplet_commitments.iter())
+                .map(|(t, c)| t.def.permutation_checks.len() as u64 * c.num_rows as u64)
+                .sum::<u64>();
+
+        let logup_bits = config.logup_gamma_bits(field_bits, bus_rows);
+
+        info!(
+            bits = metrics.security_bits.min(logup_bits),
+            ldt_query = metrics.ldt_bits,
+            fold_gap = metrics.proximity_bits,
+            logup_gamma = logup_bits,
+            field_bits,
+            code_distance = metrics.relative_distance,
+            "main table security"
+        );
+
+        config.check_logup_security(field_bits, bus_rows)?;
+
         let gamma = transcript.challenge_field::<F>(b"bus_gamma")?.to_hardware();
         let beta = transcript.challenge_field::<F>(b"bus_beta")?.to_hardware();
 
