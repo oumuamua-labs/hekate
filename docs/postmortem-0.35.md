@@ -37,11 +37,11 @@ contradict itself. Gaps 3, 4 and 5 are terms missing from the sum.
 No proof crosses this boundary. `num_queries`, `ldt_support_size` and
 `outer_queries` are absorbed into the transcript before any challenge and all
 three moved, which means a 0.34.0 proof fails transcript replay at the first
-challenge rather than somewhere subtle. The proof wire format moves v5 to v6 and
+challenge. The proof wire format moves v5 to v6 and
 the bundle format v4 to v5, carried by the proof-size work shipping alongside.
 The pinned prover release is 0.13.0.
 
-The second row states a ceiling, not an absence. Checked: every term we can
+The second row states a ceiling. Checked: every term we can
 identify is now computed, charged, and logged per table on both sides. Not
 checked: whether a term exists that we have not identified. Four postmortems in
 this series are evidence that the second category is never empty.
@@ -68,14 +68,14 @@ measurement.
 
 ## 1. Column queries were priced at capacity
 
-These commitments are checked by opening `t` random columns of an encoded matrix.
-Security is `t` times the negative log of the per-query pass probability of a
-cheating prover, and the question is which pass probability the papers license.
-
 `Config::ldt_bits` computed `t · log2(1 / rho)` with `rho = msg_len / code_width`,
 pricing each query at `rho`, which is **1.0 bit per query at rate 1/2**. That is
 list-decoding-capacity pricing, and the citation attached to it pointed at a
 section of Brakedown bounding a different quantity.
+
+The commitment is checked by opening `t` random columns of an encoded matrix.
+Security is `t` times the negative log of the per-query pass probability of a
+cheating prover, and the question is which pass probability the papers license.
 
 What the literature gives, unanimously:
 
@@ -111,6 +111,11 @@ let log2_ratio = log2_ratio_fixed(2 * code_width as u128, (code_width + msg_len)
 
 ## 2. The formula also chose the geometry
 
+`ldt_bits` did two jobs: it reported a table's security, and it decided whether
+that table got the cheap encoding. Overstating by 2.4x meant every table cleared a
+128-bit gate it could not really clear, took the cheaper geometry, and was then
+graded safe in it by the same overstating function.
+
 Each table picks one of two encodings. A fractional geometry carries a fixed
 support block at rate 1/2. A full-half geometry doubles the codeword width, is
 safer, and costs twice the encoded matrix. The choice was made like this:
@@ -120,11 +125,7 @@ if frac.support_size <= grid_cols
     && self.ldt_bits(frac_msg, frac.encoded_width) >= FRACTIONAL_MODE_BITS
 ```
 
-`FRACTIONAL_MODE_BITS` was 128. The overstated `ldt_bits` therefore did two jobs:
-it reported a table's security, and it decided whether that table got the cheap
-encoding. Overstating by 2.4x meant every table cleared a 128-bit gate it could
-not really clear, took the cheaper geometry, and was then graded safe in it by
-the same overstating function.
+`FRACTIONAL_MODE_BITS` was 128.
 
 The smallest fractional table cleared that gate by two bits, 130 against 128.
 Under the correct formula it needs 396 queries to stay there.
@@ -143,9 +144,10 @@ to change, and the units changed.
 
 ## 3. The proximity term was missing two factors
 
-Beside the query term sits an additive term: the probability that the random fold
-is unrepresentative. It was `field_bits - log2(width)`, the single-line term from
-BCIKS20, which omits two factors this protocol incurs:
+The proximity term was `field_bits - log2(width)`, the single-line term from
+BCIKS20, and it omits two factors this protocol incurs. It sits beside the query
+term, bounding the probability that the random fold is unrepresentative. The two
+omissions:
 
 - the eq-tensor factor over the grid's rows, charged by Diamond and Gruen as
   `theta` for a tensor over `2^theta` rows;
@@ -165,18 +167,17 @@ This term is why large traces need an adaptive grid. It is 104.2 bits at a
 codeword of 2^21 and falls about a bit per doubling, reaching 100 near 2^25.
 `RingSwitchPlan::split_vars` now scans down from the proof-size optimum and takes
 the widest grid still clearing the floor. Narrowing buys proximity bits and costs
-proof bytes, which is a trade to make automatically rather than discover in
-production.
+proof bytes, and the scan makes that trade on every table.
 
 ## 4. The LogUp challenge term was never counted
 
-Tables are joined by a bus argument whose soundness rests on a global challenge
-`gamma` avoiding every `gamma + key[i]` denominator across every bus row in the
-proof. That is `field_bits - log2(bus rows)`: 108 bits at 2^20 rows, 102 at 2^26.
+A term worth 108 bits at 2^20 bus rows and 102 at 2^26 appeared in no estimate and
+no check. Tables are joined by a bus argument whose soundness rests on a global
+challenge `gamma` avoiding every `gamma + key[i]` denominator across every bus row
+in the proof, which is `field_bits - log2(bus rows)`.
 
-It appeared in no estimate and no check. `Config::check_logup_security` now
-computes it from the program's bus counts and the committed table heights, and
-both sides run it before `gamma` is drawn. The prover runs it before any
+`Config::check_logup_security` now computes it from the program's bus counts and
+the committed table heights, and both sides run it before `gamma` is drawn. The prover runs it before any
 commitment work, turning a rejection that cost a full proving run into one that
 costs milliseconds.
 
@@ -202,7 +203,7 @@ margin. Anyone reading the old single line would have reported the first number.
 
 Two pricings differing by 99 bits at `t = 176` differ by only 10x to 25x in
 acceptance at `t = 8`, which is why no existing test separated them and why the
-question had to be settled by measurement rather than by reading.
+question was settled by measurement.
 
 `hekate/tests/mixture_proximity.rs` builds the shipped encode, reconstructs its
 evaluation domain, and measures the per-query pass rate of two cheating
@@ -249,32 +250,47 @@ costs about 2.25x in proof size on a 2^24 trace.
 
 Where the deployed field sits:
 
-| System                         | Level | Basis                                                     |
-|:-------------------------------|:------|:----------------------------------------------------------|
-| SP1 Hypercube                  | 100   | Proven, unique decoding (16 of the 100 are grinding bits) |
-| SP1 Turbo, Plonky3 example FRI | 100   | Conjectured                                               |
-| Ligerito                       | 100   | Proven, unique decoding, 148 queries at rate 1/4          |
-| Ethereum Foundation zkEVM      | 100   | Provable target for M2, 128 provable for M3               |
-| Halo2 / Zcash                  | ~126  | Discrete log, not post-quantum                            |
+| System                                      | Level | Basis                                                     |
+|:--------------------------------------------|:------|:----------------------------------------------------------|
+| [SP1 Hypercube][sp1]                        | 100   | Proven, unique decoding (16 of the 100 are grinding bits) |
+| [SP1 Turbo][sp1], [Plonky3 example FRI][p3] | 100   | Conjectured                                               |
+| [Ligerito][lig]                             | 100   | Proven, unique decoding, 148 queries at rate 1/4          |
+| [Ethereum Foundation zkEVM][ef]             | 100   | Provable target for M2, 128 provable for M3               |
 
-Binius64 sets `lambda = 128` over GF(2^128) and writes the total as
-`O(l)/|K| + 2^-lambda`. Its fold's proximity error is additive and queries cannot
-shrink it, landing near 2^-100 or worse at large codewords, which makes that 128
-a parameter rather than an end-to-end bound. Its FRI code prices queries at the
-unique-decoding radius, as does Plonky3's binary-tower path, whose security
-module opens by stating that only unique decoding is supported.
+[sp1]: https://docs.succinct.xyz/docs/sp1/security/security-model
+[p3]: https://github.com/Plonky3/Plonky3/tree/main/security
+[lig]: https://eprint.iacr.org/2025/1187
+[ef]: https://zkevm.ethereum.foundation/blog/cryptography-research-update
+
+SP1's target and its 16 grinding bits sit in `crates/primitives/src/fri_params.rs`,
+Plonky3's count in `conjectured_soundness_bits`, and Ligerito's 148 is
+`ceil(100 / -log2((1 + 1/4) / 2))`.
+
+[Binius64's specification](https://binius.xyz/spec.pdf) sets `lambda = 128` over
+GF(2^128) and writes the total as `O(l)/|K| + 2^-lambda`. Its fold's proximity
+error is additive and queries cannot shrink it, landing near 2^-100 or worse at
+large codewords, which makes that 128 a parameter rather than an end-to-end bound.
+Its FRI code sets the proximity parameter "to the code's unique decoding radius"
+in [`crates/iop/src/fri/common.rs`](https://github.com/binius-zk/binius64), and
+Plonky3's binary-tower path opens [`security/src/binary.rs`][p3] with "Only unique
+decoding is supported."
 
 A larger radius is not available to us:
 
 | Route          | Why it is unavailable                                                                                                                                 |
 |:---------------|:------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Johnson radius | Buys about 10 percent per query, loses more in the batching term: 2^-89.8 against unique decoding's 2^-104.2 on our geometry, and we take the minimum |
-| Capacity       | Refuted in 2025, with counterexamples built over characteristic-2 fields                                                                              |
+| Capacity       | Refuted by Ben-Sasson, Carmon, Habock, Kopparty and Saraf ([ECCC TR25-169][bchks]), counterexamples over characteristic-2 fields                      |
 | STIR, WHIR     | Fold over multiplicative cosets of 2-power order; `\|F*\| = 2^k - 1` is odd in every binary field                                                     |
 
-For calibration, an unconditional floor from Elias list-decoding capacity puts any
-rate-1/2 scheme of this shape at 103 queries minimum, whatever is eventually
-proved. At 287 we are within 2.8x of a bound nobody goes below.
+[bchks]: https://eccc.weizmann.ac.il/report/2025/169/
+[fs]: https://eprint.iacr.org/2025/2197
+
+For calibration, an unconditional floor from Elias list-decoding capacity puts a
+rate-1/2 scheme whose generator entries live in GF(2^128) at 103 queries minimum,
+whatever is eventually proved ([Fenzi-Sanso 2025/2197][fs], Corollaries 3.6 and
+4.5). The floor follows that alphabet: over F_2 entries the same bound reads 595.
+At 287 we are within 2.8x of a bound nobody goes below.
 
 ## What correctness cost
 
@@ -287,13 +303,12 @@ bits each query is worth. Sweeping `t` from 200 to 1200, the smallest fractional
 grid peaks at 98 bits and never reaches 100 at any query count. It changes mode,
 the binding grid moves up one doubling, and that grid needs exactly 287.
 
-Lower is worse, not cheaper. The unconstrained minimum for 100 bits is 241
-queries, at which every grid falls to full-half and every encoded matrix doubles.
-Query count and memory move in opposite directions: minimising queries maximises
-memory.
+The unconstrained minimum for 100 bits is 241 queries, at which every grid falls
+to full-half and every encoded matrix doubles. Query count and memory move in
+opposite directions.
 
-Proof size goes as `sqrt(t)`, not `t`, because the grid split re-optimises against
-it. A 63 percent query increase therefore costs about 25 percent, not 5x.
+Proof size goes as `sqrt(t)`, because the grid split re-optimises against it. A 63
+percent query increase therefore costs about 25 percent.
 
 | Workload       | 0.34.0 proof, ZK | 0.35.0 proof, ZK | Change |
 |:---------------|-----------------:|-----------------:|-------:|
@@ -307,6 +322,9 @@ it. A 63 percent query increase therefore costs about 25 percent, not 5x.
 | Keccak 2^20    |        2,735 KiB |        3,536 KiB | +29.3% |
 | Fibonacci 2^20 |          962 KiB |        1,145 KiB | +19.0% |
 | Fibonacci 2^24 |        3,369 KiB |        4,100 KiB | +21.7% |
+
+Proof size is deterministic given the prover binary, 0.12.0 for the 0.34.0 column
+and 0.13.0 for the 0.35.0 column, and moves with neither the machine nor the build.
 
 Prove time and peak memory land inside the benchmark noise floors, 5 and 10
 percent, on every workload. That is what choosing 287 over the unconstrained 241
@@ -341,7 +359,7 @@ than a parameter change.
 
 **Grinding.** We do not use proof-of-work to buy query bits, and the reference
 point we cite for 100 proven bits does. The 1:1 subtraction is a theorem about
-probability, not about work: an adversary guesses one nonce, passes a `g`-bit
+probability: an adversary guesses one nonce, passes a `g`-bit
 grind with probability `2^-g` at constant cost, and nothing in the grind touches
 the query term. The average-case reading behind the folklore is real but is a
 weaker claim than a query bound, and Grover halves it, which matters for a
@@ -369,13 +387,12 @@ estimate appears in a threshold selecting geometry, rate or layout, it is part o
 the machine and its agreement with itself is worth nothing. Keep the reported
 figure and any configuration gate on separate expressions.
 
-**Sum every term, not the one you tuned.** Ours spread across a query bound, an
-additive term missing two factors, a bus challenge term counted nowhere, and a log
-line covering one table out of eight. Each was individually plausible. A soundness
-figure is a minimum over terms, and a term you never wrote down is not
-conservatively estimated, it is absent.
+**Sum every term.** Ours spread across a query bound, an additive term missing two
+factors, a bus challenge term counted nowhere, and a log line covering one table
+out of eight. Each was individually plausible. A soundness figure is a minimum
+over terms, and a term you never wrote down is absent from it.
 
-**Make the adversary the worst case, not a random one.** The measurement that
+**Construct the worst case adversary.** The measurement that
 settled this was nearly useless: random deviations gave a pass rate of zero and
 would have passed as a guard forever. The bound is attained only by a constructed
 minimum-weight deviation. A probe validating a soundness claim must also validate
@@ -391,7 +408,6 @@ same functions, and the measurement above ships in the public test suite.
 
 Previous postmortems: [0.34](postmortem-0.34.md), [0.33](postmortem-0.33.md),
 [0.32](postmortem-0.32.md). The first asked what binds each value entering the
-verdict. The second asked whether the witnesses satisfying a circuit are the ones
-it meant to admit. The third asked who decides. This one asks what the answer is
-worth, and answers that a security level is a claim like any other, and a claim
-that cannot fail its own check has not been checked.
+verdict, the second whether the witnesses satisfying a circuit are the ones it
+meant to admit, the third who decides. This one asks what the answer is worth, and
+it stands at 100 bits until someone finds the sixth term.

@@ -18,12 +18,15 @@ NTT, basemul, high-bits, norm-check, and twiddle-ROM chiplets.
 > working example, not a production dependency.
 
 ```
-Proving on Apple M3 Max:
-  ML-KEM-768  : 626 ms, 459 MiB peak, 3,576 KiB proof, 23.2 ms verify
-  ML-DSA-44   : 926 ms, 459 MiB peak, 4,403 KiB proof, 30.1 ms verify
-  ML-DSA-65   : 969 ms, 478 MiB peak, 4,436 KiB proof, 30.5 ms verify
-  ML-DSA-87   : 1.50 s, 869 MiB peak, 5,922 KiB proof, 32.0 ms verify
+Proving on Apple M3 Max (zero-knowledge):
+  ML-KEM-768  : 629 ms, 464 MiB peak, 3,483 KiB proof, 33.7 ms verify
+  ML-DSA-44   : 883 ms, 477 MiB peak, 4,184 KiB proof, 44.8 ms verify
+  ML-DSA-65   : 946 ms, 512 MiB peak, 4,193 KiB proof, 51.1 ms verify
+  ML-DSA-87   : 1.34 s, 811 MiB peak, 5,484 KiB proof, 48.1 ms verify
 ```
+
+Conditions and the base-protocol column are in the
+[workspace README](https://github.com/oumuamua-labs/hekate#performance).
 
 ---
 
@@ -35,10 +38,9 @@ USE AT YOUR OWN RISK!
 
 ### Proof soundness vs. PQC security level
 
-Soundness is field-capped at **≈128 bits**: a proof binds at ~2⁻¹²⁸ regardless of parameter set, for
-the higher levels (ML-KEM-768/1024, ML-DSA-65/87) the ZK proof is the weaker link, not the lattice scheme.
-ML-KEM-512 and ML-DSA-44 are matched. The proven decapsulation and verification are still the full
-FIPS 203 / 204 parameter sets.
+The proof binds at **100 bits** regardless of parameter set, which is below every level here,
+and the proof is the weaker link rather than the lattice scheme. The proven decapsulation and
+verification are still the full FIPS 203 / 204 parameter sets.
 
 ---
 

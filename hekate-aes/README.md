@@ -13,10 +13,13 @@ Implements FIPS 197 round function (SubBytes, ShiftRows, MixColumns, AddRoundKey
 S-box ROM chiplet for the GF(2^8) inversion. Round-AIR trace is wired to the CPU AIR via LogUp bus.
 
 ```
-Per-block proving cost (Apple M3 Max, 31,250 blocks per run):
-  AES-128: ~46 µs/block, 1,182 MiB peak, 5,628 KiB proof, 18.8 ms verify
-  AES-256: ~50 µs/block, 1,480 MiB peak, 5,962 KiB proof, 18.9 ms verify
+Per-block proving cost (Apple M3 Max, zero-knowledge, 31,250 blocks per run):
+  AES-128: ~42 µs/block, 1,217 MiB peak, 4,692 KiB proof, 21.0 ms verify
+  AES-256: ~52 µs/block, 1,508 MiB peak, 4,982 KiB proof, 20.6 ms verify
 ```
+
+Conditions and the base-protocol column are in the
+[workspace README](https://github.com/oumuamua-labs/hekate#performance).
 
 ## Examples
 
@@ -30,10 +33,10 @@ This crate has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
 
-### Proof soundness vs. AES-256
+### Proof soundness vs. AES
 
-Soundness is field-capped at **≈128 bits**: an AES-256 proof binds at ~2⁻¹²⁸, not 2⁻²⁵⁶,
-the ZK layer is the weaker link (AES-128 is matched). The ciphertext is still full AES-256.
+The proof binds at **100 bits**, which is below both AES parameter sets, and the proof
+is the weaker link for AES-128 and AES-256 alike. The ciphertext is still full AES.
 
 ### Constant-time trace generation
 

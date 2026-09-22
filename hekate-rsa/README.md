@@ -1,5 +1,8 @@
 # hekate-rsa
 
+[![Crates.io](https://img.shields.io/crates/v/hekate-rsa.svg)](https://crates.io/crates/hekate-rsa)
+[![Docs.rs](https://docs.rs/hekate-rsa/badge.svg)](https://docs.rs/hekate-rsa)
+[![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](LICENSE)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
@@ -17,7 +20,7 @@ constant limbs are pinned.
 ```
 Apple M3 Max, ZK, best of three runs (hekate/examples/rsa_pkcs1.rs):
   200-byte message, 4 blocks at 2 rounds/row, host 2^9, SHA chiplet 2^9, modexp chiplet 2^10:
-  335 ms prove, 30 ms verify, 14,723 KiB proof, 523 MiB
+  335 ms prove, 29.7 ms verify, 14,532 KiB proof, 503 MiB
 ```
 
 ## Examples

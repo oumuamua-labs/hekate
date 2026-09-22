@@ -14,10 +14,13 @@ Virtual packing: 1600 state bits stored in 25 physical B64 columns instead of 16
 registers during evaluation. ~16x memory savings vs. naive bit-column layout.
 
 ```
-Scaling (Apple M3 Max):
-  2^15 trace rows (1,310 permutations): 203 ms, 143 MiB peak, 793 KiB proof, 5.9 ms verify
-  2^20 trace rows (41,943 permutations): 4.08 s, 2,486 MiB peak, 4,220 KiB proof, 13.5 ms verify
+Scaling (Apple M3 Max, zero-knowledge):
+  2^15 trace rows (1,310 permutations): 194 ms, 156 MiB peak, 864 KiB proof, 11.8 ms verify
+  2^20 trace rows (41,943 permutations): 3.82 s, 2,431 MiB peak, 3,536 KiB proof, 20.2 ms verify
 ```
+
+Conditions and the base-protocol column are in the
+[workspace README](https://github.com/oumuamua-labs/hekate#performance).
 
 ---
 
