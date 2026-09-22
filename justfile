@@ -19,7 +19,33 @@ publish-all:
         hekate-rsa
         hekate-pqc
     )
+
+    index_path() {
+        local n="$1"
+        case ${#n} in
+            1) printf '1/%s' "$n" ;;
+            2) printf '2/%s' "$n" ;;
+            3) printf '3/%s/%s' "${n:0:1}" "$n" ;;
+            *) printf '%s/%s/%s' "${n:0:2}" "${n:2:2}" "$n" ;;
+        esac
+    }
+
+    already_published() {
+        curl -sf --max-time 20 "https://index.crates.io/$(index_path "$1")" \
+            | grep -q "\"vers\":\"$2\""
+    }
+
+    versions="$(cargo metadata --no-deps --format-version 1)"
+
     for c in "${crates[@]}"; do
+        v="$(printf '%s' "$versions" | python3 -c \
+            "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$c'))")"
+
+        if already_published "$c" "$v"; then
+            echo "skip $c $v, already on crates.io" >&2
+            continue
+        fi
+
         case "$c" in
             hekate-prover-sys)
                 cargo publish -p "$c" --features ct ;;
