@@ -23,7 +23,7 @@ rayon = { workspace = true, optional = true }
 proptest = "1.5"
 
 [dev-dependencies]
-hekate-gadgets = { workspace = true, features = ["std", "blake3"] }
+hekate-gadgets = { path = "../hekate-gadgets", default-features = false, features = ["std", "blake3"] }
 
 [lib]
 name = "hekate_scribble"
