@@ -151,7 +151,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Production parameters: ≈128-bit soundness with the
+    /// Production parameters: 100-bit soundness with the
     /// `MIN_PRODUCTION_BITS` acceptance threshold. The `Default`.
     pub fn prod() -> Self {
         Self {
