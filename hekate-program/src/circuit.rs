@@ -90,11 +90,55 @@ impl Packed {
     }
 }
 
+/// Contiguous run of committed columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysRange {
+    start: usize,
+    count: usize,
+}
+
+impl PhysRange {
+    /// Columns `[start, start + count)` of this run.
+    pub fn slice(self, start: usize, count: usize) -> PhysRange {
+        assert!(
+            start
+                .checked_add(count)
+                .is_some_and(|end| end <= self.count),
+            "PhysRange::slice out of range"
+        );
+
+        PhysRange {
+            start: self.start + start,
+            count,
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(self) -> usize {
+        self.count
+    }
+
+    #[inline(always)]
+    pub fn is_empty(self) -> bool {
+        self.count == 0
+    }
+}
+
+impl From<&Packed> for PhysRange {
+    fn from(packed: &Packed) -> Self {
+        PhysRange {
+            start: packed.phys_start,
+            count: packed.count,
+        }
+    }
+}
+
 /// Handle to an inline-mounted chiplet.
 #[derive(Clone, Copy, Debug)]
 pub struct Mounted {
     offset: usize,
     num_columns: usize,
+    physical: PhysRange,
 }
 
 impl Mounted {
@@ -113,6 +157,13 @@ impl Mounted {
     #[inline(always)]
     pub fn num_columns(&self) -> usize {
         self.num_columns
+    }
+
+    /// The chiplet's committed columns, in its `column_layout()` order.
+    /// A reuse view must slice them within one expander entry.
+    #[inline(always)]
+    pub fn physical(&self) -> PhysRange {
+        self.physical
     }
 }
 
@@ -214,8 +265,31 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         ColRange { start, count }
     }
 
-    /// `count` physical `storage` columns exposed
-    /// as `count × bit-width` virtual `Bit` columns.
+    /// Commits `count` `storage` columns that constraints see
+    /// whole, as one expander entry: `columns` merges adjacent
+    /// same-type runs and the entries enter `program_id`.
+    pub fn pass_through(&mut self, count: usize, storage: ColumnType) -> ColRange {
+        self.flush_pending();
+
+        let cols = ColRange {
+            start: self.num_virtual,
+            count,
+        };
+
+        self.physical.extend(core::iter::repeat_n(storage, count));
+
+        self.num_virtual += count;
+
+        let expander = core::mem::take(&mut self.expander);
+
+        self.expander = expander.pass_through(count, storage);
+
+        cols
+    }
+
+    /// Commits `count` `storage` columns (`B8` to `B64`) that
+    /// constraints see as bits: `bits(i).at(k)` is bit `k` of
+    /// column `i`. `reuse_pass_through` also shows them whole.
     pub fn expand_bits(&mut self, count: usize, storage: ColumnType) -> Packed {
         self.flush_pending();
 
@@ -241,23 +315,86 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         }
     }
 
-    /// Whole-column virtual view of
-    /// a bit-expanded physical group.
-    pub fn reuse_pass_through(&mut self, packed: &Packed) -> ColRange {
+    /// Lets constraints read committed columns `src` whole
+    /// without committing them again: the `Packed` from
+    /// `expand_bits` or a slice of `Mounted::physical()`.
+    pub fn reuse_pass_through(&mut self, src: impl Into<PhysRange>) -> ColRange {
+        let src = src.into();
+
         self.flush_pending();
 
         let view = ColRange {
             start: self.num_virtual,
-            count: packed.count,
+            count: src.count,
         };
 
-        self.num_virtual += packed.count;
+        self.num_virtual += src.count;
 
         let expander = core::mem::take(&mut self.expander);
 
-        self.expander = expander.reuse_pass_through(packed.phys_start, packed.count);
+        self.expander = expander.reuse_pass_through(src.start, src.count);
 
         view
+    }
+
+    /// Lets constraints read committed columns `src` as bits
+    /// without committing them again. Bit numbering and the
+    /// `B8` to `B64` limit are those of `expand_bits`.
+    pub fn reuse_expand_bits(&mut self, src: impl Into<PhysRange>) -> Packed {
+        let src = src.into();
+
+        self.flush_pending();
+
+        let bits_per = self
+            .physical
+            .get(src.start)
+            .map_or(0, |storage| storage.byte_size() * 8);
+
+        let bits = ColRange {
+            start: self.num_virtual,
+            count: src.count * bits_per,
+        };
+
+        self.num_virtual += bits.count;
+
+        let expander = core::mem::take(&mut self.expander);
+
+        self.expander = expander.reuse_expand_bits(src.start, src.count);
+
+        Packed {
+            phys_start: src.start,
+            count: src.count,
+            bits_per,
+            bits,
+        }
+    }
+
+    /// Committed columns behind `cols`, a range of
+    /// declared columns or of a whole-column view.
+    pub fn physical(&self, cols: ColRange) -> errors::Result<PhysRange> {
+        let pending = self.pending_run.map_or(0, |(_, count)| count);
+        let flushed = self.num_virtual - pending;
+        let tail = self.physical.len() - pending;
+
+        let whole = |virt: usize| match virt {
+            v if v >= self.num_virtual => None,
+            v if v >= flushed => Some(tail + (v - flushed)),
+            v => self.expander.whole_column(v),
+        };
+
+        let start = whole(cols.start)
+            .filter(|&start| (1..cols.count).all(|i| whole(cols.start + i) == Some(start + i)));
+
+        match start {
+            Some(start) => Ok(PhysRange {
+                start,
+                count: cols.count,
+            }),
+            None => Err(errors::Error::Protocol {
+                protocol: "circuit",
+                message: "columns are not one run of whole committed columns",
+            }),
+        }
     }
 
     /// Pins `col` to `shape`; the verifier evaluates
@@ -423,6 +560,11 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         let offset = self.num_virtual;
         let num_columns = Air::<F>::num_columns(&def);
 
+        let physical = PhysRange {
+            start: self.physical.len(),
+            count: def.column_layout().len(),
+        };
+
         let mut ast = def.constraint_ast();
         ast.arena.shift_cells(offset);
 
@@ -436,11 +578,13 @@ impl<F: TowerField + HardwareField> Circuit<F> {
 
         for mut fc in Air::<F>::fixed_columns(&def) {
             fc.col_idx += offset;
+
             self.fixed.push(fc);
         }
 
         for mut bc in def.boundary_constraints() {
             bc.col_idx += offset;
+
             self.boundaries.push(bc);
         }
 
@@ -449,7 +593,9 @@ impl<F: TowerField + HardwareField> Circuit<F> {
                 let expander = core::mem::take(&mut self.expander);
 
                 self.expander = expander.append(e);
+
                 self.physical.extend_from_slice(def.column_layout());
+
                 self.num_virtual += num_columns;
             }
             None => {
@@ -469,6 +615,7 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         Mounted {
             offset,
             num_columns,
+            physical,
         }
     }
 
@@ -490,6 +637,7 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         };
 
         let expander = core::mem::take(&mut self.expander);
+
         self.expander = match ty {
             ColumnType::Bit => expander.control_bits(count),
             _ => expander.pass_through(count, ty),
@@ -583,6 +731,7 @@ fn validate_source_range(source: &Source, width: usize) -> errors::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::digest::program_id;
     use crate::permutation::{REQUEST_IDX_LABEL, Source};
     use alloc::string::ToString;
     use alloc::vec;
@@ -840,5 +989,175 @@ mod tests {
         assert_eq!(program.virtual_column_layout()[0], ColumnType::B64);
         assert_eq!(program.virtual_column_layout()[1], ColumnType::Bit);
         assert_eq!(program.virtual_column_layout()[33], ColumnType::Bit);
+    }
+
+    #[test]
+    fn mount_keeps_nested_inline_chiplets_on_def() {
+        let inner = {
+            let mut cx = Circuit::<F>::new("inner", 16).unwrap();
+            let own = cx.column(ColumnType::B32);
+
+            let cs = cx.cs();
+            cs.constrain(cs.col(own.index()) * cs.col(own.index()));
+
+            cx.mount(mini_def());
+            cx.compile().unwrap()
+        };
+
+        let def = ChipletDef::from_air(&inner).unwrap();
+        let nested_hints = vec![InlineKernelHint {
+            chiplet_idx: 0,
+            root_offset: 1,
+            column_offset: 1,
+        }];
+
+        assert_eq!(def.inline_chiplet_kernels(), nested_hints);
+
+        let bare = ChipletDef::<F>::from_wire(
+            Air::<F>::name(&def),
+            Air::<F>::num_columns(&def),
+            def.constraint_ast(),
+            def.column_layout().to_vec(),
+            def.virtual_column_layout().to_vec(),
+            def.boundary_constraints(),
+            Air::<F>::fixed_columns(&def),
+            def.virtual_expander().cloned(),
+            def.permutation_checks(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let outer = |mounted_def: ChipletDef<F>| {
+            let mut cx = Circuit::<F>::new("outer", 16).unwrap();
+            let own = cx.column(ColumnType::B64);
+
+            let cs = cx.cs();
+            cs.constrain(cs.col(own.index()) * cs.col(own.index()));
+
+            let mounted = cx.mount(mounted_def);
+
+            (mounted, cx.compile().unwrap())
+        };
+
+        let (mounted, program) = outer(def);
+
+        assert_eq!(mounted.physical(), PhysRange { start: 1, count: 3 });
+        assert_eq!(
+            program.inline_chiplet_kernels(),
+            vec![InlineKernelHint {
+                chiplet_idx: 0,
+                root_offset: 1,
+                column_offset: 1,
+            }]
+        );
+
+        let inline_defs = Air::<F>::inline_chiplets(&program).unwrap();
+
+        assert_eq!(inline_defs.len(), 1);
+        assert_eq!(inline_defs[0].inline_hints(), nested_hints);
+
+        let mut mini_ast = Air::<F>::constraint_ast(&MiniChiplet);
+        mini_ast.arena.shift_cells(2);
+
+        assert_eq!(
+            program.constraint_ast().to_constraints()[2..],
+            mini_ast.to_constraints()[..]
+        );
+
+        assert_eq!(
+            program_id::<F, _>(&program).unwrap(),
+            program_id::<F, _>(&outer(bare).1).unwrap()
+        );
+
+        let resnapshot = ChipletDef::from_air(&program).unwrap();
+
+        assert_eq!(resnapshot.inline_defs()[0].inline_hints(), nested_hints);
+    }
+
+    #[test]
+    fn reuse_views_match_hand_built_expander() {
+        let mut cx = Circuit::<F>::new("views", 16).unwrap();
+
+        let lanes = cx.pass_through(3, ColumnType::B64);
+
+        cx.pass_through(2, ColumnType::B64);
+
+        let flags = cx.schema(&[ColumnType::B16, ColumnType::B32]);
+        let mounted = cx.mount(mini_def());
+
+        let lane_bits = cx.reuse_expand_bits(cx.physical(lanes).unwrap().slice(1, 2));
+
+        cx.reuse_expand_bits(cx.physical(flags).unwrap().slice(1, 1));
+        cx.reuse_expand_bits(mounted.physical().slice(0, 1));
+        cx.reuse_pass_through(&lane_bits);
+
+        let program = cx.compile().unwrap();
+
+        let hand = VirtualExpander::new()
+            .pass_through(3, ColumnType::B64)
+            .pass_through(2, ColumnType::B64)
+            .pass_through(1, ColumnType::B16)
+            .pass_through(1, ColumnType::B32)
+            .pass_through(1, ColumnType::B32)
+            .control_bits(1)
+            .reuse_expand_bits(1, 2)
+            .reuse_expand_bits(6, 1)
+            .reuse_expand_bits(7, 1)
+            .reuse_pass_through(1, 2)
+            .build()
+            .unwrap();
+
+        let built = program.virtual_expander().unwrap();
+
+        assert_eq!(built.expansion_entries(), hand.expansion_entries());
+        assert_eq!(built.virtual_layout(), hand.virtual_layout());
+        assert_eq!(program.column_layout().len(), hand.num_physical_columns());
+    }
+
+    #[test]
+    fn physical_maps_whole_columns_only() {
+        let mut cx = Circuit::<F>::new("physical", 16).unwrap();
+
+        let packed = cx.expand_bits(1, ColumnType::B32);
+        let pending = cx.columns(2, ColumnType::B64);
+
+        assert_eq!(
+            cx.physical(pending).unwrap(),
+            PhysRange { start: 1, count: 2 }
+        );
+
+        assert!(cx.physical(packed.bits(0)).is_err());
+
+        let view = cx.reuse_pass_through(&packed);
+
+        assert_eq!(cx.physical(view).unwrap(), PhysRange { start: 0, count: 1 });
+    }
+
+    #[test]
+    fn reuse_rejects_range_across_expander_entries() {
+        let across_schema = {
+            let mut cx = Circuit::<F>::new("across_schema", 16).unwrap();
+            let flags = cx.schema(&[ColumnType::B16, ColumnType::B32]);
+
+            cx.reuse_pass_through(cx.physical(flags).unwrap());
+            cx.compile().err()
+        };
+
+        let across_mount = {
+            let mut cx = Circuit::<F>::new("across_mount", 16).unwrap();
+            let mounted = cx.mount(mini_def());
+
+            cx.reuse_pass_through(mounted.physical());
+            cx.compile().err()
+        };
+
+        let rejected = Some(errors::Error::Protocol {
+            protocol: "virtual_expand",
+            message: "reuse: source columns not found in any single fresh entry",
+        });
+
+        assert_eq!(across_schema, rejected);
+        assert_eq!(across_mount, rejected);
     }
 }

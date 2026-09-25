@@ -170,6 +170,8 @@ table ChipletDef {
   boundary_constraints: [BoundaryConstraint];
   fixed_columns: [FixedColumn];
   permutation_checks: [BusEndpoint];
+  inline_chiplets: [ChipletDef];
+  inline_chiplet_kernels: [InlineKernelHint];
 }
 
 // ===== Trace Data =====

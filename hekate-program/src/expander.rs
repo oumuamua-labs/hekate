@@ -17,7 +17,7 @@ use hekate_math::{
 pub const RING_BLIND_BITS: usize = 128;
 
 /// Serializable expansion step descriptor.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpansionEntry {
     ExpandBits {
         count: usize,
@@ -487,6 +487,29 @@ impl VirtualExpander {
                 (EntryKind::ControlBits { count }, _) => ExpansionEntry::ControlBits { count },
             })
             .collect()
+    }
+
+    pub(crate) fn whole_column(&self, virt: usize) -> Option<usize> {
+        let mut base = 0usize;
+        for entry in &self.entries {
+            let width = match entry.kind {
+                EntryKind::ExpandBits { count, storage } => count * storage.byte_size() * 8,
+                EntryKind::PassThrough { count, .. } | EntryKind::ControlBits { count } => count,
+            };
+
+            if virt < base + width {
+                return match entry.kind {
+                    EntryKind::ExpandBits { .. } => None,
+                    EntryKind::PassThrough { .. } | EntryKind::ControlBits { .. } => {
+                        Some(entry.phy_col_start + (virt - base))
+                    }
+                };
+            }
+
+            base += width;
+        }
+
+        None
     }
 
     // Fresh entries have phy_col_start == running_phy;

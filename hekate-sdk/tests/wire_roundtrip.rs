@@ -35,7 +35,7 @@ use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, Servic
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_sdk::{
     BundleProgram, DeserializedBundle, deserialize_bundle, deserialize_proof, serialize_bundle,
-    serialize_proof_bytes,
+    serialize_bundle_header, serialize_proof_bytes,
 };
 
 type F = Block128;
@@ -1558,6 +1558,19 @@ fn dummy_commitment() -> BrakedownCommitment {
     }
 }
 
+fn arith_with_carry(num_rows: usize) -> ChipletDef<F> {
+    let mut cx = Circuit::<F>::new("ArithWithCarry", num_rows).unwrap();
+    let carry = cx.column(ColumnType::B32);
+
+    let cs = cx.cs();
+    cs.constrain(cs.col(carry.index()) * cs.col(carry.index()));
+
+    let arith = IntArithmeticChiplet::new(32, num_rows, num_rows).unwrap();
+    cx.mount_unlinked(ChipletDef::from_air(&arith).unwrap());
+
+    ChipletDef::from_air(&cx.compile().unwrap()).unwrap()
+}
+
 #[test]
 fn proof_master_evals_round_trip() {
     let evals = MasterEvals {
@@ -1782,5 +1795,65 @@ fn program_id_survives_the_wire() {
     assert_eq!(
         program_id::<F, _>(&program).unwrap(),
         program_id::<F, _>(&rebuilt).unwrap()
+    );
+}
+
+#[test]
+fn attached_composite_keeps_its_kernel_hints_on_wire() {
+    let num_rows = 1 << 8;
+    let composite = arith_with_carry(num_rows);
+
+    let mut cx = Circuit::<F>::new("Host", num_rows).unwrap();
+    cx.column(ColumnType::B32);
+    cx.attach(composite.clone());
+
+    let program = cx.compile().unwrap();
+    let instance = ProgramInstance::new(num_rows, vec![]);
+
+    let bytes = serialize_bundle_header(&program, &instance, &Config::default()).unwrap();
+    let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
+    let decoded = &restored.chiplet_defs[0];
+
+    let names =
+        |defs: &[ChipletDef<F>]| -> Vec<String> { defs.iter().map(Air::<F>::name).collect() };
+
+    assert!(!composite.inline_hints().is_empty());
+    assert_eq!(decoded.inline_hints(), composite.inline_hints());
+    assert_eq!(names(decoded.inline_defs()), names(composite.inline_defs()));
+    assert_eq!(
+        program_id::<F, _>(&program).unwrap(),
+        program_id::<F, _>(&BundleProgram::from_bundle(&restored)).unwrap()
+    );
+}
+
+#[test]
+fn mounted_composite_keeps_nested_hints_on_wire() {
+    let num_rows = 1 << 8;
+    let composite = arith_with_carry(num_rows);
+
+    let mut cx = Circuit::<F>::new("Host", num_rows).unwrap();
+    cx.column(ColumnType::B32);
+    cx.mount(composite.clone());
+
+    let program = cx.compile().unwrap();
+    let instance = ProgramInstance::new(num_rows, vec![]);
+
+    let bytes = serialize_bundle_header(&program, &instance, &Config::default()).unwrap();
+    let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
+    let decoded = &restored.inline_chiplets[0];
+
+    let names =
+        |defs: &[ChipletDef<F>]| -> Vec<String> { defs.iter().map(Air::<F>::name).collect() };
+
+    assert!(!composite.inline_hints().is_empty());
+    assert_eq!(
+        restored.inline_chiplet_kernels,
+        program.inline_chiplet_kernels()
+    );
+    assert_eq!(decoded.inline_hints(), composite.inline_hints());
+    assert_eq!(names(decoded.inline_defs()), names(composite.inline_defs()));
+    assert_eq!(
+        program_id::<F, _>(&program).unwrap(),
+        program_id::<F, _>(&BundleProgram::from_bundle(&restored)).unwrap()
     );
 }
