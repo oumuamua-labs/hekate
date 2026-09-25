@@ -595,31 +595,25 @@ pub fn validate_fixed_columns<F: TowerField>(
     Ok(())
 }
 
-/// `Σ_{i < limit, i ≡ c (mod stride)} eq(r, i)` per residue class `c`.
-fn prefix_residue_sums<F: HardwareField>(
+/// `Σ_{x < limit, x ≡ c (mod stride)} eq(r, x) · W^⌊x / stride⌋`
+/// per residue `c`, from `steps[t] = W^(2^t)`.
+fn residue_sums<F: HardwareField>(
     r: &[Flat<F>],
     limit: usize,
     stride: usize,
+    steps: &[Flat<F>],
 ) -> Vec<Flat<F>> {
     let one = Flat::from_raw(F::ONE);
     let zero = Flat::from_raw(F::ZERO);
-    let nv = r.len();
 
-    let full = match 1usize.checked_shl(nv as u32) {
+    let full = match 1usize.checked_shl(r.len() as u32) {
         Some(cap) => limit >= cap,
         None => false,
     };
 
-    let mut pow2_mod = Vec::with_capacity(nv);
-    let mut p2 = 1usize % stride;
+    let mut free = vec![zero; stride];
+    let mut next = vec![zero; stride];
 
-    for _ in 0..nv {
-        pow2_mod.push(p2);
-        p2 = (p2 * 2) % stride;
-    }
-
-    let mut free = alloc::vec![zero; stride];
-    let mut next_free = alloc::vec![zero; stride];
     let mut tight = if full { zero } else { one };
     let mut tight_residue = 0usize;
 
@@ -627,31 +621,51 @@ fn prefix_residue_sums<F: HardwareField>(
         free[0] = one;
     }
 
-    for k in (0..nv).rev() {
-        let p2k = pow2_mod[k];
-        for slot in next_free.iter_mut() {
-            *slot = zero;
+    for t in (0..r.len()).rev() {
+        let bit_one = r[t];
+        let bit_zero = one + r[t];
+        let step = steps[t];
+
+        next.fill(zero);
+
+        for (residue, &weight) in free.iter().enumerate() {
+            let low = 2 * residue;
+
+            let (at, w) = division_step(low, weight * bit_zero, stride, step);
+            next[at] += w;
+
+            let (at, w) = division_step(low + 1, weight * bit_one, stride, step);
+            next[at] += w;
         }
 
-        for c in 0..stride {
-            let w = free[c];
+        let low = 2 * tight_residue;
 
-            next_free[c] += w * (one - r[k]);
-            next_free[(c + p2k) % stride] += w * r[k];
-        }
+        (tight_residue, tight) = match (limit >> t) & 1 {
+            1 => {
+                let (at, w) = division_step(low, tight * bit_zero, stride, step);
+                next[at] += w;
 
-        if (limit >> k) & 1 == 1 {
-            next_free[tight_residue] += tight * (one - r[k]);
-            tight *= r[k];
-            tight_residue = (tight_residue + p2k) % stride;
-        } else {
-            tight *= one - r[k];
-        }
+                division_step(low + 1, tight * bit_one, stride, step)
+            }
+            _ => division_step(low, tight * bit_zero, stride, step),
+        };
 
-        core::mem::swap(&mut free, &mut next_free);
+        core::mem::swap(&mut free, &mut next);
     }
 
     free
+}
+
+fn division_step<F: HardwareField>(
+    value: usize,
+    weight: Flat<F>,
+    stride: usize,
+    step: Flat<F>,
+) -> (usize, Flat<F>) {
+    match value >= stride {
+        true => (value - stride, weight * step),
+        false => (value, weight),
+    }
 }
 
 fn cadence_mle<F: HardwareField>(
@@ -666,9 +680,10 @@ fn cadence_mle<F: HardwareField>(
     }
 
     let end = origin.saturating_add(stride.saturating_mul(count));
+    let unit = vec![Flat::from_raw(F::ONE); r.len()];
 
-    let mut class_sums = prefix_residue_sums(r, end, stride);
-    let start_sums = prefix_residue_sums(r, origin, stride);
+    let mut class_sums = residue_sums(r, end, stride, &unit);
+    let start_sums = residue_sums(r, origin, stride, &unit);
 
     for (c, s) in start_sums.iter().enumerate() {
         class_sums[c] += *s;
