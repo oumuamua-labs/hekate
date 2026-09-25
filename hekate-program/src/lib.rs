@@ -273,7 +273,7 @@ impl<F: TowerField, T: Trace> ProgramWitness<F, T> {
 /// Locates a chiplet's inlined sub-AST in
 /// the program's merged `constraint_ast()`
 /// so the prover can dispatch its kernel.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InlineKernelHint {
     /// Index into `Air::inline_chiplets()`.
     pub chiplet_idx: usize,
