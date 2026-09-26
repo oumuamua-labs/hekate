@@ -535,41 +535,58 @@ fn collision_verdicts(
     )
 }
 
-fn verify_twin(defect: Defect) -> errors::Result<bool> {
+fn verify_twin(defect: Defect) -> [errors::Result<bool>; 2] {
     let [x0, x1, _] = inputs();
     let emits = dense_emits(&[(x0, f(x0)), (x1, f(x1))]);
 
-    let honest = dense_host(2, squarer(2));
-    let config = Config::dev();
+    let twin = Twin {
+        honest: dense_host(2, squarer(2)),
+        defect,
+    };
 
     let instance = ProgramInstance::new(ROWS, public(&emits));
     let witness = ProgramWitness::new(host_trace(HostColumns::NUM_COLUMNS, &emits, &[]))
         .with_chiplets(vec![squarer_trace(ROWS, &[x0, x1])]);
 
-    let proof = prove(
-        LABEL, &honest, &instance, &witness, &config, [0x5A; 32], None,
-    )
-    .unwrap();
+    [false, true].map(|zero_knowledge| {
+        let config = Config {
+            zero_knowledge,
+            ..Config::dev()
+        };
 
-    let twin = Twin { honest, defect };
+        let proof = prove(
+            LABEL,
+            &twin.honest,
+            &instance,
+            &witness,
+            &config,
+            [0x5A; 32],
+            None,
+        )
+        .unwrap();
 
-    let mut transcript = Transcript::<H>::new(LABEL);
+        let mut transcript = Transcript::<H>::new(LABEL);
 
-    HekateVerifier::<F, H>::verify(
-        &program_id::<F, _>(&twin)?,
-        &twin,
-        &instance,
-        &proof,
-        &mut transcript,
-        &config,
-    )
+        HekateVerifier::<F, H>::verify(
+            &program_id::<F, _>(&twin)?,
+            &twin,
+            &instance,
+            &proof,
+            &mut transcript,
+            &config,
+        )
+    })
 }
 
-fn rejected(message: &'static str) -> errors::Result<bool> {
-    Err(errors::Error::Protocol {
-        protocol: "logup_bus",
-        message,
-    })
+fn rejected(message: &'static str) -> [errors::Result<bool>; 2] {
+    let err = || {
+        Err(errors::Error::Protocol {
+            protocol: "logup_bus",
+            message,
+        })
+    };
+
+    [err(), err()]
 }
 
 #[test]
@@ -687,7 +704,7 @@ fn tiled_responder_taller_than_its_calls_rejected() {
 
 #[test]
 fn faithful_twin_verifies() {
-    assert_eq!(verify_twin(Defect::None), Ok(true));
+    assert_eq!(verify_twin(Defect::None), [Ok(true), Ok(true)]);
 }
 
 #[test]
