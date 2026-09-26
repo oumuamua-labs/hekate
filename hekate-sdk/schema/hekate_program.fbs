@@ -64,7 +64,13 @@ enum SourceKind : byte {
   RowIndexLeBytes,
   RowIndexByte,
   Constant,
-  PhaseColumn
+  PhaseColumn,
+  EmitRank
+}
+
+enum EmitSide : byte {
+  Request,
+  Response
 }
 
 table Source {
@@ -73,6 +79,7 @@ table Source {
   column_indices: [uint32];
   byte_index: uint32;
   constant_value: Block128;
+  side: EmitSide;
 }
 
 table SourceEntry {

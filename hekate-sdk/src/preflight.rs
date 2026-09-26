@@ -14,7 +14,9 @@ use hekate_core::trace::{Trace, TraceColumn, TraceCompatibleField};
 use hekate_math::{Block128, Flat, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
-use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
+use hekate_program::permutation::{
+    BusKind, PermutationCheckSpec, RankClock, RankTable, Source, TableHeight, rank_clocks,
+};
 use hekate_program::{
     Air, FixedColumn, Program, ProgramInstance, ProgramWitness, validate_fixed_columns,
 };
@@ -567,6 +569,7 @@ fn resolve_source<F: TraceCompatibleField>(
     source: &Source,
     row: &[Flat<F>],
     row_idx: usize,
+    rank: Flat<F>,
     beta: Flat<F>,
     current_beta: Flat<F>,
 ) -> (Flat<F>, Flat<F>) {
@@ -609,6 +612,7 @@ fn resolve_source<F: TraceCompatibleField>(
             let v = F::from(*val).to_hardware();
             (v * current_beta, current_beta * beta)
         }
+        Source::EmitRank(_) => (rank * current_beta, current_beta * beta),
     }
 }
 
@@ -619,6 +623,7 @@ fn resolve_source<F: TraceCompatibleField>(
 /// `s_eff = s_send + s_recv` in char-2 when paired.
 fn compute_endpoint_product<F, A, T>(
     spec: &PermutationCheckSpec,
+    clock: Option<&RankClock>,
     air: &A,
     trace: &T,
     gamma: Flat<F>,
@@ -637,6 +642,27 @@ where
 
     let zero = Flat::from_raw(F::ZERO);
     let one = Flat::from_raw(F::ONE);
+
+    let has_rank = spec
+        .sources
+        .iter()
+        .any(|(source, _)| matches!(source, Source::EmitRank(_)));
+
+    let clock_column = match (has_rank, clock) {
+        (false, _) => Vec::new(),
+        (true, Some(clock)) => {
+            let mut column = vec![zero; num_rows];
+            clock.accumulate(&mut column, one)?;
+
+            column
+        }
+        (true, None) => {
+            return Err(errors::Error::Protocol {
+                protocol: "preflight",
+                message: "ordered bus spec has no rank clock",
+            });
+        }
+    };
 
     let mut product = one;
     let mut claimed_sum = zero;
@@ -707,9 +733,11 @@ where
         let mut key = gamma;
         let mut current_beta = one;
 
+        let rank = clock_column.get(row_idx).copied().unwrap_or(zero);
+
         for (source, _label) in &spec.sources {
             let (contrib, next_beta) =
-                resolve_source(source, &row_vec, row_idx, beta, current_beta);
+                resolve_source(source, &row_vec, row_idx, rank, beta, current_beta);
 
             key += contrib;
             current_beta = next_beta;
@@ -756,13 +784,42 @@ where
     let gamma = fixed_gamma::<F>();
     let beta = fixed_beta::<F>();
 
+    if chiplet_defs.len() != witness.chiplet_traces.len() {
+        return Err(errors::Error::Protocol {
+            protocol: "preflight",
+            message: "chiplet trace count differs from chiplet_defs",
+        });
+    }
+
     let main_perm_checks = main.permutation_checks();
+    let main_fixed = main.fixed_columns();
+
+    let mut rank_tables = Vec::with_capacity(1 + chiplet_defs.len());
+
+    rank_tables.push(RankTable {
+        specs: &main_perm_checks,
+        fixed: &main_fixed,
+        height: TableHeight::Main(witness.trace.num_vars()),
+    });
+
+    for (def, trace) in chiplet_defs.iter().zip(&witness.chiplet_traces) {
+        rank_tables.push(RankTable {
+            specs: &def.permutation_checks,
+            fixed: def.pins(),
+            height: TableHeight::Chiplet(Some(trace.num_vars())),
+        });
+    }
+
+    let clocks = rank_clocks(&rank_tables)?;
+    let clocks = &clocks;
 
     #[cfg(not(feature = "parallel"))]
     let main_endpoints: Vec<(String, BusEndpointAccum<F>)> = main_perm_checks
         .iter()
-        .map(|(bus_id, spec)| {
-            let stats = compute_endpoint_product(spec, main, &witness.trace, gamma, beta)?;
+        .enumerate()
+        .map(|(i, (bus_id, spec))| {
+            let clock = clocks[0][i].as_ref();
+            let stats = compute_endpoint_product(spec, clock, main, &witness.trace, gamma, beta)?;
 
             Ok((
                 bus_id.clone(),
@@ -783,8 +840,11 @@ where
     #[cfg(feature = "parallel")]
     let main_endpoints: Vec<(String, BusEndpointAccum<F>)> = main_perm_checks
         .par_iter()
-        .map(|(bus_id, spec)| {
-            let stats = compute_endpoint_product(spec, main, &witness.trace, gamma, beta)?;
+        .enumerate()
+        .map(|(i, (bus_id, spec))| {
+            let clock = clocks[0][i].as_ref();
+            let stats = compute_endpoint_product(spec, clock, main, &witness.trace, gamma, beta)?;
+
             Ok((
                 bus_id.clone(),
                 BusEndpointAccum {
@@ -807,22 +867,27 @@ where
         .zip(witness.chiplet_traces.iter())
         .enumerate()
         .flat_map(|(c_idx, (def, trace))| {
-            def.permutation_checks.iter().map(move |(bus_id, spec)| {
-                let stats = compute_endpoint_product(spec, def, trace, gamma, beta)?;
-                Ok((
-                    bus_id.clone(),
-                    BusEndpointAccum {
-                        source: TableId::Chiplet(c_idx),
-                        kind: spec.kind,
-                        row_count: stats.row_count,
-                        active_rows: stats.active_rows,
-                        product: stats.product,
-                        claimed_sum: stats.claimed_sum,
-                        h_rows: stats.h_rows,
-                        clock_collision: stats.clock_collision,
-                    },
-                ))
-            })
+            def.permutation_checks
+                .iter()
+                .enumerate()
+                .map(move |(i, (bus_id, spec))| {
+                    let clock = clocks[1 + c_idx][i].as_ref();
+                    let stats = compute_endpoint_product(spec, clock, def, trace, gamma, beta)?;
+
+                    Ok((
+                        bus_id.clone(),
+                        BusEndpointAccum {
+                            source: TableId::Chiplet(c_idx),
+                            kind: spec.kind,
+                            row_count: stats.row_count,
+                            active_rows: stats.active_rows,
+                            product: stats.product,
+                            claimed_sum: stats.claimed_sum,
+                            h_rows: stats.h_rows,
+                            clock_collision: stats.clock_collision,
+                        },
+                    ))
+                })
         })
         .collect::<errors::Result<_>>()?;
 
@@ -832,22 +897,27 @@ where
         .zip(witness.chiplet_traces.par_iter())
         .enumerate()
         .flat_map_iter(|(c_idx, (def, trace))| {
-            def.permutation_checks.iter().map(move |(bus_id, spec)| {
-                let stats = compute_endpoint_product(spec, def, trace, gamma, beta)?;
-                Ok((
-                    bus_id.clone(),
-                    BusEndpointAccum {
-                        source: TableId::Chiplet(c_idx),
-                        kind: spec.kind,
-                        row_count: stats.row_count,
-                        active_rows: stats.active_rows,
-                        product: stats.product,
-                        claimed_sum: stats.claimed_sum,
-                        h_rows: stats.h_rows,
-                        clock_collision: stats.clock_collision,
-                    },
-                ))
-            })
+            def.permutation_checks
+                .iter()
+                .enumerate()
+                .map(move |(i, (bus_id, spec))| {
+                    let clock = clocks[1 + c_idx][i].as_ref();
+                    let stats = compute_endpoint_product(spec, clock, def, trace, gamma, beta)?;
+
+                    Ok((
+                        bus_id.clone(),
+                        BusEndpointAccum {
+                            source: TableId::Chiplet(c_idx),
+                            kind: spec.kind,
+                            row_count: stats.row_count,
+                            active_rows: stats.active_rows,
+                            product: stats.product,
+                            claimed_sum: stats.claimed_sum,
+                            h_rows: stats.h_rows,
+                            clock_collision: stats.clock_collision,
+                        },
+                    ))
+                })
         })
         .collect::<errors::Result<_>>()?;
 
@@ -1132,7 +1202,7 @@ fn write_grouped_constraint_violations<F>(
 }
 
 /// Row-index bits the spec's clock sources actually
-/// fold, `None` when they already cover every row bit.
+/// fold, `None` when they already separate every row.
 fn separating_clock_mask(spec: &PermutationCheckSpec, num_vars: usize) -> Option<usize> {
     let all = match num_vars >= usize::BITS as usize {
         true => usize::MAX,
@@ -1146,6 +1216,7 @@ fn separating_clock_mask(spec: &PermutationCheckSpec, num_vars: usize) -> Option
         let (lo, hi) = match source {
             Source::RowIndexLeBytes(n) => (0, 8 * (*n).min(8)),
             Source::RowIndexByte(k) => (8 * *k, 8 * *k + 8),
+            Source::EmitRank(_) => return None,
             Source::Column(_) | Source::Columns(_) | Source::Const(_) | Source::PhaseColumn(_) => {
                 continue;
             }

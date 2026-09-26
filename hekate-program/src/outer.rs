@@ -6,7 +6,7 @@ use crate::chiplet::ChipletDef;
 use crate::constraint::{ConstraintAst, ConstraintExpr, ExprId};
 use crate::expander::{RING_BLIND_BITS, RingSwitchPlan, claim_weights, eq_tensor_b};
 use crate::linearized::{self, RingGadget, linearized_coeffs};
-use crate::permutation::{BusKind, Source, eval_row_idx_byte_mle, eval_row_idx_le_mle};
+use crate::permutation::{BusKind, RankClock, Source, eval_row_idx_byte_mle, eval_row_idx_le_mle};
 use crate::predicate::{AffineRow, ClaimLayout, Form, PredicateRows, Unknown, WireRole, compile};
 use crate::{Air, ProgramInstance};
 use alloc::collections::BTreeMap;
@@ -371,6 +371,7 @@ pub struct TableInputs<'a, F: TowerField, A> {
     pub r_zerocheck: &'a [Flat<F>],
     pub r_final: &'a [Flat<F>],
     pub lookup_bus_points: &'a BTreeMap<String, Vec<Flat<F>>>,
+    pub clocks: &'a [Option<RankClock>],
 
     pub claimed_sums_masked: &'a [(String, F)],
     pub h_evals_masked: &'a [(String, F)],
@@ -562,6 +563,10 @@ where
                 }
                 Source::RowIndexByte(n) => {
                     sources.push(BusSource::Public(eval_row_idx_byte_mle::<F>(*n, r_final)));
+                }
+                Source::EmitRank(_) => {
+                    let clock = RankClock::for_spec(inputs.clocks, spec_idx)?;
+                    sources.push(BusSource::Public(clock.evaluate(r_final)?));
                 }
             }
         }

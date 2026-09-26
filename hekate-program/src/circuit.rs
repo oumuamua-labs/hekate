@@ -14,7 +14,8 @@ use crate::constraint::builder::ConstraintSystem;
 use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use crate::expander::VirtualExpander;
 use crate::permutation::{
-    PermutationCheckSpec, Service, Source, validate_bus_set, validate_fixed_selectors,
+    PermutationCheckSpec, RankTable, Service, Source, TableHeight, validate_bus_set,
+    validate_fixed_selectors, validate_ordered_emits,
 };
 use crate::{Air, FixedColumn, FixedShape, InlineKernelHint, Program, validate_fixed_columns};
 use alloc::string::String;
@@ -532,6 +533,24 @@ impl<F: TowerField + HardwareField> Circuit<F> {
 
         validate_bus_set(endpoints)?;
 
+        let mut rank_tables = Vec::with_capacity(1 + self.chiplet_defs.len());
+
+        rank_tables.push(RankTable {
+            specs: &self.buses,
+            fixed: &self.fixed,
+            height: TableHeight::Main(num_vars),
+        });
+
+        for (def, specs) in self.chiplet_defs.iter().zip(&chiplet_specs) {
+            rank_tables.push(RankTable {
+                specs,
+                fixed: def.pins(),
+                height: TableHeight::Chiplet(None),
+            });
+        }
+
+        validate_ordered_emits(&rank_tables)?;
+
         let table = ChipletDef::from_parts(
             self.name,
             width,
@@ -715,7 +734,10 @@ fn validate_source_range(source: &Source, width: usize) -> errors::Result<()> {
     let out_of_range = match source {
         Source::Column(idx) | Source::PhaseColumn(idx) => *idx >= width,
         Source::Columns(indices) => indices.iter().any(|&idx| idx >= width),
-        Source::RowIndexLeBytes(_) | Source::RowIndexByte(_) | Source::Const(_) => false,
+        Source::RowIndexLeBytes(_)
+        | Source::RowIndexByte(_)
+        | Source::Const(_)
+        | Source::EmitRank(_) => false,
     };
 
     if out_of_range {
@@ -732,7 +754,9 @@ fn validate_source_range(source: &Source, width: usize) -> errors::Result<()> {
 mod tests {
     use super::*;
     use crate::digest::program_id;
-    use crate::permutation::{REQUEST_IDX_LABEL, Source};
+    use crate::permutation::{
+        BusKind, EMIT_RANK_LABEL, REQUEST_IDX_LABEL, ServiceSlot, Side, Source,
+    };
     use alloc::string::ToString;
     use alloc::vec;
     use hekate_math::Block128;
@@ -784,6 +808,41 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct Server {
+        calls: usize,
+        spec: PermutationCheckSpec,
+    }
+
+    impl Air<F> for Server {
+        fn name(&self) -> String {
+            "Server".to_string()
+        }
+
+        fn num_columns(&self) -> usize {
+            3
+        }
+
+        fn column_layout(&self) -> &[ColumnType] {
+            &[ColumnType::B32, ColumnType::Bit, ColumnType::B32]
+        }
+
+        fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+            vec![("svc".to_string(), self.spec.clone())]
+        }
+
+        fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+            vec![FixedColumn {
+                col_idx: 1,
+                shape: two_emit_calls(self.calls),
+            }]
+        }
+
+        fn constraint_ast(&self) -> ConstraintAst<F> {
+            ConstraintSystem::<F>::new().build()
+        }
+    }
+
     fn mini_def() -> ChipletDef<F> {
         ChipletDef::from_air(&MiniChiplet).unwrap()
     }
@@ -796,6 +855,41 @@ mod tests {
             ],
             Some(selector),
         )
+    }
+
+    fn ordered_service() -> Service {
+        Service {
+            bus_id: "svc",
+            kind: BusKind::Permutation,
+            slots: vec![ServiceSlot::Value(b"k_v"), ServiceSlot::EmitRank],
+            clock_waiver: None,
+        }
+    }
+
+    fn two_emit_calls(calls: usize) -> FixedShape<F> {
+        FixedShape::Cadence {
+            stride: 4,
+            count: calls,
+            origin: 0,
+            values: vec![F::ONE, F::ZERO, F::ZERO, F::ONE],
+        }
+    }
+
+    fn ordered_host(server: Server) -> errors::Result<CircuitProgram<F>> {
+        let mut cx = Circuit::<F>::new("ordered_host", 16)?;
+
+        let value = cx.column(ColumnType::B32);
+        let sel = cx.column(ColumnType::Bit);
+
+        cx.fix(sel, two_emit_calls(2));
+        cx.call(&ordered_service(), &[value], sel)?;
+        cx.attach(ChipletDef::from_air(&server)?);
+
+        cx.compile()
+    }
+
+    fn rejected_by(res: errors::Result<CircuitProgram<F>>, prefix: &str) -> bool {
+        matches!(res, Err(errors::Error::Protocol { message, .. }) if message.starts_with(prefix))
     }
 
     #[test]
@@ -1159,5 +1253,68 @@ mod tests {
 
         assert_eq!(across_schema, rejected);
         assert_eq!(across_mount, rejected);
+    }
+
+    #[test]
+    fn compile_balances_ordered_bus_sides() {
+        let responder = |calls| Server {
+            calls,
+            spec: ordered_service().respond(&[0], &[], 1).unwrap(),
+        };
+
+        ordered_host(responder(2)).unwrap();
+
+        assert!(rejected_by(
+            ordered_host(responder(3)),
+            "ordered bus sides emit different counts"
+        ));
+    }
+
+    #[test]
+    fn compile_rejects_witness_clock_on_ordered_bus() {
+        let spec = PermutationCheckSpec::new(
+            vec![
+                (Source::Column(0), b"k_v"),
+                (Source::Column(2), REQUEST_IDX_LABEL),
+            ],
+            Some(1),
+        );
+
+        assert!(rejected_by(
+            ordered_host(Server { calls: 2, spec }),
+            "ordered bus endpoint has no EmitRank source"
+        ));
+    }
+
+    #[test]
+    fn program_id_binds_the_rank_side() {
+        let program = |first, second| {
+            let mut cx = Circuit::<F>::new("sides", 16).unwrap();
+
+            let value = cx.column(ColumnType::B32);
+            let sel = cx.column(ColumnType::Bit);
+
+            cx.fix(sel, two_emit_calls(2));
+
+            for side in [first, second] {
+                cx.bus(
+                    "svc",
+                    PermutationCheckSpec::new(
+                        vec![
+                            (Source::Column(value.index()), b"k_v"),
+                            (Source::EmitRank(side), EMIT_RANK_LABEL),
+                        ],
+                        Some(sel.index()),
+                    ),
+                );
+            }
+
+            program_id::<F, _>(&cx.compile().unwrap()).unwrap()
+        };
+
+        assert_ne!(
+            program(Side::Request, Side::Response),
+            program(Side::Response, Side::Request)
+        );
     }
 }

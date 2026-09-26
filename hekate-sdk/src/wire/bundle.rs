@@ -21,7 +21,7 @@ use hekate_program::{
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
-const WIRE_FORMAT_VERSION: u32 = 6;
+const WIRE_FORMAT_VERSION: u32 = 7;
 
 pub struct DeserializedBundle<F: TowerField> {
     pub name: String,
@@ -328,4 +328,32 @@ where
     fbb.finish(bundle, None);
 
     Ok(fbb.finished_data().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hekate_math::Block128;
+
+    #[test]
+    fn previous_wire_format_is_rejected() {
+        let mut fbb = FlatBufferBuilder::new();
+        let bundle = fb::ProgramBundle::create(
+            &mut fbb,
+            &fb::ProgramBundleArgs {
+                version: WIRE_FORMAT_VERSION - 1,
+                ..Default::default()
+            },
+        );
+
+        fbb.finish(bundle, None);
+
+        assert_eq!(
+            deserialize_bundle::<Block128>(fbb.finished_data()).err(),
+            Some(Error::Protocol {
+                protocol: "wire",
+                message: "wire format version mismatch",
+            })
+        );
+    }
 }

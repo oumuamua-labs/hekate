@@ -11,7 +11,9 @@
 
 use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use crate::expander::VirtualExpander;
-use crate::permutation::{PermutationCheckSpec, validate_fixed_selectors};
+use crate::permutation::{
+    PermutationCheckSpec, RankTable, TableHeight, validate_fixed_selectors, validate_ordered_buses,
+};
 use crate::{Air, FixedColumn, InlineKernelHint, validate_fixed_columns};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -60,6 +62,11 @@ impl<F: TowerField> ChipletDef<F> {
         validate_fixed_selectors(&permutation_checks, &fixed_columns)?;
         validate_chiplet_boundaries(&boundary_constraints, p.num_columns())?;
         validate_fixed_columns(&fixed_columns, p.virtual_column_layout(), None)?;
+        validate_ordered_buses(&[RankTable {
+            specs: &permutation_checks,
+            fixed: &fixed_columns,
+            height: TableHeight::Chiplet(None),
+        }])?;
         validate_expander_coverage(p.virtual_expander(), p.column_layout())?;
         validate_column_count(p.num_columns(), p.virtual_column_layout().len())?;
         validate_inline_kernels(
@@ -163,6 +170,11 @@ impl<F: TowerField> ChipletDef<F> {
         };
 
         validate_fixed_columns(&fixed_columns, virt_layout, None)?;
+        validate_ordered_buses(&[RankTable {
+            specs: &permutation_checks,
+            fixed: &fixed_columns,
+            height: TableHeight::Chiplet(None),
+        }])?;
         validate_column_count(num_columns, virt_layout.len())?;
         validate_inline_kernels(
             &inline_kernels,
@@ -622,7 +634,9 @@ mod tests {
     use super::*;
     use crate::constraint::builder::ConstraintSystem;
     use crate::define_columns;
-    use crate::permutation::{BusKind, ChallengeLabel, PermutationCheckSpec, Source};
+    use crate::permutation::{
+        BusKind, ChallengeLabel, EMIT_RANK_LABEL, PermutationCheckSpec, Side, Source,
+    };
     use crate::{ConstraintAst, FixedShape};
     use alloc::string::String;
     use alloc::vec;
@@ -779,6 +793,13 @@ mod tests {
         vec![
             (Source::Column(0), b"k_a"),
             (Source::RowIndexLeBytes(4), b"k_clk"),
+        ]
+    }
+
+    fn key_with_rank() -> Vec<(Source, ChallengeLabel)> {
+        vec![
+            (Source::Column(0), b"k_a"),
+            (Source::EmitRank(Side::Response), EMIT_RANK_LABEL),
         ]
     }
 
@@ -996,5 +1017,30 @@ mod tests {
         assert!(wire(0, 0).is_ok());
         assert!(wire(1, 0).is_err());
         assert!(wire(0, 1).is_err());
+    }
+
+    #[test]
+    fn def_runs_ordered_bus_predicate() {
+        snapshot(PermutationCheckSpec::new(key_with_rank(), Some(1))).unwrap();
+
+        let lookup = PermutationCheckSpec::new_lookup(key_with_rank(), Some(1));
+
+        assert_logup_bus_err(snapshot(lookup.clone()));
+
+        let air = OneBusAir { spec: lookup };
+
+        assert_logup_bus_err(ChipletDef::<F>::from_wire(
+            String::from("wired"),
+            2,
+            air.constraint_ast(),
+            air.column_layout().to_vec(),
+            air.column_layout().to_vec(),
+            Vec::new(),
+            air.fixed_columns(),
+            None,
+            Air::<F>::permutation_checks(&air),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 }
