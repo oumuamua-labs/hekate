@@ -10,7 +10,7 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use hekate_program::expander::VirtualExpander;
-use hekate_program::permutation::{BusKind, PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::{BusKind, EMIT_RANK_LABEL, PermutationCheckSpec, Side, Source};
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness, define_columns};
 use hekate_sdk::preflight;
 use hekate_sdk::preflight::TableId;
@@ -146,7 +146,7 @@ impl Air<F> for CpuWithBus {
                 vec![
                     (Source::Column(BusCols::ADDR), b"k0"),
                     (Source::Column(BusCols::VAL), b"k1"),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::EmitRank(Side::Request), EMIT_RANK_LABEL),
                 ],
                 Some(BusCols::SEL),
             ),
@@ -190,7 +190,7 @@ impl Air<F> for MemChiplet {
                 vec![
                     (Source::Column(BusCols::ADDR), b"k0"),
                     (Source::Column(BusCols::VAL), b"k1"),
-                    (Source::Column(BusCols::REQUEST_IDX), REQUEST_IDX_LABEL),
+                    (Source::EmitRank(Side::Response), EMIT_RANK_LABEL),
                 ],
                 Some(BusCols::SEL),
             ),
@@ -1467,7 +1467,7 @@ impl Air<F> for MainPairBus {
                 PermutationCheckSpec::new(
                     vec![
                         (Source::Column(DualBusCols::SEND_KEY), b"k0"),
-                        (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                        (Source::RowIndexLeBytes(4), b"k_clk"),
                     ],
                     Some(DualBusCols::SEL_SEND),
                 ),
@@ -1477,7 +1477,7 @@ impl Air<F> for MainPairBus {
                 PermutationCheckSpec::new(
                     vec![
                         (Source::Column(DualBusCols::RECV_KEY), b"k0"),
-                        (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                        (Source::RowIndexLeBytes(4), b"k_clk"),
                     ],
                     Some(DualBusCols::SEL_RECV),
                 ),
@@ -1817,7 +1817,7 @@ impl Air<F> for NarrowClockCpu {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(BusCols::ADDR), b"k0"),
-                    (Source::RowIndexLeBytes(self.clock_bytes), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(self.clock_bytes), b"k_clk"),
                 ],
                 Some(BusCols::SEL),
             ),
@@ -1861,9 +1861,12 @@ impl Air<F> for NarrowClockResponder {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(BusCols::ADDR), b"k0"),
-                    (Source::Column(BusCols::REQUEST_IDX), REQUEST_IDX_LABEL),
+                    (Source::Column(BusCols::REQUEST_IDX), b"k_clk"),
                 ],
                 Some(BusCols::SEL),
+            )
+            .with_clock_waiver(
+                "see hekate-sdk/tests/preflight.rs: this side commits the requester's clock",
             ),
         )]
     }
@@ -1965,7 +1968,7 @@ impl Air<F> for InertCpu {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(BusCols::ADDR), b"k0"),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(4), b"k_clk"),
                 ],
                 Some(BusCols::SEL),
             ),
@@ -2010,9 +2013,12 @@ impl Air<F> for InertResponder {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(BusCols::ADDR), b"k0"),
-                    (Source::Column(BusCols::REQUEST_IDX), REQUEST_IDX_LABEL),
+                    (Source::Column(BusCols::REQUEST_IDX), b"k_clk"),
                 ],
                 Some(BusCols::SEL),
+            )
+            .with_clock_waiver(
+                "see hekate-sdk/tests/preflight.rs: this side commits the requester's clock",
             ),
         )]
     }

@@ -26,7 +26,6 @@ fn service() -> Service {
         bus_id: BUS,
         kind: BusKind::Permutation,
         slots: vec![ServiceSlot::Value(b"kappa_value"), ServiceSlot::EmitRank],
-        clock_waiver: None,
     }
 }
 
@@ -47,9 +46,7 @@ fn responder() -> ChipletDef<F> {
 
     cx.fix(sel, two_calls());
 
-    let respond = service()
-        .respond(&[value.index()], &[], sel.index())
-        .unwrap();
+    let respond = service().respond(&[value.index()], sel.index()).unwrap();
 
     cx.bus(BUS, respond);
 
