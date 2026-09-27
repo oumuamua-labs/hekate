@@ -9,9 +9,7 @@ use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use hekate_program::digest::program_id;
 use hekate_program::expander::VirtualExpander;
-use hekate_program::permutation::{
-    BusKind, ChallengeLabel, PermutationCheckSpec, REQUEST_IDX_LABEL, Source,
-};
+use hekate_program::permutation::{BusKind, ChallengeLabel, PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, InlineKernelHint, Program};
 
 type F = Block128;
@@ -195,7 +193,7 @@ fn paired_perm_spec(
         kind: BusKind::Permutation,
         sources: vec![
             (Source::Column(0), b"col_0" as ChallengeLabel),
-            (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+            (Source::RowIndexLeBytes(4), b"col_clk" as ChallengeLabel),
         ],
         selector: Some(send_sel_col),
         recv_selector,
@@ -536,7 +534,7 @@ fn mutate_chiplet_perm_changes_hash() {
             kind: BusKind::Permutation,
             sources: vec![
                 (Source::Column(0), b"col_0" as ChallengeLabel),
-                (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                (Source::RowIndexLeBytes(4), b"col_clk" as ChallengeLabel),
             ],
             selector: None,
             recv_selector: None,
