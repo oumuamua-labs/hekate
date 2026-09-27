@@ -43,11 +43,9 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let call_values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &call_values, selector)?;
@@ -55,10 +53,6 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     cx.fix(
         selector,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
-    );
-    cx.fix(
-        is_output,
-        KeccakChiplet::host_direction_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
     );
 
     cx.attach(ChipletDef::from_air(&KeccakChiplet::new(
@@ -142,11 +136,6 @@ fn generate_cpu_trace(calls: &[([Block64; 25], [Block64; 25])], num_rows: usize)
         tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)
             .unwrap();
 
-        for r in row + 1..=row + 24 {
-            tb.set_bit(CpuKeccakColumns::IS_OUTPUT, r, Bit::ONE)
-                .unwrap();
-        }
-
         // 24 rounds (no CPU activity)
         row += 24;
 
@@ -219,14 +208,7 @@ fn main() {
         ];
 
         let cpu = generate_cpu_trace(&calls, num_rows);
-
-        // CPU input row at 25k, output row at 25k+24,
-        // chiplet request_idx column must mirror that
-        // so LogUp pairs CPU emits with chiplet emits.
-        let pairs: Vec<(u32, u32)> = (0..inputs.len() as u32)
-            .map(|k| (25 * k, 25 * k + 24))
-            .collect();
-        let keccak = generate_keccak_trace(&inputs, Some(&pairs), num_rows).unwrap();
+        let keccak = generate_keccak_trace(&inputs, num_rows).unwrap();
 
         let air = build_program(num_rows).unwrap();
 

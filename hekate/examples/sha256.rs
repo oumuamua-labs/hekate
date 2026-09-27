@@ -106,11 +106,10 @@ fn build(message: &[u8], chiplet: &Sha256Chiplet<F>) -> errors::Result<Statement
     let mut calls = Vec::with_capacity(num_blocks);
     let mut h = IV;
 
-    for (b, block) in blocks.iter().enumerate() {
+    for block in &blocks {
         let call = Sha256Call {
             h_in: h,
             block: *block,
-            request_idx: (b * rows_per_block) as u32,
         };
 
         h = call.h_out();

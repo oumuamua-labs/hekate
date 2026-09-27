@@ -65,7 +65,6 @@ fn build_aes128_program(
 
     let link_values: Vec<Col> = (0..16)
         .map(|j| cpu.at(CpuAes128Columns::DATA + j))
-        .chain([key_selector])
         .collect();
 
     cx.call(&AesRound128Air::link_service(), &link_values, selector)?;
@@ -97,7 +96,6 @@ fn build_aes256_program(
 
     let link_values: Vec<Col> = (0..16)
         .map(|j| cpu.at(CpuAes256Columns::DATA + j))
-        .chain([key_selector])
         .collect();
 
     cx.call(&AesRound256Air::link_service(), &link_values, selector)?;

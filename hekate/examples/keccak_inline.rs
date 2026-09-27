@@ -42,11 +42,9 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let call_values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &call_values, selector)?;
@@ -54,10 +52,6 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     cx.fix(
         selector,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
-    );
-    cx.fix(
-        is_output,
-        KeccakChiplet::host_direction_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
     );
 
     cx.mount(ChipletDef::from_air(&KeccakChiplet::new(
@@ -143,10 +137,6 @@ fn generate_combined_trace(
 
         tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)?;
 
-        for r in row + 1..=row + 24 {
-            tb.set_bit(CpuKeccakColumns::IS_OUTPUT, r, Bit::ONE)?;
-        }
-
         row += 24;
 
         // Output row
@@ -161,10 +151,7 @@ fn generate_combined_trace(
 
     let mut trace = tb.build();
 
-    let pairs: Vec<(u32, u32)> = (0..inputs.len() as u32)
-        .map(|k| (25 * k, 25 * k + 24))
-        .collect();
-    let keccak_trace = generate_keccak_trace(inputs, Some(&pairs), num_rows)?;
+    let keccak_trace = generate_keccak_trace(inputs, num_rows)?;
 
     for col in keccak_trace.into_columns() {
         trace.add_column(col)?;
