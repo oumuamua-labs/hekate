@@ -88,9 +88,10 @@ all proven natively in binary fields without bit-decomposition overhead.
 Real 32-bit-integer Fibonacci. The CPU side holds five columns and the two Fibonacci transition
 constraints. Every `u32` ADD is offloaded to the `IntArithmeticChiplet`, its own trace, own
 commitment, own ZeroCheck, own evaluation argument, and is wired in by a LogUp bus
-(`(val_a, val_b, val_res, opcode, request_idx)` keys with a row-index clock). The result reaches
-the verdict through `publish`: a boundary pin to the public input on a row whose schedule a fixed
-column forces, with the transition chain determined from the pinned origins.
+(`(val_a, val_b, val_res, opcode)` keys; the `t`-th request meets the `t`-th response by emit
+rank). The result reaches the verdict through `publish`: a boundary pin to the public input on a
+row whose schedule a fixed column forces, with the transition chain determined from the pinned
+origins.
 
 ```rust
 use hekate::core::errors;
@@ -203,7 +204,6 @@ fn generate_traces(num_rows: usize) -> errors::Result<(ColumnTrace, ColumnTrace,
             op: ArithmeticOpcode::ADD,
             a,
             b,
-            request_idx: i as u32,
         });
 
         a = b;
@@ -328,10 +328,10 @@ and its peak resident set size.
 
 | Workload                  | Input   | Proving         | Verify         | Proof Size        | Peak memory       |
 |:--------------------------|:--------|:----------------|:---------------|:------------------|:------------------|
-| Keccak-f[1600], 2^15 rows | ~178 KB | 194 / 172 ms    | 11.8 / 4.9 ms  | 864 / 682 KiB     | 156 / 145 MiB     |
-| Keccak-f[1600], 2^20 rows | ~5.4 MB | 3.82 / 3.66 s   | 20.2 / 9.6 ms  | 3,536 / 3,285 KiB | 2,431 / 2,454 MiB |
-| SHA-256, 2^11 rows        | 2.5 KB  | 72 / 55 ms      | 9.3 / 3.7 ms   | 541 / 320 KiB     | 64 / 55 MiB       |
-| SHA-256, 2^21 rows        | 8.4 MB  | 10.96 / 10.78 s | 22.4 / 14.4 ms | 5,507 / 5,183 KiB | 5,235 / 5,097 MiB |
+| Keccak-f[1600], 2^15 rows | ~178 KB | 191 / 170 ms    | 12.4 / 4.8 ms  | 851 / 672 KiB     | 166 / 136 MiB     |
+| Keccak-f[1600], 2^20 rows | ~5.4 MB | 3.92 / 3.69 s   | 17.5 / 9.3 ms  | 3,545 / 3,223 KiB | 2,418 / 2,417 MiB |
+| SHA-256, 2^11 rows        | 2.5 KB  | 70 / 48 ms      | 9.8 / 3.7 ms   | 538 / 321 KiB     | 63 / 56 MiB       |
+| SHA-256, 2^21 rows        | 8.4 MB  | 11.57 / 11.01 s | 22.5 / 14.9 ms | 5,479 / 5,174 KiB | 5,216 / 5,049 MiB |
 
 Keccak runs 1,310 permutations at 2^15 and 41,943 at 2^20. SHA-256 runs
 40 blocks at 2 rounds per row and 131,072 blocks at 4 rounds per row.
@@ -345,10 +345,10 @@ HEKATE_NUM_VARS=21 HEKATE_ROUNDS_PER_ROW=4 just example sha256 public
 
 | Workload             | Proving       | Verify         | Proof Size          | Peak memory   |
 |:---------------------|:--------------|:---------------|:--------------------|:--------------|
-| ML-DSA-44            | 883 / 809 ms  | 44.8 / 23.6 ms | 4,184 / 3,689 KiB   | 477 / 469 MiB |
-| ML-DSA-65            | 946 / 849 ms  | 51.1 / 24.2 ms | 4,193 / 3,706 KiB   | 512 / 466 MiB |
-| ML-DSA-87            | 1.34 / 1.24 s | 48.1 / 25.3 ms | 5,484 / 4,909 KiB   | 811 / 787 MiB |
-| RSA-2048 PKCS#1 v1.5 | 335 / 282 ms  | 29.7 / 11.8 ms | 14,532 / 14,353 KiB | 503 / 486 MiB |
+| ML-DSA-44            | 886 / 873 ms  | 43.2 / 23.9 ms | 4,172 / 3,677 KiB   | 489 / 478 MiB |
+| ML-DSA-65            | 927 / 853 ms  | 45.5 / 24.3 ms | 4,184 / 3,687 KiB   | 477 / 473 MiB |
+| ML-DSA-87            | 1.36 / 1.25 s | 53.8 / 25.0 ms | 5,464 / 4,892 KiB   | 811 / 786 MiB |
+| RSA-2048 PKCS#1 v1.5 | 355 / 297 ms  | 31.2 / 11.9 ms | 14,585 / 14,348 KiB | 503 / 485 MiB |
 
 Each ML-DSA level runs 7 chiplet tables. RSA-2048 proves `s^65537 mod N == PKCS1-v1_5(H)`
 over a 200-byte message, with the modulus public and the signature witness.
@@ -362,13 +362,13 @@ just example rsa_pkcs1 public
 
 | Workload                 | Proving       | Verify         | Proof Size        | Peak memory       |
 |:-------------------------|:--------------|:---------------|:------------------|:------------------|
-| ML-KEM-768 decapsulation | 629 / 581 ms  | 33.7 / 18.8 ms | 3,483 / 3,103 KiB | 464 / 458 MiB     |
-| AES-128, 31,250 blocks   | 1.24 / 1.20 s | 21.0 / 16.4 ms | 4,692 / 4,390 KiB | 1,217 / 1,185 MiB |
-| AES-256, 31,250 blocks   | 1.38 / 1.31 s | 20.6 / 16.0 ms | 4,982 / 4,677 KiB | 1,508 / 1,465 MiB |
+| ML-KEM-768 decapsulation | 659 / 580 ms  | 33.1 / 18.8 ms | 3,481 / 3,090 KiB | 484 / 468 MiB     |
+| AES-128, 31,250 blocks   | 1.30 / 1.20 s | 20.6 / 15.4 ms | 4,674 / 4,362 KiB | 1,204 / 1,179 MiB |
+| AES-256, 31,250 blocks   | 1.41 / 1.33 s | 20.2 / 15.6 ms | 4,959 / 4,647 KiB | 1,496 / 1,469 MiB |
 
 ML-KEM-768 runs 6 chiplet tables, AES 2. Each AES run covers ~500 KB of plaintext on a
-2^16-row CPU trace with Round-AIR and S-box ROM chiplets at 2^19, which is ~40 µs per
-block for AES-128 and ~44 µs for AES-256.
+2^16-row CPU trace with Round-AIR and S-box ROM chiplets at 2^19, which is ~42 µs per
+block for AES-128 and ~45 µs for AES-256.
 
 ```bash
 just example mlkem public
@@ -383,9 +383,9 @@ virtual-expanded into 32 bit, 32 sum and 32 carry columns.
 
 | Scale     | Proving         | Verify         | Proof Size        | Peak memory        |
 |:----------|:----------------|:---------------|:------------------|:-------------------|
-| 2^20 rows | 329 / 285 ms    | 6.77 / 3.12 ms | 1,145 / 677 KiB   | 263 / 169 MiB      |
-| 2^24 rows | 5.49 / 4.40 s   | 12.8 / 6.93 ms | 4,100 / 2,537 KiB | 3,567 / 2,228 MiB  |
-| 2^26 rows | 25.19 / 20.23 s | 20.5 / 11.7 ms | 8,023 / 5,001 KiB | 14,336 / 8,478 MiB |
+| 2^20 rows | 336 / 294 ms    | 6.95 / 3.16 ms | 1,145 / 678 KiB   | 266 / 168 MiB      |
+| 2^24 rows | 5.45 / 4.75 s   | 12.7 / 7.43 ms | 4,097 / 2,538 KiB | 3,574 / 2,229 MiB  |
+| 2^26 rows | 23.83 / 19.58 s | 22.0 / 11.4 ms | 8,008 / 5,011 KiB | 13,312 / 8,293 MiB |
 
 ```bash
 HEKATE_NUM_VARS=26 just example fibonacci_raw public
