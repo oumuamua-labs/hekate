@@ -17,8 +17,8 @@ and its sponge. Padding and chaining are the CPU table's.
 
 ```
 Apple M3 Max, ZK, chiplet mounted into the CPU table, best of three runs (hekate/examples/sha256.rs):
-  DSC SOD, 40 compressions (2.5 KB), 2 rounds/row, 2^11 rows: 72 ms prove, 9.3 ms verify, 541 KiB proof, 64 MiB
-  131,072 compressions (8.4 MB), 4 rounds/row, 2^21 rows:    10.96 s prove, 22.4 ms verify, 5,507 KiB proof, 5,235 MiB
+  DSC SOD, 40 compressions (2.5 KB), 2 rounds/row, 2^11 rows: 70 ms prove, 9.8 ms verify, 538 KiB proof, 63 MiB
+  131,072 compressions (8.4 MB), 4 rounds/row, 2^21 rows:    11.57 s prove, 22.5 ms verify, 5,479 KiB proof, 5,216 MiB
 ```
 
 ## Examples
