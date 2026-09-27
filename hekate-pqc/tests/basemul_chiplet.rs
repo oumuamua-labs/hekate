@@ -145,7 +145,6 @@ fn single_addition() {
         c: 3000,
         idx: 0,
         ram_addr: 0,
-        request_idx: 0,
     }];
     assert!(prove_and_verify(&ops, "single_add"));
 }
@@ -158,7 +157,6 @@ fn single_overflow() {
         c: 4000 % Q,
         idx: 0,
         ram_addr: 0,
-        request_idx: 0,
     }];
     assert!(prove_and_verify(&ops, "single_overflow"));
 }
@@ -173,7 +171,6 @@ fn subtraction_encoding() {
         c: 2500,
         idx: 0,
         ram_addr: 0,
-        request_idx: 0,
     }];
     assert!(prove_and_verify(&ops, "subtraction"));
 }
@@ -213,7 +210,6 @@ fn full_basemul_unit() {
             c: r0,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         },
         BasemulOp {
             a: p01,
@@ -221,7 +217,6 @@ fn full_basemul_unit() {
             c: r1,
             idx: 1,
             ram_addr: 0,
-            request_idx: 1,
         },
         BasemulOp {
             a: r2,
@@ -229,7 +224,6 @@ fn full_basemul_unit() {
             c: p22,
             idx: 2,
             ram_addr: 0,
-            request_idx: 2,
         },
         BasemulOp {
             a: p23,
@@ -237,7 +231,6 @@ fn full_basemul_unit() {
             c: r3,
             idx: 3,
             ram_addr: 0,
-            request_idx: 3,
         },
     ];
     assert!(prove_and_verify(&ops, "full_basemul_unit"));
@@ -252,7 +245,6 @@ fn boundary_values() {
             c: (2 * (Q - 1)) % Q,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         },
         BasemulOp {
             a: 0,
@@ -260,7 +252,6 @@ fn boundary_values() {
             c: 0,
             idx: 1,
             ram_addr: 0,
-            request_idx: 1,
         },
         BasemulOp {
             a: Q - 1,
@@ -268,7 +259,6 @@ fn boundary_values() {
             c: 0,
             idx: 2,
             ram_addr: 0,
-            request_idx: 2,
         },
     ];
     assert!(prove_and_verify(&ops, "boundary"));
@@ -290,7 +280,6 @@ fn adversarial_corrupted_sum_rejected() {
         c: 3000,
         idx: 0,
         ram_addr: 0,
-        request_idx: 0,
     }];
 
     let cpu_rows = 4usize;
@@ -377,7 +366,6 @@ fn adversarial_c_out_of_range_rejected() {
         c: 3000,
         idx: 0,
         ram_addr: 0,
-        request_idx: 0,
     }];
 
     let cpu_rows = 4usize;
@@ -458,7 +446,6 @@ fn exploit_basemul_duplicate_cpu_request_rejected() {
             c: 300,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         },
         BasemulOp {
             a: 50,
@@ -466,7 +453,6 @@ fn exploit_basemul_duplicate_cpu_request_rejected() {
             c: 120,
             idx: 1,
             ram_addr: 0,
-            request_idx: 1,
         },
     ];
 
@@ -532,7 +518,7 @@ fn exploit_basemul_duplicate_cpu_request_rejected() {
             );
 
             if let Ok(true) = valid {
-                panic!("duplicate cpu request accepted — v3 request_idx soundness break")
+                panic!("duplicate cpu request accepted — emit rank soundness break")
             }
         }
     }
@@ -547,7 +533,6 @@ fn scribble_basemul_flip_selector_caught() {
             c: 300,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         },
         BasemulOp {
             a: 50,
@@ -555,7 +540,6 @@ fn scribble_basemul_flip_selector_caught() {
             c: 120,
             idx: 1,
             ram_addr: 0,
-            request_idx: 1,
         },
     ];
 
@@ -605,7 +589,6 @@ fn scribble_basemul_padding_row_attacks_caught() {
             c: 300,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         },
         BasemulOp {
             a: 50,
@@ -613,7 +596,6 @@ fn scribble_basemul_padding_row_attacks_caught() {
             c: 120,
             idx: 1,
             ram_addr: 1,
-            request_idx: 1,
         },
         BasemulOp {
             a: 1500,
@@ -621,7 +603,6 @@ fn scribble_basemul_padding_row_attacks_caught() {
             c: (1500 + 1500) % Q,
             idx: 2,
             ram_addr: 2,
-            request_idx: 2,
         },
     ];
 

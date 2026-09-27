@@ -219,8 +219,8 @@ impl NormCheckChiplet {
         &self.layout
     }
 
-    /// Both endpoints derive from this schema:
-    /// the checked value and its coefficient index.
+    /// Both endpoints derive from this schema: the checked
+    /// value, its coefficient index, then the emit rank.
     pub fn service() -> Service {
         Service {
             bus_id: Self::BUS_ID,
@@ -228,11 +228,8 @@ impl NormCheckChiplet {
             slots: vec![
                 ServiceSlot::Value(b"kappa_nc_value"),
                 ServiceSlot::Value(b"kappa_nc_idx"),
+                ServiceSlot::EmitRank,
             ],
-            clock_waiver: Some(
-                "see pqc/norm_check.rs: bus_idx is positional, both endpoints force \
-                 one row per (idx) value by AIR rather than by a clock slot",
-            ),
         }
     }
 
@@ -240,7 +237,7 @@ impl NormCheckChiplet {
         let ly = &self.layout;
 
         Self::service()
-            .respond(&[ly.bus_value, ly.bus_idx], &[], ly.s_active)
+            .respond(&[ly.bus_value, ly.bus_idx], ly.s_active)
             .expect("service slots match the responder columns")
     }
 }
@@ -503,6 +500,7 @@ mod tests {
     use super::*;
     use hekate_core::trace::Trace;
     use hekate_math::{Bit, Block128};
+    use hekate_program::permutation::EMIT_RANK_LABEL;
 
     type F = Block128;
 
@@ -674,9 +672,10 @@ mod tests {
         let chiplet = NormCheckChiplet::new(Q, BOUND, 1024, 1024);
         let spec = chiplet.linking_spec();
 
-        assert_eq!(spec.sources.len(), 2);
+        assert_eq!(spec.sources.len(), 3);
         assert_eq!(spec.sources[0].1, b"kappa_nc_value");
         assert_eq!(spec.sources[1].1, b"kappa_nc_idx");
+        assert_eq!(spec.sources[2].1, EMIT_RANK_LABEL);
     }
 
     #[test]

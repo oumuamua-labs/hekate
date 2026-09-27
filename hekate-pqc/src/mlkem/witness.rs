@@ -1161,7 +1161,6 @@ fn poly_basemul_traced(
             c: r[4 * i] as u32,
             idx: bm_base,
             ram_addr: ram_base_i,
-            request_idx: bm_base,
         });
 
         // r1 = p01 + p10
@@ -1171,7 +1170,6 @@ fn poly_basemul_traced(
             c: r[4 * i + 1] as u32,
             idx: bm_base + 1,
             ram_addr: ram_base_i + 1,
-            request_idx: bm_base + 1,
         });
 
         // r2 = a2b2 + a3b3nz (add, not sub)
@@ -1181,7 +1179,6 @@ fn poly_basemul_traced(
             c: r[4 * i + 2] as u32,
             idx: bm_base + 2,
             ram_addr: ram_base_i + 2,
-            request_idx: bm_base + 2,
         });
 
         // r3 = p23 + p32
@@ -1191,7 +1188,6 @@ fn poly_basemul_traced(
             c: r[4 * i + 3] as u32,
             idx: bm_base + 3,
             ram_addr: ram_base_i + 3,
-            request_idx: bm_base + 3,
         });
     }
 

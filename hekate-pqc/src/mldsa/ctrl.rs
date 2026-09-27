@@ -16,11 +16,10 @@ use alloc::vec::Vec;
 use hekate_core::trace::ColumnType;
 use hekate_gadgets::RamChiplet;
 use hekate_keccak::KeccakChiplet;
-use hekate_keccak::{KECCAK_DIRECTION_LABEL, KECCAK_LANE_LABELS};
 use hekate_math::TowerField;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
-use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, define_columns, fix};
 
 // =================================================================
@@ -112,10 +111,6 @@ define_columns! {
         HASH_DIFF_INV_LO: B128,
         HASH_DIFF_INV_HI: B128,
 
-        // Partner-side row index for the
-        // ml_dsa_data outward CPU bus.
-        REQUEST_IDX_OUT: B32,
-
         // Control flow.
         S_ACTIVE: Bit,
 
@@ -163,29 +158,19 @@ impl MlDsaCtrlChiplet {
     /// External "ml_dsa_data" bus.
     pub fn main_linking_spec() -> PermutationCheckSpec {
         crate::mldsa::data_service()
-            .respond(
-                &[MlDsaCtrlColumns::IO_DATA],
-                &[MlDsaCtrlColumns::REQUEST_IDX_OUT],
-                MlDsaCtrlColumns::IO_SELECTOR,
-            )
+            .respond(&[MlDsaCtrlColumns::IO_DATA], MlDsaCtrlColumns::IO_SELECTOR)
             .expect("data_service slots match the responder columns")
     }
 
     /// Internal "keccak_link" bus.
     fn keccak_linking_spec() -> PermutationCheckSpec {
-        let mut sources = Vec::with_capacity(27);
+        let lanes: Vec<usize> = (0..25)
+            .map(|i| MlDsaCtrlColumns::KECCAK_LANES + i)
+            .collect();
 
-        for (i, label) in KECCAK_LANE_LABELS.iter().enumerate() {
-            sources.push((Source::Column(MlDsaCtrlColumns::KECCAK_LANES + i), *label));
-        }
-
-        sources.push((Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL));
-        sources.push((
-            Source::Column(MlDsaCtrlColumns::KEC_IS_OUTPUT),
-            KECCAK_DIRECTION_LABEL,
-        ));
-
-        PermutationCheckSpec::new(sources, Some(MlDsaCtrlColumns::KECCAK_SELECTOR))
+        KeccakChiplet::service()
+            .request(&lanes, MlDsaCtrlColumns::KECCAK_SELECTOR)
+            .expect("service slots match the requester columns")
     }
 
     /// Internal "ntt_data" bus.
@@ -421,6 +406,7 @@ impl<F: TowerField> Air<F> for MlDsaCtrlChiplet {
         vec![
             fix(MlDsaCtrlColumns::IO_SELECTOR, shapes.io),
             fix(MlDsaCtrlColumns::KECCAK_SELECTOR, shapes.keccak),
+            fix(MlDsaCtrlColumns::KEC_IS_OUTPUT, shapes.kec_is_output),
             fix(MlDsaCtrlColumns::NTT_SELECTOR, shapes.ntt),
             fix(MlDsaCtrlColumns::W_BIND_SELECTOR, shapes.w_bind),
             fix(MlDsaCtrlColumns::RAM_SELECTOR, shapes.ram),

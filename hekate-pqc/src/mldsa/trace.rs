@@ -178,7 +178,6 @@ where
                         butterfly_idx: b.butterfly_idx,
                         w: b.w,
                         active: true,
-                        request_idx_tr: 0,
                     });
                 }
                 ntt::NttOp::MulOnly(m) => {
@@ -188,7 +187,6 @@ where
                         butterfly_idx: m.butterfly_idx,
                         w: m.w,
                         active: true,
-                        request_idx_tr: 0,
                     });
                 }
                 ntt::NttOp::FlowCompanion(_) => {
@@ -198,7 +196,6 @@ where
                         w: 0,
                         is_mulonly: false,
                         active: false,
-                        request_idx_tr: 0,
                     });
                 }
             }
@@ -448,13 +445,6 @@ where
 
         let mut ram_events_fixed: Vec<ram::MemoryEvent> = Vec::new();
 
-        let mut io_data_counter: u32 = 0;
-        let mut keccak_request_idx_pairs: Vec<(u32, u32)> =
-            Vec::with_capacity(result.keccak_calls.len());
-        let mut pending_keccak_input_ctrl_row: Option<u32> = None;
-
-        let mut wbind_ctrl_rows: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
-
         for (phase, dispatch) in &schedule {
             // Sticky RATE_REG carry
             for i in 0..25 {
@@ -489,13 +479,6 @@ where
                         Block32::from(*data),
                     )?;
                     ctrl_tb.set_bit(MlDsaCtrlColumns::IO_SELECTOR, ctrl_row, Bit::ONE)?;
-                    ctrl_tb.set_b32(
-                        MlDsaCtrlColumns::REQUEST_IDX_OUT,
-                        ctrl_row,
-                        Block32::from(io_data_counter),
-                    )?;
-
-                    io_data_counter += 1;
                 }
                 CtrlDispatch::KeccakInput {
                     lanes,
@@ -503,19 +486,6 @@ where
                     sponge_init,
                     is_shake128,
                 } => {
-                    if *is_output {
-                        let in_row = pending_keccak_input_ctrl_row.take().ok_or(
-                            errors::Error::Protocol {
-                                protocol: "mldsa_trace",
-                                message: "Keccak output dispatched without preceding input",
-                            },
-                        )?;
-
-                        keccak_request_idx_pairs.push((in_row, ctrl_row as u32));
-                    } else {
-                        pending_keccak_input_ctrl_row = Some(ctrl_row as u32);
-                    }
-
                     for (lane, &val) in lanes.iter().enumerate() {
                         ctrl_tb.set_b64(
                             MlDsaCtrlColumns::KECCAK_LANES + lane,
@@ -621,11 +591,6 @@ where
                         Block32::from(*w_value),
                     )?;
                     ctrl_tb.set_bit(MlDsaCtrlColumns::W_BIND_SELECTOR, ctrl_row, Bit::ONE)?;
-
-                    wbind_ctrl_rows
-                        .entry((*bfly_idx, *w_value))
-                        .or_default()
-                        .push(ctrl_row as u32);
                 }
                 CtrlDispatch::BoundaryRam {
                     event,
@@ -788,24 +753,6 @@ where
         // Twiddle ROM trace
         // ==========================================================
 
-        for entry in twiddle_entries.iter_mut() {
-            if !entry.is_mulonly {
-                continue;
-            }
-
-            let rows = wbind_ctrl_rows
-                .get_mut(&(entry.butterfly_idx, entry.w))
-                .ok_or(errors::Error::Protocol {
-                    protocol: "mldsa_trace",
-                    message: "mulonly twiddle entry has no matching W-bind ctrl row",
-                })?;
-
-            entry.request_idx_tr = rows.pop().ok_or(errors::Error::Protocol {
-                protocol: "mldsa_trace",
-                message: "W-bind ctrl rows exhausted before twiddle mulonly entries",
-            })?;
-        }
-
         let twiddle_trace =
             twiddle_rom::generate_twiddle_rom_trace(&twiddle_entries, self.params.twiddle_rows)?;
 
@@ -813,11 +760,7 @@ where
         // Keccak trace
         // ==========================================================
 
-        let keccak_trace = keccak::generate_keccak_trace(
-            &keccak_inputs,
-            Some(&keccak_request_idx_pairs),
-            self.params.keccak_rows,
-        )?;
+        let keccak_trace = keccak::generate_keccak_trace(&keccak_inputs, self.params.keccak_rows)?;
 
         // ==========================================================
         // RAM trace from fixed-clock events

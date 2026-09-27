@@ -19,6 +19,7 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_sdk::preflight::{TableId, preflight};
 use hekate_verifier::HekateVerifier;
 #[allow(deprecated)]
 use ml_kem::ExpandedKeyEncoding;
@@ -200,6 +201,15 @@ fn run_tampered_mlkem_768<T>(tamper: T) -> bool
 where
     T: FnOnce(&mut [ColumnTrace]),
 {
+    let (air, instance, witness) = tampered_mlkem_768(tamper);
+
+    rejected(&air, &instance, &witness)
+}
+
+fn tampered_mlkem_768<T>(tamper: T) -> (CircuitProgram<F>, ProgramInstance<F>, ProgramWitness<F>)
+where
+    T: FnOnce(&mut [ColumnTrace]),
+{
     let (ct_bytes, sk_bytes) = nist_mlkem_768();
 
     let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
@@ -264,6 +274,14 @@ where
     let instance = ProgramInstance::new(cpu_rows, ct_public);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
+    (air, instance, witness)
+}
+
+fn rejected(
+    air: &CircuitProgram<F>,
+    instance: &ProgramInstance<F>,
+    witness: &ProgramWitness<F>,
+) -> bool {
     let config = Config {
         zero_knowledge: true,
         ..Config::default()
@@ -274,9 +292,9 @@ where
 
     let proof_result = prove(
         b"MLKem_Adversarial",
-        &air,
-        &instance,
-        &witness,
+        air,
+        instance,
+        witness,
         &config,
         blinding_seed,
         None,
@@ -287,9 +305,9 @@ where
         Ok(proof) => {
             let mut vt = Transcript::<H>::new(b"MLKem_Adversarial");
             let result = HekateVerifier::<F, H>::verify(
-                &program_id(&air).unwrap(),
-                &air,
-                &instance,
+                &program_id(air).unwrap(),
+                air,
+                instance,
                 &proof,
                 &mut vt,
                 &config,
@@ -448,6 +466,25 @@ fn flip_b64(trace: &mut ColumnTrace, col: usize, row: usize, mask: u64) {
     }
 }
 
+fn squeeze_input_row(ctrl: &ColumnTrace) -> usize {
+    let bits = |col: usize| ctrl.columns[col].as_bit_slice().unwrap();
+    let words = |col: usize| ctrl.columns[col].as_b64_slice().unwrap();
+
+    let kec_sel = bits(MlKemCtrlColumns::KECCAK_SELECTOR);
+    let kec_out = bits(MlKemCtrlColumns::KEC_IS_OUTPUT);
+    let init = bits(MlKemCtrlColumns::SPONGE_INIT);
+
+    (0..kec_sel.len())
+        .filter(|&r| kec_sel[r] == Bit::ONE && kec_out[r] == Bit::ZERO && init[r] == Bit::ZERO)
+        .find(|&r| {
+            (0..25).all(|k| {
+                words(MlKemCtrlColumns::KECCAK_LANES + k)[r]
+                    == words(MlKemCtrlColumns::RATE_REG + k)[r]
+            })
+        })
+        .expect("ML-KEM ctrl trace has no squeeze block")
+}
+
 // =================================================================
 // Multi-level E2E tests (512, 768, 1024)
 // =================================================================
@@ -596,95 +633,42 @@ fn ram_enforces_ct_comparison() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn exploit_ntt_ram_binding_mismatch() {
-    let (ct, sk) = nist_mlkem_768();
+    let detected = run_tampered_mlkem_768(|chiplet_traces| {
+        // ctrl trace is chiplet_traces[0].
+        // Find a co-activated row:
+        // NTT_SELECTOR=1 AND RAM_SELECTOR=1.
+        let ctrl = &chiplet_traces[0];
 
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
+        let ntt_sel_bits = ctrl.columns[MlKemCtrlColumns::NTT_SELECTOR]
+            .as_bit_slice()
+            .unwrap();
+        let ram_sel_bits = ctrl.columns[MlKemCtrlColumns::RAM_SELECTOR]
+            .as_bit_slice()
+            .unwrap();
 
-    let (mut chiplet_traces, _) = mlkem_chiplet
-        .generate_traces(&ct, &sk)
-        .expect("trace gen failed");
+        let coactivated_row = (0..ntt_sel_bits.len())
+            .find(|&r| ntt_sel_bits[r] == Bit::ONE && ram_sel_bits[r] == Bit::ONE)
+            .expect("No co-activated NTT+RAM row found — binding not wired");
 
-    // ctrl trace is chiplet_traces[0].
-    // Find a co-activated row:
-    // NTT_SELECTOR=1 AND RAM_SELECTOR=1.
-    let ctrl = &chiplet_traces[0];
-
-    let ntt_sel_bits = ctrl.columns[MlKemCtrlColumns::NTT_SELECTOR]
-        .as_bit_slice()
-        .unwrap();
-    let ram_sel_bits = ctrl.columns[MlKemCtrlColumns::RAM_SELECTOR]
-        .as_bit_slice()
-        .unwrap();
-
-    let coactivated_row = (0..ntt_sel_bits.len())
-        .find(|&r| ntt_sel_bits[r] == Bit::ONE && ram_sel_bits[r] == Bit::ONE)
-        .expect("No co-activated NTT+RAM row found — binding not wired");
-
-    // Tamper:
-    // flip RAM_VAL_PACKED on the co-activated row.
-    // NTT_B stays correct.
-    // Constraint fires:
-    // ntt_b + ram_val_packed ≠ 0.
-    let packed_col = &mut chiplet_traces[0].columns[MlKemCtrlColumns::RAM_VAL_PACKED];
-    match packed_col {
-        TraceColumn::B32(data) => {
-            let original = data[coactivated_row];
-            data[coactivated_row] = Flat::from_raw(Block32(original.to_tower().0 ^ 0x1));
+        // Tamper:
+        // flip RAM_VAL_PACKED on the co-activated row.
+        // NTT_B stays correct.
+        // Constraint fires:
+        // ntt_b + ram_val_packed ≠ 0.
+        let packed_col = &mut chiplet_traces[0].columns[MlKemCtrlColumns::RAM_VAL_PACKED];
+        match packed_col {
+            TraceColumn::B32(data) => {
+                let original = data[coactivated_row];
+                data[coactivated_row] = Flat::from_raw(Block32(original.to_tower().0 ^ 0x1));
+            }
+            _ => panic!("RAM_VAL_PACKED must be B32"),
         }
-        _ => panic!("RAM_VAL_PACKED must be B32"),
-    }
+    });
 
-    // Prove with tampered trace
-    let cpu_rows: usize = 1 << 10;
-    let layout = CpuMlKemColumns::build_layout();
-    let cpu_trace = TraceBuilder::new(&layout, cpu_rows.trailing_zeros() as usize)
-        .unwrap()
-        .build();
-
-    let air = mlkem_test_program(&mlkem_chiplet, cpu_rows, 0);
-
-    let instance = ProgramInstance::new(cpu_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
-
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::default()
-    };
-
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
-
-    let proof_result = prove(
-        b"MLKem_Adversarial",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        blinding_seed,
-        None,
+    assert!(
+        detected,
+        "Verifier accepted NTT_B != RAM_VAL_PACKED on co-activated row",
     );
-
-    match proof_result {
-        Err(_) => {
-            // Prover rejected, binding enforced.
-        }
-        Ok(proof) => {
-            let mut vt = Transcript::<H>::new(b"MLKem_Adversarial");
-            let verify = HekateVerifier::<F, H>::verify(
-                &program_id(&air).unwrap(),
-                &air,
-                &instance,
-                &proof,
-                &mut vt,
-                &config,
-            );
-
-            assert!(
-                verify.is_err() || !verify.unwrap(),
-                "Verifier accepted NTT_B != RAM_VAL_PACKED on co-activated row",
-            );
-        }
-    }
 }
 
 // =================================================================
@@ -703,95 +687,42 @@ fn exploit_ntt_ram_binding_mismatch() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn exploit_ntt_flow_connectivity_scramble() {
-    let (ct, sk) = nist_mlkem_768();
+    let detected = run_tampered_mlkem_768(|chiplet_traces| {
+        // NTT trace is chiplet_traces[2].
+        // Physical layout:
+        // num_packed B32 + 16 B32 + 10 Bit.
+        let ntt_layout = hekate_pqc::ntt::NttLayout::compute(3329, 12);
+        let num_packed = ntt_layout.num_packed_b32_cols;
+        let col_bus_a_out = num_packed + 4;
+        let col_s_active = num_packed + 16;
+        let col_s_flow_output = num_packed + 16 + 5;
 
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
+        let ntt_trace = &mut chiplet_traces[2];
 
-    let (mut chiplet_traces, _) = mlkem_chiplet
-        .generate_traces(&ct, &sk)
-        .expect("trace gen failed");
+        let s_active = ntt_trace.columns[col_s_active].as_bit_slice().unwrap();
+        let s_flow_out = ntt_trace.columns[col_s_flow_output].as_bit_slice().unwrap();
 
-    // NTT trace is chiplet_traces[2].
-    // Physical layout:
-    // num_packed B32 + 16 B32 + 10 Bit.
-    let ntt_layout = hekate_pqc::ntt::NttLayout::compute(3329, 12);
-    let num_packed = ntt_layout.num_packed_b32_cols;
-    let col_bus_a_out = num_packed + 4;
-    let col_s_active = num_packed + 16;
-    let col_s_flow_output = num_packed + 16 + 5;
+        // Find a forward butterfly with flow output
+        // (intermediate layer, not layer 6).
+        let target_row = (0..s_active.len())
+            .find(|&r| s_active[r] == Bit::ONE && s_flow_out[r] == Bit::ONE)
+            .expect("No flow-output butterfly row found");
 
-    let ntt_trace = &mut chiplet_traces[2];
-
-    let s_active = ntt_trace.columns[col_s_active].as_bit_slice().unwrap();
-    let s_flow_out = ntt_trace.columns[col_s_flow_output].as_bit_slice().unwrap();
-
-    // Find a forward butterfly with flow output
-    // (intermediate layer, not layer 6).
-    let target_row = (0..s_active.len())
-        .find(|&r| s_active[r] == Bit::ONE && s_flow_out[r] == Bit::ONE)
-        .expect("No flow-output butterfly row found");
-
-    // Tamper:
-    // flip bit 0 of bus_a_out
-    match &mut ntt_trace.columns[col_bus_a_out] {
-        TraceColumn::B32(data) => {
-            let original = data[target_row];
-            data[target_row] = Flat::from_raw(Block32(original.to_tower().0 ^ 0x1));
+        // Tamper:
+        // flip bit 0 of bus_a_out
+        match &mut ntt_trace.columns[col_bus_a_out] {
+            TraceColumn::B32(data) => {
+                let original = data[target_row];
+                data[target_row] = Flat::from_raw(Block32(original.to_tower().0 ^ 0x1));
+            }
+            _ => panic!("bus_a_out must be B32"),
         }
-        _ => panic!("bus_a_out must be B32"),
-    }
+    });
 
-    // Prove with tampered NTT trace
-    let cpu_rows: usize = 1 << 10;
-    let layout = CpuMlKemColumns::build_layout();
-    let cpu_trace = TraceBuilder::new(&layout, cpu_rows.trailing_zeros() as usize)
-        .unwrap()
-        .build();
-
-    let air = mlkem_test_program(&mlkem_chiplet, cpu_rows, 0);
-
-    let instance = ProgramInstance::new(cpu_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
-
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::default()
-    };
-
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
-
-    let proof_result = prove(
-        b"MLKem_FlowExploit",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        blinding_seed,
-        None,
+    assert!(
+        detected,
+        "Verifier accepted scrambled butterfly a_out — flow connectivity bypass",
     );
-
-    match proof_result {
-        Err(_) => {
-            // Prover rejected, flow check caught it.
-        }
-        Ok(proof) => {
-            let mut vt = Transcript::<H>::new(b"MLKem_FlowExploit");
-            let verify = HekateVerifier::<F, H>::verify(
-                &program_id(&air).unwrap(),
-                &air,
-                &instance,
-                &proof,
-                &mut vt,
-                &config,
-            );
-
-            assert!(
-                verify.is_err() || !verify.unwrap(),
-                "Verifier accepted scrambled butterfly a_out — flow connectivity bypass",
-            );
-        }
-    }
 }
 
 // =================================================================
@@ -813,186 +744,150 @@ fn exploit_ntt_flow_connectivity_scramble() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn exploit_keccak_input_unbound() {
-    let (ct, sk) = nist_mlkem_768();
+    let detected = run_tampered_mlkem_768(|chiplet_traces| {
+        // Identify the target Keccak call.
+        // Keccak trace = chiplet_traces[1].
+        // Each call occupies 25 rows:
+        // 24 rounds + 1 output row.
+        // Row 0 of each call is the input
+        // (s_in_out=1, s_round=1).
+        // Row 24 is the output
+        // (s_in_out=1, s_round=0).
+        //
+        // Target call 0 (first G hash).
+        // Keccak trace rows 0..24.
+        let keccak_trace = &mut chiplet_traces[1];
 
-    let mlkem_chiplet = MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768);
-
-    let (mut chiplet_traces, _) = mlkem_chiplet
-        .generate_traces(&ct, &sk)
-        .expect("trace gen failed");
-
-    // Identify the target Keccak call.
-    // Keccak trace = chiplet_traces[1].
-    // Each call occupies 25 rows:
-    // 24 rounds + 1 output row.
-    // Row 0 of each call is the input
-    // (s_in_out=1, s_round=1).
-    // Row 24 is the output
-    // (s_in_out=1, s_round=0).
-    //
-    // Target call 0 (first G hash).
-    // Keccak trace rows 0..24.
-    let keccak_trace = &mut chiplet_traces[1];
-
-    // Read original input state
-    // from Keccak trace row 0.
-    // (lanes 0..24 are B64 columns).
-    let mut original_input = [0u64; 25];
-    for (lane, slot) in original_input.iter_mut().enumerate() {
-        match &keccak_trace.columns[lane] {
-            TraceColumn::B64(data) => {
-                *slot = data[0].to_tower().0;
-            }
-            _ => panic!("Keccak lane must be B64"),
-        }
-    }
-
-    // Tamper:
-    // flip lane 0 bit 0.
-    let mut tampered_input = original_input;
-    tampered_input[0] ^= 1;
-
-    // Recompute keccak_f with tampered input
-    let mut state = tampered_input;
-    let mut round_states = Vec::with_capacity(25);
-
-    for round in 0..24 {
-        round_states.push(state);
-
-        let rc = KeccakChiplet::ROUND_CONSTANTS[round];
-        state = KeccakWitness::keccak_f_round(state, rc);
-    }
-
-    round_states.push(state); // output state
-
-    let tampered_output = state;
-
-    // Update Keccak chiplet trace:
-    // 25 rows for call 0 (rows 0..24).
-    for (row, state) in round_states.iter().enumerate().take(25) {
-        for (lane, &val) in state.iter().enumerate().take(25) {
-            match &mut keccak_trace.columns[lane] {
+        // Read original input state
+        // from Keccak trace row 0.
+        // (lanes 0..24 are B64 columns).
+        let mut original_input = [0u64; 25];
+        for (lane, slot) in original_input.iter_mut().enumerate() {
+            match &keccak_trace.columns[lane] {
                 TraceColumn::B64(data) => {
-                    data[row] = Block64::from(val).to_hardware();
+                    *slot = data[0].to_tower().0;
                 }
                 _ => panic!("Keccak lane must be B64"),
             }
         }
-    }
 
-    // Update ctrl trace:
-    // find the two ctrl rows for
-    // Keccak call 0 (first pair of
-    // KECCAK_SELECTOR=1 rows).
-    let (ctrl_input_row, ctrl_output_row, reg_update_end) = {
-        let ctrl = &chiplet_traces[0];
-        let kec_sel_bits = ctrl.columns[MlKemCtrlColumns::KECCAK_SELECTOR]
-            .as_bit_slice()
-            .unwrap();
+        // Tamper:
+        // flip lane 0 bit 0.
+        let mut tampered_input = original_input;
+        tampered_input[0] ^= 1;
 
-        let kec_rows: Vec<usize> = (0..kec_sel_bits.len())
-            .filter(|&r| kec_sel_bits[r] == Bit::ONE)
-            .collect();
+        // Recompute keccak_f with tampered input
+        let mut state = tampered_input;
+        let mut round_states = Vec::with_capacity(25);
 
-        assert!(kec_rows.len() >= 2, "Need at least 2 Keccak ctrl rows");
+        for round in 0..24 {
+            round_states.push(state);
 
-        let in_row = kec_rows[0];
-        let out_row = kec_rows[1];
-
-        // Find where to stop RATE_REG updates
-        let init_bits = ctrl.columns[MlKemCtrlColumns::SPONGE_INIT]
-            .as_bit_slice()
-            .unwrap();
-        let active_bits = ctrl.columns[MlKemCtrlColumns::S_ACTIVE]
-            .as_bit_slice()
-            .unwrap();
-
-        let mut end = out_row + 1;
-        while end < active_bits.len() {
-            if active_bits[end] == Bit::ZERO {
-                end += 1; // include first padding
-                break;
-            }
-
-            if init_bits[end] == Bit::ONE {
-                break;
-            }
-
-            end += 1;
+            let rc = KeccakChiplet::ROUND_CONSTANTS[round];
+            state = KeccakWitness::keccak_f_round(state, rc);
         }
 
-        (in_row, out_row, end)
-    };
+        round_states.push(state); // output state
 
-    let ctrl = &mut chiplet_traces[0];
+        let tampered_output = state;
 
-    // Tamper ctrl KeccakInput row
-    // (lanes 0..24).
-    for (lane, &val) in tampered_input.iter().enumerate().take(25) {
-        match &mut ctrl.columns[MlKemCtrlColumns::KECCAK_LANES + lane] {
-            TraceColumn::B64(data) => {
-                data[ctrl_input_row] = Block64::from(val).to_hardware();
-            }
-            _ => panic!("KECCAK_LANES must be B64"),
-        }
-    }
-
-    // Tamper ctrl KeccakOutput row
-    // (lanes 0..24 with tampered output).
-    for (lane, &val) in tampered_output.iter().enumerate().take(25) {
-        match &mut ctrl.columns[MlKemCtrlColumns::KECCAK_LANES + lane] {
-            TraceColumn::B64(data) => {
-                data[ctrl_output_row] = Block64::from(val).to_hardware();
-            }
-            _ => panic!("KECCAK_LANES must be B64"),
-        }
-    }
-
-    // Update RATE_REG on all rows from
-    // the output row onward until the
-    // next SPONGE_INIT (which resets to 0).
-    // A real attacker controls the full
-    // witness and would do this.
-    for row in (ctrl_output_row + 1)..reg_update_end {
-        for (lane, &val) in tampered_output.iter().enumerate().take(17) {
-            match &mut ctrl.columns[MlKemCtrlColumns::RATE_REG + lane] {
-                TraceColumn::B64(data) => {
-                    data[row] = Block64::from(val).to_hardware();
+        // Update Keccak chiplet trace:
+        // 25 rows for call 0 (rows 0..24).
+        for (row, state) in round_states.iter().enumerate().take(25) {
+            for (lane, &val) in state.iter().enumerate().take(25) {
+                match &mut keccak_trace.columns[lane] {
+                    TraceColumn::B64(data) => {
+                        data[row] = Block64::from(val).to_hardware();
+                    }
+                    _ => panic!("Keccak lane must be B64"),
                 }
-                _ => panic!("RATE_REG must be B64"),
             }
         }
-    }
 
-    // Prove with tampered Keccak input
-    let cpu_rows: usize = 1 << 10;
-    let layout = CpuMlKemColumns::build_layout();
-    let cpu_trace = TraceBuilder::new(&layout, cpu_rows.trailing_zeros() as usize)
-        .unwrap()
-        .build();
+        // Update ctrl trace:
+        // find the two ctrl rows for
+        // Keccak call 0 (first pair of
+        // KECCAK_SELECTOR=1 rows).
+        let (ctrl_input_row, ctrl_output_row, reg_update_end) = {
+            let ctrl = &chiplet_traces[0];
+            let kec_sel_bits = ctrl.columns[MlKemCtrlColumns::KECCAK_SELECTOR]
+                .as_bit_slice()
+                .unwrap();
 
-    let air = mlkem_test_program(&mlkem_chiplet, cpu_rows, 0);
+            let kec_rows: Vec<usize> = (0..kec_sel_bits.len())
+                .filter(|&r| kec_sel_bits[r] == Bit::ONE)
+                .collect();
 
-    let instance = ProgramInstance::new(cpu_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
+            assert!(kec_rows.len() >= 2, "Need at least 2 Keccak ctrl rows");
 
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::default()
-    };
+            let in_row = kec_rows[0];
+            let out_row = kec_rows[1];
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+            // Find where to stop RATE_REG updates
+            let init_bits = ctrl.columns[MlKemCtrlColumns::SPONGE_INIT]
+                .as_bit_slice()
+                .unwrap();
+            let active_bits = ctrl.columns[MlKemCtrlColumns::S_ACTIVE]
+                .as_bit_slice()
+                .unwrap();
 
-    let proof_result = prove(
-        b"MLKem_Adversarial",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        blinding_seed,
-        None,
-    );
+            let mut end = out_row + 1;
+            while end < active_bits.len() {
+                if active_bits[end] == Bit::ZERO {
+                    end += 1; // include first padding
+                    break;
+                }
+
+                if init_bits[end] == Bit::ONE {
+                    break;
+                }
+
+                end += 1;
+            }
+
+            (in_row, out_row, end)
+        };
+
+        let ctrl = &mut chiplet_traces[0];
+
+        // Tamper ctrl KeccakInput row
+        // (lanes 0..24).
+        for (lane, &val) in tampered_input.iter().enumerate().take(25) {
+            match &mut ctrl.columns[MlKemCtrlColumns::KECCAK_LANES + lane] {
+                TraceColumn::B64(data) => {
+                    data[ctrl_input_row] = Block64::from(val).to_hardware();
+                }
+                _ => panic!("KECCAK_LANES must be B64"),
+            }
+        }
+
+        // Tamper ctrl KeccakOutput row
+        // (lanes 0..24 with tampered output).
+        for (lane, &val) in tampered_output.iter().enumerate().take(25) {
+            match &mut ctrl.columns[MlKemCtrlColumns::KECCAK_LANES + lane] {
+                TraceColumn::B64(data) => {
+                    data[ctrl_output_row] = Block64::from(val).to_hardware();
+                }
+                _ => panic!("KECCAK_LANES must be B64"),
+            }
+        }
+
+        // Update RATE_REG on all rows from
+        // the output row onward until the
+        // next SPONGE_INIT (which resets to 0).
+        // A real attacker controls the full
+        // witness and would do this.
+        for row in (ctrl_output_row + 1)..reg_update_end {
+            for (lane, &val) in tampered_output.iter().enumerate().take(17) {
+                match &mut ctrl.columns[MlKemCtrlColumns::RATE_REG + lane] {
+                    TraceColumn::B64(data) => {
+                        data[row] = Block64::from(val).to_hardware();
+                    }
+                    _ => panic!("RATE_REG must be B64"),
+                }
+            }
+        }
+    });
 
     // EXPLOIT CLOSED:
     // carry chain constrains KeccakInput
@@ -1002,23 +897,6 @@ fn exploit_keccak_input_unbound() {
     // the input is detected at either
     // prove time (constraint violation)
     // or verify time (GPA mismatch).
-
-    let detected = match proof_result {
-        Err(_) => true,
-        Ok(proof) => {
-            let mut vt = Transcript::<H>::new(b"MLKem_Adversarial");
-            let result = HekateVerifier::<F, H>::verify(
-                &program_id(&air).unwrap(),
-                &air,
-                &instance,
-                &proof,
-                &mut vt,
-                &config,
-            );
-
-            result.is_err() || !result.unwrap()
-        }
-    };
 
     assert!(detected, "Keccak input tampering must be detected");
 }
@@ -1525,4 +1403,41 @@ fn exploit_ntt_dispatch_swap() {
         detected,
         "NTT dispatch swap must be caught by NTT-RAM binding"
     );
+}
+
+/// On a squeeze block, `KEC_IS_OUTPUT` on the input row
+/// turns off capacity continuity and frees the Keccak input;
+/// every root holds and only the pin rejects.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn exploit_kec_is_output_on_squeeze_block() {
+    let mut row = 0;
+
+    let (air, instance, witness) = tampered_mlkem_768(|traces| {
+        let ctrl = &mut traces[0];
+        row = squeeze_input_row(ctrl);
+
+        match &mut ctrl.columns[MlKemCtrlColumns::KEC_IS_OUTPUT] {
+            TraceColumn::Bit(d) => d[row] = Bit::ONE,
+            _ => panic!("KEC_IS_OUTPUT must be Bit"),
+        }
+    });
+
+    let report = preflight(&air, &instance, &witness).unwrap();
+
+    assert!(report.constraint_violations.is_empty());
+    assert!(report.boundary_violations.is_empty());
+    assert!(report.bus_diagnostics.is_empty());
+
+    let [pin] = report.fixed_column_violations.as_slice() else {
+        panic!("expected one fixed-column violation");
+    };
+
+    assert!(pin.table == TableId::Chiplet(0));
+    assert_eq!(
+        (pin.col_idx, pin.row_idx),
+        (MlKemCtrlColumns::KEC_IS_OUTPUT, row)
+    );
+
+    assert!(rejected(&air, &instance, &witness));
 }
