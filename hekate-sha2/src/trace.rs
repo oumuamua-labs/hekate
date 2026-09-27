@@ -14,13 +14,11 @@ use crate::{
 
 const SCHEDULE_LEN: usize = ROUNDS + BLOCK_WORDS;
 
-/// One compression request;
-/// `request_idx` is the host row that emits it.
+/// One compression request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sha256Call {
     pub h_in: [u32; STATE_WORDS],
     pub block: [u32; BLOCK_WORDS],
-    pub request_idx: u32,
 }
 
 struct RoundWitness {
@@ -44,8 +42,8 @@ impl Sha256Call {
     }
 }
 
-/// Lays each call out as `rows_per_block` contiguous
-/// rows from row 0; padding rows stay zero.
+/// Lays `calls[k]` out as block `k`, answering
+/// the host's `k`-th request; padding stays zero.
 ///
 /// # Errors
 /// `calls.len()` differs from the `num_blocks` the
@@ -137,10 +135,6 @@ fn write_block(
         w.bit(layout.s_input, j == 0)?;
         w.bit(layout.s_mid, j + 1 < rows_per_block)?;
         w.bit(layout.s_last, j + 1 == rows_per_block)?;
-
-        if j == 0 {
-            w.word(layout.request_idx, call.request_idx)?;
-        }
     }
 
     Ok(())
@@ -207,11 +201,7 @@ mod tests {
         let mut h = IV;
 
         for block in pad_message(msg) {
-            let call = Sha256Call {
-                h_in: h,
-                block,
-                request_idx: 0,
-            };
+            let call = Sha256Call { h_in: h, block };
 
             h = call.h_out();
         }
@@ -245,7 +235,6 @@ mod tests {
             let call = Sha256Call {
                 h_in: IV,
                 block: [0; BLOCK_WORDS],
-                request_idx: 3,
             };
 
             let trace = generate_sha256_trace(&layout, &[call, call], 2, 256).unwrap();
@@ -264,7 +253,6 @@ mod tests {
         let call = Sha256Call {
             h_in: IV,
             block: [0; BLOCK_WORDS],
-            request_idx: 0,
         };
 
         assert!(generate_sha256_trace(&layout, &[call; 3], 3, 16).is_err());
@@ -276,7 +264,6 @@ mod tests {
         let call = Sha256Call {
             h_in: IV,
             block: [0; BLOCK_WORDS],
-            request_idx: 0,
         };
 
         assert!(generate_sha256_trace(&layout, &[call, call], 3, 256).is_err());

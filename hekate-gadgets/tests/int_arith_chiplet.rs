@@ -307,35 +307,13 @@ fn run_prover_verifier(
         .map_err(|e| format!("verifier: {e:?}"))
 }
 
-fn with_cpu_row_idx(ops: &[IntArithmeticOp]) -> Vec<IntArithmeticOp> {
-    ops.iter()
-        .enumerate()
-        .map(|(i, op)| match *op {
-            IntArithmeticOp::U32 { op, a, b, .. } => IntArithmeticOp::U32 {
-                op,
-                a,
-                b,
-                request_idx: i as u32,
-            },
-            IntArithmeticOp::U64 { op, a, b, .. } => IntArithmeticOp::U64 {
-                op,
-                a,
-                b,
-                request_idx: i as u32,
-            },
-        })
-        .collect()
-}
-
 fn prove_and_verify_arithmetic(ops: &[IntArithmeticOp], bit_width: usize) -> Result<bool, String> {
     let num_rows = ops.len().next_power_of_two().max(2);
     let arith_num_rows = num_rows;
 
-    let ops = with_cpu_row_idx(ops);
-
-    let cpu_trace = generate_cpu_trace(&ops, num_rows, bit_width);
+    let cpu_trace = generate_cpu_trace(ops, num_rows, bit_width);
     let layout = IntArithmeticLayout::compute(bit_width);
-    let arith_trace = generate_arithmetic_trace(&ops, &layout, arith_num_rows)
+    let arith_trace = generate_arithmetic_trace(ops, &layout, arith_num_rows)
         .map_err(|e| format!("arith trace: {e:?}"))?;
 
     let program = arith_cpu_program(bit_width, arith_num_rows, ops.len());
@@ -368,13 +346,11 @@ where
     let num_rows = ops.len().next_power_of_two().max(2);
     let arith_num_rows = num_rows;
 
-    let ops = with_cpu_row_idx(ops);
-
-    let mut cpu_trace = generate_cpu_trace(&ops, num_rows, bit_width);
+    let mut cpu_trace = generate_cpu_trace(ops, num_rows, bit_width);
 
     let layout = IntArithmeticLayout::compute(bit_width);
 
-    let mut arith_trace = generate_arithmetic_trace(&ops, &layout, arith_num_rows)
+    let mut arith_trace = generate_arithmetic_trace(ops, &layout, arith_num_rows)
         .map_err(|e| format!("arith trace: {e:?}"))?;
 
     tamper(&mut cpu_trace, &mut arith_trace);
@@ -422,7 +398,6 @@ fn op_add(a: u32, b: u32) -> IntArithmeticOp {
         op: ArithmeticOpcode::ADD,
         a,
         b,
-        request_idx: 0,
     }
 }
 
@@ -431,7 +406,6 @@ fn op_sub(a: u32, b: u32) -> IntArithmeticOp {
         op: ArithmeticOpcode::SUB,
         a,
         b,
-        request_idx: 0,
     }
 }
 
@@ -440,7 +414,6 @@ fn op_and(a: u32, b: u32) -> IntArithmeticOp {
         op: ArithmeticOpcode::AND,
         a,
         b,
-        request_idx: 0,
     }
 }
 
@@ -449,7 +422,6 @@ fn op_xor(a: u32, b: u32) -> IntArithmeticOp {
         op: ArithmeticOpcode::XOR,
         a,
         b,
-        request_idx: 0,
     }
 }
 
@@ -458,7 +430,6 @@ fn op_not(a: u32) -> IntArithmeticOp {
         op: ArithmeticOpcode::NOT,
         a,
         b: 0,
-        request_idx: 0,
     }
 }
 
@@ -467,7 +438,6 @@ fn op_lt(a: u32, b: u32) -> IntArithmeticOp {
         op: ArithmeticOpcode::LT,
         a,
         b,
-        request_idx: 0,
     }
 }
 
@@ -476,7 +446,6 @@ fn op_add64(a: u64, b: u64) -> IntArithmeticOp {
         op: ArithmeticOpcode::ADD,
         a,
         b,
-        request_idx: 0,
     }
 }
 
@@ -485,7 +454,6 @@ fn op_sub64(a: u64, b: u64) -> IntArithmeticOp {
         op: ArithmeticOpcode::SUB,
         a,
         b,
-        request_idx: 0,
     }
 }
 
@@ -705,11 +673,8 @@ fn arithmetic_chiplet_mixed_widths_isolated() {
     let layout32 = IntArithmeticLayout::compute(32);
     let layout64 = IntArithmeticLayout::compute(64);
 
-    let ops32_idx = with_cpu_row_idx(&ops32);
-    let ops64_idx = with_cpu_row_idx(&ops64);
-
-    let arith32 = generate_arithmetic_trace(&ops32_idx, &layout32, chip32_rows).unwrap();
-    let arith64 = generate_arithmetic_trace(&ops64_idx, &layout64, chip64_rows).unwrap();
+    let arith32 = generate_arithmetic_trace(&ops32, &layout32, chip32_rows).unwrap();
+    let arith64 = generate_arithmetic_trace(&ops64, &layout64, chip64_rows).unwrap();
 
     let program = mixed_arith_program(cpu_rows, chip32_rows, chip64_rows, ops32.len(), ops64.len());
 
@@ -758,6 +723,14 @@ fn arithmetic_chiplet_mixed_widths_isolated() {
 // =================================================================
 // 7. ADVERSARIAL — CPU-SIDE BUS TAMPERING
 // =================================================================
+
+#[test]
+fn untampered_bus_forgery_ops_verify() {
+    assert_eq!(
+        prove_and_verify_with_tamper(&bus_forgery_ops(), 32, |_, _| {}),
+        Ok(true)
+    );
+}
 
 #[test]
 fn reject_cpu_val_a_forgery() {
@@ -820,6 +793,28 @@ fn exploit_int_arith_duplicate_cpu_request_rejected() {
             );
         },
     );
+}
+
+#[test]
+fn reject_cpu_traded_results() {
+    assert_tamper_rejected(&bus_forgery_ops(), 32, "cpu results traded", |cpu, _| {
+        tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 12);
+        tamper_b32(cpu, CpuArithColumns::VAL_RES, 1, 30);
+    });
+}
+
+/// Two identical calls with the same forged result
+/// cancel in char 2 unless ranks tell them apart.
+#[test]
+fn reject_cpu_identical_forged_results() {
+    let ops = [op_add(1, 1), op_add(1, 1)];
+
+    assert_eq!(prove_and_verify_with_tamper(&ops, 32, |_, _| {}), Ok(true));
+
+    assert_tamper_rejected(&ops, 32, "identical forged results", |cpu, _| {
+        tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 3);
+        tamper_b32(cpu, CpuArithColumns::VAL_RES, 1, 3);
+    });
 }
 
 // =================================================================
@@ -996,12 +991,10 @@ where
     let num_rows = ops.len().next_power_of_two().max(2);
     let arith_num_rows = num_rows;
 
-    let ops = with_cpu_row_idx(ops);
-
-    let mut cpu_trace = generate_cpu_trace(&ops, num_rows, 32);
+    let mut cpu_trace = generate_cpu_trace(ops, num_rows, 32);
 
     let layout = IntArithmeticLayout::compute(32);
-    let arith_trace = generate_arithmetic_trace(&ops, &layout, arith_num_rows)
+    let arith_trace = generate_arithmetic_trace(ops, &layout, arith_num_rows)
         .map_err(|e| format!("arith trace: {e:?}"))?;
 
     let padding_row = ops.len();
@@ -1051,7 +1044,7 @@ fn padding_opcode_garbage_rejected() {
 #[test]
 fn scribble_arithmetic_flip_selector_caught() {
     let bit_width = 32;
-    let ops = with_cpu_row_idx(&[op_add(10, 20), op_sub(100, 50), op_and(0xFF, 0x0F)]);
+    let ops = [op_add(10, 20), op_sub(100, 50), op_and(0xFF, 0x0F)];
 
     let num_rows = ops.len().next_power_of_two().max(2);
     let arith_num_rows = num_rows;
@@ -1081,14 +1074,14 @@ fn scribble_arithmetic_flip_selector_caught() {
 
 #[test]
 fn attached_composite_proves_through_wire() {
-    let ops = with_cpu_row_idx(&[
+    let ops = [
         op_add(10, 20),
         op_sub(100, 50),
         op_and(0xFF, 0x0F),
         op_xor(0xAA, 0x55),
         op_not(0),
         op_lt(10, 20),
-    ]);
+    ];
 
     let num_rows = ops.len().next_power_of_two();
     let layout = IntArithmeticLayout::compute(32);

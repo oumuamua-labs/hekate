@@ -164,11 +164,10 @@ impl Pkcs1Statement {
         let mut calls = Vec::with_capacity(self.num_blocks);
         let mut h = IV;
 
-        for (b, block) in blocks.iter().enumerate() {
+        for block in &blocks {
             let call = Sha256Call {
                 h_in: h,
                 block: *block,
-                request_idx: b as u32,
             };
 
             h = call.h_out();
@@ -195,7 +194,7 @@ impl Pkcs1Statement {
         tb.set_bit(VERIFY, verify_row, Bit::ONE)?;
 
         let sha_trace = self.sha.trace(&calls)?;
-        let modexp_trace = self.modexp.trace(&modexp, verify_row as u32)?;
+        let modexp_trace = self.modexp.trace(&modexp)?;
 
         Ok(ProgramWitness::new(tb.build()).with_chiplets(vec![sha_trace, modexp_trace]))
     }

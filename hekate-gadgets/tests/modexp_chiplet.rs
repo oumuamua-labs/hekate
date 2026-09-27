@@ -157,7 +157,7 @@ fn cpu_trace(st: &Statement) -> ColumnTrace {
 }
 
 fn chiplet_trace(st: &Statement) -> ColumnTrace {
-    st.chiplet.trace(&st.modexp, 0).unwrap()
+    st.chiplet.trace(&st.modexp).unwrap()
 }
 
 fn instance(st: &Statement) -> ProgramInstance<F> {
@@ -256,9 +256,9 @@ fn geometry_matches_prototype() {
     assert_eq!(RESULT_ROW, 543);
     assert_eq!(ast.roots.len(), 3684);
     assert_eq!(ast.max_degree(), 5);
-    assert_eq!(chiplet.column_layout().len(), 3447);
+    assert_eq!(chiplet.column_layout().len(), 3446);
     assert_eq!(chiplet.b128_columns(), 3002);
-    assert_eq!(chiplet.row_bytes(), 49739);
+    assert_eq!(chiplet.row_bytes(), 49735);
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn one_emit_on_result_row() {
     assert_eq!(specs[0].1.num_sources(), 3 * LIMBS32 + 1);
 
     let modexp = Modexp::new(&N, &S).unwrap();
-    let trace = chiplet.trace(&modexp, 0).unwrap();
+    let trace = chiplet.trace(&modexp).unwrap();
 
     let TraceColumn::Bit(emit) = &trace.columns[chiplet.emit_column()] else {
         panic!("emit is not a Bit column");

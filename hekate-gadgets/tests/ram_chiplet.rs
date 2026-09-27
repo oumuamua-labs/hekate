@@ -7,7 +7,7 @@ use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::{CpuMemColumns, MemoryEvent, RamChiplet, RamColumns, generate_ram_trace};
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block128, HardwareField, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::ConstraintAst;
@@ -17,6 +17,7 @@ use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
+use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
 
 type F = Block128;
@@ -581,6 +582,93 @@ fn exploit_ram_uninitialised_read_via_q_last_chain() {
         "CRITICAL: verifier accepted a RAM trace with q_last ≡ 0, exfiltrating \
          val=0x{val:08X} from uninitialised addr=0x{addr:X}"
     );
+}
+
+#[test]
+fn exploit_ram_clock_out_of_order() {
+    let num_vars = 3;
+    let num_rows = 1 << num_vars;
+    let seed = [0xAAu8; 32];
+
+    let events = vec![
+        MemoryEvent::write(0x1000, 0, 42),
+        MemoryEvent::write(0x1000, 1, 7),
+    ];
+
+    let air = ram_test_air(num_rows, events.len());
+    let cpu_trace = generate_cpu_trace(&events, num_rows);
+
+    let mut ram_trace = generate_ram_trace(&events, num_rows).unwrap();
+
+    let traded = (0..4)
+        .flat_map(|j| [PHY_CLK_B0 + j, PHY_VAL_B0 + j])
+        .chain([PHY_VAL_PACKED, PHY_PACK_VAL]);
+
+    for col in traded {
+        match &mut ram_trace.columns[col] {
+            TraceColumn::B32(data) => data.swap(0, 1),
+            _ => panic!("expected B32 column at {col}"),
+        }
+    }
+
+    // pack_sort for the descending pair:
+    // DIFF_BYTE_IDX[7]=1 (CLK_B0 slot), DIFF_BIT_IDX[0]=1,
+    // a_decomp = next CLK_B0 = 0, b_decomp = curr CLK_B0 = 1.
+    let pack_sort = (1u32 << 7) | (1 << 8) | (1 << 24);
+
+    match &mut ram_trace.columns[PHY_PACK_SORT] {
+        TraceColumn::B32(data) => data[0] = Block32::from(pack_sort).to_hardware(),
+        _ => panic!("expected B32 column at PHY_PACK_SORT"),
+    }
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![ram_trace]);
+
+    let report = preflight(&air, &instance, &witness).unwrap();
+
+    assert!(report.bus_diagnostics.is_empty());
+    assert!(report.boundary_violations.is_empty());
+    assert!(report.fixed_column_violations.is_empty());
+    assert!(!report.constraint_violations.is_empty());
+    assert!(
+        report
+            .constraint_violations
+            .iter()
+            .all(|v| v.table == preflight::TableId::Chiplet(0) && v.row_idx == 0)
+    );
+
+    let config = Config {
+        num_queries: 4,
+        min_security_bits: 0,
+        zero_knowledge: false,
+        ldt_support_size: 4,
+        ..Config::default()
+    };
+
+    let proof = prove(
+        b"ClockOrderExploit",
+        &air,
+        &instance,
+        &witness,
+        &config,
+        seed,
+        None,
+    )
+    .expect("Prover should succeed (it simply proves the trace it was given)");
+
+    let mut verifier_transcript = Transcript::<H>::new(b"ClockOrderExploit");
+    let pinned_id = program_id(&air).unwrap();
+
+    let result = HekateVerifier::<F, H>::verify(
+        &pinned_id,
+        &air,
+        &instance,
+        &proof,
+        &mut verifier_transcript,
+        &config,
+    );
+
+    assert!(result.is_err() || !result.unwrap());
 }
 
 #[test]
