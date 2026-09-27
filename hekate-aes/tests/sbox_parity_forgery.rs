@@ -5,7 +5,7 @@
 //! Even-multiplicity forgery on the AES<>SboxRom bus.
 //!
 //! Two identical AES-128 calls emit identical S-box keys.
-//! The row index in the key is what keeps the pair from
+//! The emit rank in the key is what keeps the pair from
 //! cancelling in char-2, and that cancellation is the
 //! only thing between `SBOX_OUT` and a free witness:
 //! the round AIR consumes it as an input.
@@ -37,7 +37,7 @@ const _: () = assert!(CALLS * ROWS_PER_CALL <= AES_ROWS);
 const _: () = assert!(SBOX_ROM_ROWS >= 256);
 
 /// Both blocks take the same delta; the two forged
-/// S-box emissions differ only in the row index.
+/// S-box emissions differ only in the emit rank.
 fn forge_final_round_sbox(aes: &mut ColumnTrace) {
     for block in 0..CALLS {
         let base = block * ROWS_PER_CALL;

@@ -5,10 +5,9 @@
 mod common;
 
 use common::{
-    AES_ROWS, DECOY_IDX, FIPS128_CIPHER, FIPS128_KEY, FREE_CIPHER, IN_ROW, OUT_ROW,
-    assert_air_clean, assert_air_violated, b8_at, build_cpu_trace_128, copy_b8_block,
-    deactivate_rom, fips_call_128, make_program_128, prove_and_verify, set_b8, set_b16, set_b32,
-    set_bit, whitened_128,
+    AES_ROWS, FIPS128_CIPHER, FIPS128_KEY, FREE_CIPHER, IN_ROW, OUT_ROW, assert_air_clean,
+    assert_air_violated, b8_at, build_cpu_trace_128, copy_b8_block, deactivate_rom, fips_call_128,
+    make_program_128, prove_and_verify, set_b8, set_b16, set_bit, whitened_128,
 };
 use hekate_aes::{
     CpuAes128Columns, PhysAes128Columns,
@@ -32,7 +31,6 @@ fn aes_rounds(state: &[u8; 16]) -> [u8; 16] {
             plaintext,
             round_keys,
         }],
-        None,
         AES_ROWS,
     )
     .unwrap();
@@ -60,18 +58,14 @@ fn make_idle(aes: &mut ColumnTrace, row: usize) {
     }
 
     set_b16(aes, PhysAes128Columns::P_ROUND_IDX, row, 0);
-    set_b32(aes, PhysAes128Columns::P_REQUEST_IDX_LINK, row, 0);
-    set_b32(aes, PhysAes128Columns::P_REQUEST_IDX_KEY, row, 0);
 }
 
-fn make_bare_emit(aes: &mut ColumnTrace, row: usize, partner: u32) {
+fn make_bare_emit(aes: &mut ColumnTrace, row: usize) {
     make_idle(aes, row);
     set_bit(aes, PhysAes128Columns::P_S_IN_OUT, row, Bit::ONE);
-    set_b32(aes, PhysAes128Columns::P_REQUEST_IDX_LINK, row, partner);
 }
 
-/// Rehomes the key emit; the key bus still balances
-/// once the link request indices are swapped.
+/// Moves the key bytes and their emit to row `to`.
 fn move_key_row(cpu: &mut ColumnTrace, from: usize, to: usize) {
     copy_b8_block(cpu, CpuAes128Columns::KEY, 16, from, to);
 
@@ -107,12 +101,12 @@ fn free_ciphertext_rejected() {
         let (head, tail) = traces.split_at_mut(1);
         let (aes, rom) = (&mut head[0], &mut tail[0]);
 
-        make_bare_emit(aes, 1, DECOY_IDX);
-        make_bare_emit(aes, 2, DECOY_IDX);
+        make_bare_emit(aes, 1);
+        make_bare_emit(aes, 2);
 
         copy_b8_block(aes, PhysAes128Columns::P_STATE_IN, 16, 1, 2);
 
-        make_bare_emit(aes, 3, OUT_ROW);
+        make_bare_emit(aes, 3);
 
         for (j, &byte) in FREE_CIPHER.iter().enumerate() {
             set_b8(aes, PhysAes128Columns::P_STATE_IN + j, 3, byte);
@@ -149,7 +143,7 @@ fn single_round_block_rejected() {
         let (head, tail) = traces.split_at_mut(1);
         let (aes, rom) = (&mut head[0], &mut tail[0]);
 
-        make_bare_emit(aes, 1, OUT_ROW);
+        make_bare_emit(aes, 1);
 
         for row in 2..=OUTPUT_ROW {
             make_idle(aes, row);
@@ -171,22 +165,9 @@ fn single_round_block_rejected() {
 
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
-fn reversed_pairing_rejected() {
+fn backwards_block_rejected() {
     let air = make_program_128(AES_ROWS, 1);
-    let mut traces = air.aes.generate_traces(&[fips_call_128()]).unwrap();
-
-    set_b32(
-        &mut traces[0],
-        PhysAes128Columns::P_REQUEST_IDX_LINK,
-        0,
-        OUT_ROW,
-    );
-    set_b32(
-        &mut traces[0],
-        PhysAes128Columns::P_REQUEST_IDX_LINK,
-        OUTPUT_ROW,
-        IN_ROW,
-    );
+    let traces = air.aes.generate_traces(&[fips_call_128()]).unwrap();
 
     let whitened = whitened_128();
     assert_ne!(aes_rounds(&FIPS128_CIPHER), whitened);
@@ -200,36 +181,18 @@ fn reversed_pairing_rejected() {
     }
 }
 
-/// Both buses balance; only the CPU-side pin rejects this.
+/// The key emit follows the reversed block to
+/// the output row, where its pin forbids it.
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
-fn reversed_pairing_with_moved_key_rejected() {
+fn backwards_block_with_moved_key_rejected() {
     let air = make_program_128(AES_ROWS, 1);
-    let mut traces = air.aes.generate_traces(&[fips_call_128()]).unwrap();
-
-    set_b32(
-        &mut traces[0],
-        PhysAes128Columns::P_REQUEST_IDX_LINK,
-        0,
-        OUT_ROW,
-    );
-    set_b32(
-        &mut traces[0],
-        PhysAes128Columns::P_REQUEST_IDX_LINK,
-        OUTPUT_ROW,
-        IN_ROW,
-    );
-    set_b32(
-        &mut traces[0],
-        PhysAes128Columns::P_REQUEST_IDX_KEY,
-        0,
-        OUT_ROW,
-    );
+    let traces = air.aes.generate_traces(&[fips_call_128()]).unwrap();
 
     let whitened = whitened_128();
     let mut cpu_trace = build_cpu_trace_128(&[(FIPS128_CIPHER, whitened)]);
 
-    move_key_row(&mut cpu_trace, IN_ROW as usize, OUT_ROW as usize);
+    move_key_row(&mut cpu_trace, IN_ROW, OUT_ROW);
 
     assert_air_violated(&air.program, &cpu_trace, &traces);
 

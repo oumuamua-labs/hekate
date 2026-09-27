@@ -27,7 +27,7 @@ use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, Servic
 use hekate_program::{Air, FixedColumn, FixedShape, fix};
 
 use super::sbox_rom;
-use super::{AES_BYTE_LABELS, AES_DIRECTION_LABEL, ROT_MAP};
+use super::{AES_BYTE_LABELS, ROT_MAP};
 
 #[rustfmt::skip]
 const AES256_KEY_LABELS: [&[u8]; 32] = [
@@ -77,8 +77,6 @@ define_columns! {
         P_KS_SUB: [B8; 4],
         P_KS_INV: [B8; 4],
         P_KS_Z: [Bit; 4],
-        P_REQUEST_IDX_LINK: B32,
-        P_REQUEST_IDX_KEY: B32,
     }
 }
 
@@ -122,16 +120,6 @@ define_columns! {
         KS_SUB: [B8; 4],
         KS_INV_BITS: [Bit; 32],
         KS_Z: [Bit; 4],
-
-        // Partner CPU row index for the
-        // aes256_link bus (S_IN_OUT-gated:
-        // input row + output row per block).
-        REQUEST_IDX_LINK: B32,
-
-        // Partner CPU row index for the
-        // aes256_key_in bus (S_INPUT-gated:
-        // input row only).
-        REQUEST_IDX_KEY: B32,
     }
 }
 
@@ -163,52 +151,44 @@ impl AesRound256Air {
     }
 
     /// Both endpoints derive from this schema:
-    /// 16 state bytes, the request-index clock, direction.
+    /// 16 state bytes, then the emit rank.
     pub fn link_service() -> Service {
-        let mut slots = Vec::with_capacity(18);
+        let mut slots = Vec::with_capacity(17);
         for label in AES_BYTE_LABELS {
             slots.push(ServiceSlot::Value(label));
         }
 
-        slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
-        slots.push(ServiceSlot::Value(AES_DIRECTION_LABEL));
+        slots.push(ServiceSlot::EmitRank);
 
         Service {
             bus_id: Self::LINK_BUS_ID,
             kind: BusKind::Permutation,
             slots,
-            clock_waiver: None,
         }
     }
 
     /// Both endpoints derive from this schema:
-    /// 32 key bytes and the request-index clock.
+    /// 32 key bytes, then the emit rank.
     pub fn key_service() -> Service {
         let mut slots = Vec::with_capacity(33);
         for label in AES256_KEY_LABELS {
             slots.push(ServiceSlot::Value(label));
         }
 
-        slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
+        slots.push(ServiceSlot::EmitRank);
 
         Service {
             bus_id: Self::KEY_BUS_ID,
             kind: BusKind::Permutation,
             slots,
-            clock_waiver: None,
         }
     }
 
     pub fn link_spec() -> PermutationCheckSpec {
-        let mut values: Vec<usize> = (0..16).map(|i| Aes256Columns::STATE_IN + i).collect();
-        values.push(Aes256Columns::S_INPUT);
+        let values: Vec<usize> = (0..16).map(|i| Aes256Columns::STATE_IN + i).collect();
 
         Self::link_service()
-            .respond(
-                &values,
-                &[Aes256Columns::REQUEST_IDX_LINK],
-                Aes256Columns::S_IN_OUT,
-            )
+            .respond(&values, Aes256Columns::S_IN_OUT)
             .expect("service slots match the responder columns")
     }
 
@@ -216,11 +196,7 @@ impl AesRound256Air {
         let values: Vec<usize> = (0..32).map(|i| Aes256Columns::K0 + i).collect();
 
         Self::key_service()
-            .respond(
-                &values,
-                &[Aes256Columns::REQUEST_IDX_KEY],
-                Aes256Columns::S_INPUT,
-            )
+            .respond(&values, Aes256Columns::S_INPUT)
             .expect("service slots match the responder columns")
     }
 
@@ -271,7 +247,6 @@ impl<F: TowerField> Air<F> for AesRound256Air {
                     .pass_through(4, ColumnType::B8) // KS_SUB
                     .expand_bits(4, ColumnType::B8) // KS_INV -> KS_INV_BITS
                     .control_bits(4) // KS_Z
-                    .pass_through(2, ColumnType::B32) // REQUEST_IDX_LINK, REQUEST_IDX_KEY
                     .build()
                     .expect("AesRound256Air expander"),
             )
@@ -523,23 +498,7 @@ where
         &self,
         calls: &[super::trace::Aes256Call],
     ) -> Result<Vec<ColumnTrace>, Error> {
-        self.generate_traces_with(calls, None)
-    }
-
-    pub fn generate_traces_at(
-        &self,
-        calls: &[super::trace::Aes256Call],
-        triples: &[(u32, u32, u32)],
-    ) -> Result<Vec<ColumnTrace>, Error> {
-        self.generate_traces_with(calls, Some(triples))
-    }
-
-    fn generate_traces_with(
-        &self,
-        calls: &[super::trace::Aes256Call],
-        triples: Option<&[(u32, u32, u32)]>,
-    ) -> Result<Vec<ColumnTrace>, Error> {
-        let aes_trace = super::trace::generate_aes_trace(calls, triples, self.num_rows)?;
+        let aes_trace = super::trace::generate_aes_trace(calls, self.num_rows)?;
 
         let mut sbox_rounds = Vec::new();
         let s_active = aes_trace.columns[PhysAes256Columns::P_S_ACTIVE]
@@ -570,11 +529,7 @@ where
                     .0;
             }
 
-            sbox_rounds.push(sbox_rom::SboxRound {
-                inputs,
-                outputs,
-                request_idx: row as u32,
-            });
+            sbox_rounds.push(sbox_rom::SboxRound { inputs, outputs });
         }
 
         let sbox_trace = sbox_rom::generate_sbox_rom_trace(&sbox_rounds, self.sbox_rom_rows)?;
@@ -587,7 +542,7 @@ where
 mod tests {
     use super::*;
     use hekate_math::Block128;
-    use hekate_program::permutation::REQUEST_IDX_LABEL;
+    use hekate_program::permutation::EMIT_RANK_LABEL;
 
     type F = Block128;
 
@@ -596,7 +551,7 @@ mod tests {
         let layout = PhysAes256Columns::build_layout();
         assert_eq!(layout.len(), PhysAes256Columns::NUM_COLUMNS);
 
-        assert_eq!(PhysAes256Columns::NUM_COLUMNS, 120);
+        assert_eq!(PhysAes256Columns::NUM_COLUMNS, 118);
         assert_eq!(PhysAes256Columns::P_STATE_IN, 0);
         assert_eq!(PhysAes256Columns::P_ROUND_KEY, 32);
         assert_eq!(PhysAes256Columns::P_KEY_AUX, 48);
@@ -607,13 +562,11 @@ mod tests {
         assert_eq!(PhysAes256Columns::P_KS_SUB, 106);
         assert_eq!(PhysAes256Columns::P_KS_INV, 110);
         assert_eq!(PhysAes256Columns::P_KS_Z, 114);
-        assert_eq!(PhysAes256Columns::P_REQUEST_IDX_LINK, 118);
-        assert_eq!(PhysAes256Columns::P_REQUEST_IDX_KEY, 119);
     }
 
     #[test]
     fn virtual_column_count() {
-        assert_eq!(Aes256Columns::NUM_COLUMNS, 163);
+        assert_eq!(Aes256Columns::NUM_COLUMNS, 161);
         assert_eq!(Aes256Columns::STATE_IN, 0);
         assert_eq!(Aes256Columns::SBOX_OUT, 16);
         assert_eq!(Aes256Columns::ROUND_KEY, 32);
@@ -629,8 +582,6 @@ mod tests {
         assert_eq!(Aes256Columns::KS_SUB, 121);
         assert_eq!(Aes256Columns::KS_INV_BITS, 125);
         assert_eq!(Aes256Columns::KS_Z, 157);
-        assert_eq!(Aes256Columns::REQUEST_IDX_LINK, 161);
-        assert_eq!(Aes256Columns::REQUEST_IDX_KEY, 162);
     }
 
     #[test]
@@ -675,20 +626,16 @@ mod tests {
     fn link_spec_structure() {
         let spec = AesRound256Air::link_spec();
 
-        assert_eq!(spec.num_sources(), 18);
+        assert_eq!(spec.num_sources(), 17);
         assert_eq!(spec.selector, Some(Aes256Columns::S_IN_OUT));
-        assert_eq!(spec.sources[16].1, REQUEST_IDX_LABEL);
-        assert_eq!(spec.sources[17].1, AES_DIRECTION_LABEL);
+        assert_eq!(spec.sources[16].1, EMIT_RANK_LABEL);
     }
 
     #[test]
     fn link_endpoints_agree() {
         let chiplet = AesRound256Air::link_spec();
 
-        let cpu_values: Vec<usize> = (0..16)
-            .map(|i| CpuAes256Columns::DATA + i)
-            .chain([CpuAes256Columns::KEY_SELECTOR])
-            .collect();
+        let cpu_values: Vec<usize> = (0..16).map(|i| CpuAes256Columns::DATA + i).collect();
 
         let cpu = AesRound256Air::link_service()
             .request(&cpu_values, CpuAes256Columns::SELECTOR)
@@ -707,7 +654,7 @@ mod tests {
 
         assert_eq!(spec.num_sources(), 33);
         assert_eq!(spec.selector, Some(Aes256Columns::S_INPUT));
-        assert_eq!(spec.sources[32].1, REQUEST_IDX_LABEL);
+        assert_eq!(spec.sources[32].1, EMIT_RANK_LABEL);
     }
 
     #[test]
@@ -719,7 +666,7 @@ mod tests {
 
         assert_eq!(bus_id, sbox_rom::SboxRomChiplet::BUS_ID);
         assert_eq!(spec.num_sources(), 33);
-        assert_eq!(spec.sources[32].1, REQUEST_IDX_LABEL);
+        assert_eq!(spec.sources[32].1, EMIT_RANK_LABEL);
         assert_eq!(spec.selector, Some(Aes256Columns::S_ACTIVE));
         assert!(spec.clock_waiver.is_none());
     }

@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use errors::Error;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate_math::{Bit, Block8, Block32, Block64, Block128, TowerField};
+use hekate_math::{Bit, Block8, Block64, Block128, TowerField};
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::define_columns;
@@ -45,7 +45,6 @@ define_columns! {
         P_OUTPUT: [B8; 16],
         P_Z: [Bit; 16],
         P_SELECTOR: Bit,
-        P_REQUEST_IDX: B32,
     }
 }
 
@@ -58,9 +57,6 @@ define_columns! {
         OUTPUT: [B8; 16],
         Z: [Bit; 16],
         SELECTOR: Bit,
-
-        // Partner AES row index for the aes_sbox bus.
-        REQUEST_IDX: B32,
     }
 }
 
@@ -97,7 +93,7 @@ impl SboxRomChiplet {
     }
 
     /// Both endpoints derive from this schema:
-    /// sixteen in/out byte pairs, then the clock.
+    /// sixteen in/out byte pairs, then the emit rank.
     pub fn service() -> Service {
         let mut slots = Vec::with_capacity(33);
 
@@ -106,13 +102,12 @@ impl SboxRomChiplet {
             slots.push(ServiceSlot::Value(SBOX_OUT_LABELS[i]));
         }
 
-        slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
+        slots.push(ServiceSlot::EmitRank);
 
         Service {
             bus_id: Self::BUS_ID,
             kind: BusKind::Permutation,
             slots,
-            clock_waiver: None,
         }
     }
 
@@ -125,7 +120,6 @@ impl SboxRomChiplet {
         Self::service()
             .respond(
                 &Self::byte_columns(SboxRomColumns::INPUT, SboxRomColumns::OUTPUT),
-                &[SboxRomColumns::REQUEST_IDX],
                 SboxRomColumns::SELECTOR,
             )
             .expect("service slots match the responder columns")
@@ -162,7 +156,6 @@ impl<F: TowerField> Air<F> for SboxRomChiplet {
                     .pass_through(16, ColumnType::B8)
                     .pass_through(16, ColumnType::B8)
                     .control_bits(17)
-                    .pass_through(1, ColumnType::B32)
                     .build()
                     .expect("SboxRomChiplet expander"),
             )
@@ -244,9 +237,6 @@ impl<F: TowerField> Air<F> for SboxRomChiplet {
 pub struct SboxRound {
     pub inputs: [u8; 16],
     pub outputs: [u8; 16],
-
-    /// Row of the AES table this entry answers.
-    pub request_idx: u32,
 }
 
 pub fn generate_sbox_rom_trace(
@@ -316,12 +306,6 @@ pub fn generate_sbox_rom_trace(
 
         tb.set_b64(PhysSboxRomColumns::P_INV, row, Block64(lo))?;
         tb.set_b64(PhysSboxRomColumns::P_INV + 1, row, Block64(hi))?;
-
-        tb.set_b32(
-            PhysSboxRomColumns::P_REQUEST_IDX,
-            row,
-            Block32::from(round.request_idx),
-        )?;
     }
 
     tb.fill_selector(PhysSboxRomColumns::P_SELECTOR, rounds.len())?;
@@ -364,7 +348,7 @@ mod tests {
     use crate::aes128::AesRound128Air;
     use hekate_core::trace::Trace;
     use hekate_math::{Bit, Block128};
-    use hekate_program::permutation::REQUEST_IDX_LABEL;
+    use hekate_program::permutation::EMIT_RANK_LABEL;
 
     // FIPS 197 Table 4, oracle to cross-check ct_sbox
     #[rustfmt::skip]
@@ -407,39 +391,33 @@ mod tests {
         let inputs: [u8; 16] = core::array::from_fn(|i| i as u8);
         let outputs: [u8; 16] = core::array::from_fn(|i| SBOX[i]);
 
-        SboxRound {
-            inputs,
-            outputs,
-            request_idx: 0,
-        }
+        SboxRound { inputs, outputs }
     }
 
     #[test]
     fn sbox_rom_column_count() {
         // Virtual layout
-        assert_eq!(SboxRomColumns::NUM_COLUMNS, 178);
+        assert_eq!(SboxRomColumns::NUM_COLUMNS, 177);
         assert_eq!(SboxRomColumns::INV_BITS, 0);
         assert_eq!(SboxRomColumns::INPUT, 128);
         assert_eq!(SboxRomColumns::OUTPUT, 144);
         assert_eq!(SboxRomColumns::Z, 160);
         assert_eq!(SboxRomColumns::SELECTOR, 176);
-        assert_eq!(SboxRomColumns::REQUEST_IDX, 177);
 
         // Physical layout
-        assert_eq!(PhysSboxRomColumns::NUM_COLUMNS, 52);
+        assert_eq!(PhysSboxRomColumns::NUM_COLUMNS, 51);
         assert_eq!(PhysSboxRomColumns::P_INV, 0);
         assert_eq!(PhysSboxRomColumns::P_INPUT, 2);
         assert_eq!(PhysSboxRomColumns::P_OUTPUT, 18);
         assert_eq!(PhysSboxRomColumns::P_Z, 34);
         assert_eq!(PhysSboxRomColumns::P_SELECTOR, 50);
-        assert_eq!(PhysSboxRomColumns::P_REQUEST_IDX, 51);
     }
 
     #[test]
     fn sbox_rom_linking_spec_structure() {
         let spec = SboxRomChiplet::linking_spec();
         assert_eq!(spec.num_sources(), 33);
-        assert_eq!(spec.sources[32].1, REQUEST_IDX_LABEL);
+        assert_eq!(spec.sources[32].1, EMIT_RANK_LABEL);
         assert!(spec.clock_waiver.is_none());
         assert!(spec.has_selector());
         assert_eq!(spec.selector, Some(SboxRomColumns::SELECTOR));
@@ -491,7 +469,6 @@ mod tests {
         let bad = SboxRound {
             inputs: [0u8; 16],
             outputs: [0u8; 16],
-            request_idx: 0,
         };
         assert!(generate_sbox_rom_trace(&[bad], 4).is_err());
     }

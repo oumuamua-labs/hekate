@@ -2,31 +2,32 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Two identical blocks cancel their own input and key emits,
-//! handing the CPU a ciphertext bound to no request row: caught
-//! by the fixed-column compare, or refused before any arithmetic.
+//! A host with witness selectors is refused at verify
+//! entry; a pinned host reading ciphertexts it never
+//! requested fails the fixed-column compare.
 
 mod common;
 
 use common::{
-    CPU_ROWS, F, FIPS128_CIPHER, SBOX_ROM_ROWS, assert_air_clean, assert_air_violated,
-    fips_call_128, make_program_128, prove_and_verify, set_b32,
+    CPU_ROWS, F, FIPS128_CIPHER, H, assert_air_violated, build_cpu_trace_128, fips_call_128,
+    make_program_128, prove_and_verify, whitened_128,
 };
-use hekate_aes::{Aes128Chiplet, AesRound128Air, CpuAes128Columns, PhysAes128Columns};
+use hekate_aes::{Aes128Chiplet, AesRound128Air, CpuAes128Columns};
+use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
+use hekate_crypto::transcript::Transcript;
 use hekate_math::{Bit, Block8, TowerField};
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
+use hekate_program::digest::program_id;
 use hekate_program::permutation::PermutationCheckSpec;
-use hekate_program::{Air, Program};
+use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
+use hekate_prover_sys::prove;
+use hekate_verifier::HekateVerifier;
 
+const LABEL: &[u8] = b"AES_Direction_Pin";
 const AES_ROWS: usize = 32;
-const ROWS_PER_CALL: usize = 11;
-
-/// Free of the CPU row indices the honest generator
-/// picks; the two input emits collide and cancel.
-const SHARED_IDX: u32 = 7;
 
 /// The pre-cadence discipline roots, with
 /// witness selectors and no schedule pins.
@@ -37,10 +38,7 @@ struct UnpinnedHost {
 
 impl UnpinnedHost {
     fn link_spec() -> PermutationCheckSpec {
-        let values: Vec<usize> = (0..16)
-            .map(|j| CpuAes128Columns::DATA + j)
-            .chain([CpuAes128Columns::KEY_SELECTOR])
-            .collect();
+        let values: Vec<usize> = (0..16).map(|j| CpuAes128Columns::DATA + j).collect();
 
         AesRound128Air::link_service()
             .request(&values, CpuAes128Columns::SELECTOR)
@@ -97,36 +95,8 @@ impl Program<F> for UnpinnedHost {
     }
 }
 
-/// Collides both input emits and both key emits onto
-/// `SHARED_IDX`; the surviving pair is the two outputs.
-fn collide_input_emits(aes: &mut ColumnTrace) {
-    for block in 0..2usize {
-        let input_row = block * ROWS_PER_CALL;
-        let output_row = input_row + ROWS_PER_CALL - 1;
-
-        set_b32(
-            aes,
-            PhysAes128Columns::P_REQUEST_IDX_LINK,
-            input_row,
-            SHARED_IDX,
-        );
-        set_b32(
-            aes,
-            PhysAes128Columns::P_REQUEST_IDX_KEY,
-            input_row,
-            SHARED_IDX,
-        );
-        set_b32(
-            aes,
-            PhysAes128Columns::P_REQUEST_IDX_LINK,
-            output_row,
-            (2 * block + 1) as u32,
-        );
-    }
-}
-
-/// Rows 1 and 3 read the ciphertext. No row
-/// carries a plaintext, a key, or a direction bit.
+/// Rows 1 and 3 read the ciphertext.
+/// No row carries a plaintext or a key.
 fn response_only_cpu_trace() -> ColumnTrace {
     let num_vars = CPU_ROWS.trailing_zeros() as usize;
     let mut tb = TraceBuilder::new(&CpuAes128Columns::build_layout(), num_vars).unwrap();
@@ -146,29 +116,65 @@ fn response_only_cpu_trace() -> ColumnTrace {
 
 fn unbound_ciphertext_witness(aes: &Aes128Chiplet<F>) -> (ColumnTrace, Vec<ColumnTrace>) {
     let call = fips_call_128();
-    let mut traces = aes.generate_traces(&[call.clone(), call]).unwrap();
-
-    collide_input_emits(&mut traces[0]);
+    let traces = aes.generate_traces(&[call.clone(), call]).unwrap();
 
     (response_only_cpu_trace(), traces)
 }
 
-/// Both buses balance and every AIR equation holds;
-/// the verdict is attributable to the missing root alone.
+/// The pinned host proves two honest calls;
+/// its unpinned twin is refused at verify entry.
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn unpinned_host_is_rejected_at_verify() {
-    let air = UnpinnedHost {
-        aes: Aes128Chiplet::new(AES_ROWS, SBOX_ROM_ROWS, 2).unwrap(),
+    let pinned = make_program_128(AES_ROWS, 2);
+    let unpinned = UnpinnedHost {
+        aes: pinned.aes.clone(),
     };
 
-    let (cpu_trace, traces) = unbound_ciphertext_witness(&air.aes);
-    assert_air_clean(&air, &cpu_trace, &traces);
+    let call = fips_call_128();
+    let whitened = whitened_128();
 
-    match prove_and_verify(&air, cpu_trace, traces) {
-        Err(_) => {}
-        Ok(accepted) => panic!("witness bus selectors must be rejected, got {accepted}"),
-    }
+    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
+    let witness = ProgramWitness::new(build_cpu_trace_128(&[
+        (whitened, FIPS128_CIPHER),
+        (whitened, FIPS128_CIPHER),
+    ]))
+    .with_chiplets(pinned.aes.generate_traces(&[call.clone(), call]).unwrap());
+
+    let config = Config {
+        zero_knowledge: true,
+        ..Config::dev()
+    };
+
+    let proof = prove(
+        LABEL,
+        &pinned.program,
+        &instance,
+        &witness,
+        &config,
+        [0x5Au8; 32],
+        None,
+    )
+    .expect("the pinned host proves honest calls");
+
+    let mut vt = Transcript::<H>::new(LABEL);
+    let verdict = HekateVerifier::<F, H>::verify(
+        &program_id(&unpinned).unwrap(),
+        &unpinned,
+        &instance,
+        &proof,
+        &mut vt,
+        &config,
+    );
+
+    assert!(
+        matches!(
+            &verdict,
+            Err(errors::Error::Protocol { message, .. })
+                if message.starts_with("bus selector or clock phase reads a witness column")
+        ),
+        "{verdict:?}"
+    );
 }
 
 #[test]
