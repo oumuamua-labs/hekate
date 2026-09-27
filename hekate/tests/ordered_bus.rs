@@ -142,7 +142,6 @@ fn service() -> Service {
             ServiceSlot::Value(b"kappa_square_value"),
             ServiceSlot::EmitRank,
         ],
-        clock_waiver: None,
     }
 }
 
@@ -188,9 +187,7 @@ fn pinned_squarer(emit_rows: FixedShape<F>, step_rows: FixedShape<F>) -> Chiplet
 
     cs.assert_zero_when(cs.col(step.index()), cs.next(value.index()) + v * v);
 
-    let respond = service()
-        .respond(&[value.index()], &[], emit.index())
-        .unwrap();
+    let respond = service().respond(&[value.index()], emit.index()).unwrap();
 
     cx.bus(BUS, respond);
 

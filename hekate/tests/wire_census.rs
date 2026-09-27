@@ -87,18 +87,15 @@ fn keccak_cpu_program(num_rows: usize, chiplet_rows: usize) -> CircuitProgram<F>
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let call_values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &call_values, selector)
         .unwrap();
 
     cx.fix(selector, KeccakChiplet::host_selector_shape(2, 1));
-    cx.fix(is_output, KeccakChiplet::host_direction_shape(2, 1));
 
     cx.attach(ChipletDef::from_air(&KeccakChiplet::new(chiplet_rows, 1)).unwrap());
 
@@ -409,13 +406,11 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
 
     tb.set_bit(CpuKeccakColumns::SELECTOR, 0, Bit::ONE).unwrap();
     tb.set_bit(CpuKeccakColumns::SELECTOR, 1, Bit::ONE).unwrap();
-    tb.set_bit(CpuKeccakColumns::IS_OUTPUT, 1, Bit::ONE)
-        .unwrap();
 
     let calls = [core::array::from_fn::<Block64, 25, _>(|i| {
         Block64::from(state[i])
     })];
-    let chiplet = generate_keccak_trace(&calls, Some(&[(0, 1)]), chiplet_rows).unwrap();
+    let chiplet = generate_keccak_trace(&calls, chiplet_rows).unwrap();
 
     let air = keccak_cpu_program(num_rows, chiplet_rows);
     let instance = ProgramInstance::new(num_rows, vec![]);

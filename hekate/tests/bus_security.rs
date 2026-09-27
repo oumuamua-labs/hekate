@@ -12,9 +12,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{
-    ChallengeLabel, PermutationCheckSpec, REQUEST_IDX_LABEL, Source,
-};
+use hekate_program::permutation::{ChallengeLabel, PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
@@ -44,8 +42,8 @@ impl Endpoint {
     fn spec(&self) -> PermutationCheckSpec {
         let sources = vec![
             (Source::Column(COL_KEY), b"kappa_key" as &[u8]),
-            (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
-            (Source::Column(COL_REQUEST_IDX), REQUEST_IDX_LABEL),
+            (Source::RowIndexLeBytes(4), b"kappa_clk" as &[u8]),
+            (Source::Column(COL_REQUEST_IDX), b"kappa_row_idx" as &[u8]),
         ];
 
         if self.lookup {
@@ -417,7 +415,7 @@ impl Air<F> for MultiBusChiplet {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(0), b"audit_v" as ChallengeLabel),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(4), b"audit_clk" as ChallengeLabel),
                 ],
                 Some(1),
             )
@@ -654,7 +652,7 @@ impl Air<F> for LabelFlipChiplet {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(0), b"n9_key" as ChallengeLabel),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(4), b"n9_clk" as ChallengeLabel),
                 ],
                 Some(1),
             ),

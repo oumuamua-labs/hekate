@@ -16,7 +16,7 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
@@ -1338,7 +1338,7 @@ impl Air<F> for MinimalBusChiplet {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(0), b"kappa_payload" as &[u8]),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(4), b"kappa_clk" as &[u8]),
                 ],
                 Some(1),
             )

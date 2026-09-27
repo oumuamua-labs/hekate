@@ -64,11 +64,9 @@ fn keccak_cpu_side(name: &str, num_blocks: usize) -> (Circuit<F>, ColRange) {
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &values, selector)
@@ -77,10 +75,6 @@ fn keccak_cpu_side(name: &str, num_blocks: usize) -> (Circuit<F>, ColRange) {
     cx.fix(
         selector,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
-    );
-    cx.fix(
-        is_output,
-        KeccakChiplet::host_direction_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
     );
 
     (cx, cpu)
@@ -137,11 +131,6 @@ fn short_chain_cpu_trace(input: [u64; 25], output: [u64; 25], digest: [u64; 4]) 
     )
     .unwrap();
 
-    for row in 1..KeccakChiplet::BLOCK_ROWS {
-        tb.set_bit(CpuKeccakColumns::IS_OUTPUT, row, Bit::ONE)
-            .unwrap();
-    }
-
     write_digest(&mut tb, digest, last_output_row(SHORT_BLOCKS));
 
     tb.build()
@@ -150,12 +139,7 @@ fn short_chain_cpu_trace(input: [u64; 25], output: [u64; 25], digest: [u64; 4]) 
 fn short_chain_chiplet_trace(input: [u64; 25]) -> ColumnTrace {
     let lanes: [Block64; 25] = core::array::from_fn(|i| Block64(input[i]));
 
-    generate_keccak_trace(
-        &[lanes],
-        Some(&[(0, KeccakChiplet::BLOCK_ROWS as u32 - 1)]),
-        KECCAK_ROWS,
-    )
-    .unwrap()
+    generate_keccak_trace(&[lanes], KECCAK_ROWS).unwrap()
 }
 
 // ===============================================
