@@ -74,15 +74,22 @@ ML-DSA-65 verification of one signature over M′:
 
 ```rust
 use hekate_core::errors;
-use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, TowerField};
 use hekate_pqc::mldsa::{
     self, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaParams, MlDsaWitness,
 };
 use hekate_program::FixedShape;
 use hekate_program::circuit::{Circuit, CircuitProgram};
+use hekate_program::define_columns;
 
 type F = Block128;
+
+define_columns! {
+    HostColumns {
+        WORD: B32,
+        SEL: Bit,
+    }
+}
 
 fn verify(
     pk: &[u8],
@@ -100,8 +107,10 @@ fn verify(
 
     let mut cx = Circuit::<F>::new("Host", rows)?;
 
-    let word = cx.column(ColumnType::B32);
-    let sel = cx.column(ColumnType::Bit);
+    let host = cx.schema(&HostColumns::build_layout());
+
+    let word = host.at(HostColumns::WORD);
+    let sel = host.at(HostColumns::SEL);
 
     cx.fix(
         sel,
@@ -138,15 +147,22 @@ ML-KEM-768 encapsulation to `ek`:
 
 ```rust
 use hekate_core::errors;
-use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, TowerField};
 use hekate_pqc::mlkem::{
     self, MLKEM_DATA_BUS_ID, MlKemCall, MlKemChiplet, MlKemInput, MlKemParams, MlKemWitness,
 };
 use hekate_program::FixedShape;
 use hekate_program::circuit::{Circuit, CircuitProgram};
+use hekate_program::define_columns;
 
 type F = Block128;
+
+define_columns! {
+    HostColumns {
+        WORD: B32,
+        SEL: Bit,
+    }
+}
 
 fn encaps(ek: &[u8], m: &[u8; 32]) -> errors::Result<(CircuitProgram<F>, MlKemWitness)> {
     let pipeline = MlKemChiplet::<F>::new(MlKemParams::ML_KEM_768, &[MlKemCall::Encaps])?;
@@ -156,8 +172,10 @@ fn encaps(ek: &[u8], m: &[u8; 32]) -> errors::Result<(CircuitProgram<F>, MlKemWi
 
     let mut cx = Circuit::<F>::new("Host", rows)?;
 
-    let word = cx.column(ColumnType::B32);
-    let sel = cx.column(ColumnType::Bit);
+    let host = cx.schema(&HostColumns::build_layout());
+
+    let word = host.at(HostColumns::WORD);
+    let sel = host.at(HostColumns::SEL);
 
     cx.fix(
         sel,
