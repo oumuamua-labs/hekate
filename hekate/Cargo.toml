@@ -72,5 +72,6 @@ bincode = { version = "2.0.1", features = ["serde", "alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.9"
 keccak = "0.2"
-ml-kem = { version = "0.3", features = ["getrandom"] }
-ml-dsa = "0.1"
+ml-kem = { version = "0.3", features = ["getrandom", "zeroize"] }
+ml-dsa = { version = "0.1", features = ["zeroize"] }
+zeroize = { workspace = true }
