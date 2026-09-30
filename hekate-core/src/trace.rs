@@ -570,6 +570,7 @@ impl TraceColumn {
             None
         }
     }
+
     pub fn as_b16_slice(&self) -> Option<&[Flat<Block16>]> {
         if let Self::B16(v) = self {
             Some(v)
@@ -577,6 +578,7 @@ impl TraceColumn {
             None
         }
     }
+
     pub fn as_b32_slice(&self) -> Option<&[Flat<Block32>]> {
         if let Self::B32(v) = self {
             Some(v)
@@ -584,6 +586,7 @@ impl TraceColumn {
             None
         }
     }
+
     pub fn as_b64_slice(&self) -> Option<&[Flat<Block64>]> {
         if let Self::B64(v) = self {
             Some(v)
@@ -591,6 +594,7 @@ impl TraceColumn {
             None
         }
     }
+
     pub fn as_b128_slice(&self) -> Option<&[Flat<Block128>]> {
         if let Self::B128(v) = self {
             Some(v)
@@ -603,11 +607,24 @@ impl TraceColumn {
 /// A concrete implementation of
 /// Trace using column-major storage.
 #[derive(Clone, Debug, Zeroize)]
-#[cfg_attr(feature = "secure-memory", derive(ZeroizeOnDrop))]
 pub struct ColumnTrace {
     pub columns: Vec<TraceColumn>,
     pub num_vars: usize,
+
+    #[zeroize(skip)]
+    secret: bool,
 }
+
+impl Drop for ColumnTrace {
+    fn drop(&mut self) {
+        if self.secret || cfg!(feature = "secure-memory") {
+            self.columns.zeroize();
+        }
+    }
+}
+
+#[cfg(feature = "secure-memory")]
+impl ZeroizeOnDrop for ColumnTrace {}
 
 impl Trace for ColumnTrace {
     fn num_vars(&self) -> usize {
@@ -632,11 +649,19 @@ impl ColumnTrace {
         Ok(Self {
             num_vars,
             columns: Vec::new(),
+            secret: false,
         })
     }
 
-    /// Consume the trace and return
-    /// its owned column storage.
+    /// An empty trace whose columns zeroize on drop.
+    pub fn new_secret(num_vars: usize) -> errors::Result<Self> {
+        let mut trace = Self::new(num_vars)?;
+        trace.secret = true;
+
+        Ok(trace)
+    }
+
+    /// Consume the trace and return its owned column storage.
     pub fn into_columns(mut self) -> Vec<TraceColumn> {
         core::mem::take(&mut self.columns)
     }
@@ -729,9 +754,8 @@ impl IntoTraceColumn for Vec<Flat<Block128>> {
     }
 }
 
-/// Zero-copy byte views `(ptr, elem_width)` for
-/// every column in a trace. Centralizes the
-/// `#[repr(transparent)]`-dependent pointer casts.
+/// Zero-copy byte views `(ptr, elem_width)` for every column in a trace.
+/// Centralizes the `#[repr(transparent)]`-dependent pointer casts.
 pub fn get_col_views(columns: &[TraceColumn]) -> Vec<(&[u8], usize)> {
     columns
         .iter()
@@ -853,10 +877,29 @@ pub struct TraceBuilder {
     num_vars: usize,
     num_rows: usize,
     cursors: Vec<usize>,
+    secret: bool,
+}
+
+impl Drop for TraceBuilder {
+    fn drop(&mut self) {
+        if self.secret || cfg!(feature = "secure-memory") {
+            self.columns.zeroize();
+        }
+    }
 }
 
 impl TraceBuilder {
     pub fn new(layout: &[ColumnType], num_vars: usize) -> errors::Result<Self> {
+        Self::with_secrecy(layout, num_vars, false)
+    }
+
+    /// A builder whose columns and the trace it builds
+    /// zeroize on drop: for witnesses that carry secrets.
+    pub fn new_secret(layout: &[ColumnType], num_vars: usize) -> errors::Result<Self> {
+        Self::with_secrecy(layout, num_vars, true)
+    }
+
+    fn with_secrecy(layout: &[ColumnType], num_vars: usize, secret: bool) -> errors::Result<Self> {
         let num_rows = num_rows_from_num_vars(num_vars)?;
         let columns = layout
             .iter()
@@ -875,6 +918,7 @@ impl TraceBuilder {
             num_vars,
             num_rows,
             cursors: vec![0; layout.len()],
+            secret,
         })
     }
 
@@ -990,10 +1034,11 @@ impl TraceBuilder {
 
     /// Consume the builder and return a `ColumnTrace`.
     /// Column order matches the schema passed to `new`.
-    pub fn build(self) -> ColumnTrace {
+    pub fn build(mut self) -> ColumnTrace {
         ColumnTrace {
-            columns: self.columns,
+            columns: core::mem::take(&mut self.columns),
             num_vars: self.num_vars,
+            secret: self.secret,
         }
     }
 
