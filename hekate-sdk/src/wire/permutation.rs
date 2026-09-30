@@ -5,16 +5,17 @@
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::errors::{Error, Result};
 use hekate_program::permutation::{BusKind, ChallengeLabel, PermutationCheckSpec, Side, Source};
 
+use super::Interner;
 use crate::generated::program as fb;
 
 const MAX_WAIVER_LEN: usize = 1024;
 
-pub fn serialize_source<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_source<'a, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     source: &Source,
     label: ChallengeLabel,
 ) -> flatbuffers::WIPOffset<fb::SourceEntry<'a>> {
@@ -101,8 +102,8 @@ pub fn serialize_source<'a>(
     )
 }
 
-pub fn serialize_bus_endpoint<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_bus_endpoint<'a, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     bus_id: &str,
     spec: &PermutationCheckSpec,
 ) -> flatbuffers::WIPOffset<fb::BusEndpoint<'a>> {
@@ -159,6 +160,7 @@ pub fn serialize_bus_endpoint<'a>(
 
 pub fn deserialize_bus_endpoint(
     fb_ep: fb::BusEndpoint<'_>,
+    interner: &mut Interner,
 ) -> Result<(String, PermutationCheckSpec)> {
     let bus_id = fb_ep
         .bus_id()
@@ -182,7 +184,7 @@ pub fn deserialize_bus_endpoint(
     for i in 0..fb_sources.len() {
         let entry = fb_sources.get(i);
         let source = deserialize_source(&entry)?;
-        let label = deserialize_label(&entry)?;
+        let label = deserialize_label(&entry, interner)?;
 
         sources.push((source, label));
     }
@@ -284,9 +286,12 @@ fn deserialize_source(entry: &fb::SourceEntry<'_>) -> Result<Source> {
     }
 }
 
-fn deserialize_label(entry: &fb::SourceEntry<'_>) -> Result<ChallengeLabel> {
+fn deserialize_label(
+    entry: &fb::SourceEntry<'_>,
+    interner: &mut Interner,
+) -> Result<ChallengeLabel> {
     let s = entry.challenge_label().unwrap_or("");
-    let leaked = super::leak_str(s)?;
+    let leaked = interner.intern(s)?;
 
     Ok(leaked.as_bytes())
 }

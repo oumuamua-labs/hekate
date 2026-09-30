@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::string::String;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use hekate_core::errors::Error;
 
 mod field;
@@ -23,7 +23,46 @@ pub mod trace;
 const MAX_LABEL_LEN: usize = 256;
 const MAX_TOTAL_LEAKED: usize = 64 * 1024;
 
-static LEAKED_BYTES: AtomicUsize = AtomicUsize::new(0);
+/// Per-decode leak budget, charged once per distinct
+/// label. Never shared across decodes: one client could
+/// fill a shared table and fail every later decode.
+pub(crate) struct Interner {
+    table: BTreeSet<&'static str>,
+    leaked: usize,
+}
+
+impl Interner {
+    pub(crate) fn new() -> Self {
+        Self {
+            table: BTreeSet::new(),
+            leaked: 0,
+        }
+    }
+
+    /// Leaks `s` to obtain `&'static str`, once per
+    /// distinct string: a repeat returns the first copy.
+    pub(crate) fn intern(&mut self, s: &str) -> Result<&'static str, Error> {
+        if s.len() > MAX_LABEL_LEN {
+            return Err(wire_err("label exceeds 256 bytes"));
+        }
+
+        if let Some(&label) = self.table.get(s) {
+            return Ok(label);
+        }
+
+        if self.leaked + s.len() > MAX_TOTAL_LEAKED {
+            return Err(wire_err("distinct label bytes exceed 64 KB"));
+        }
+
+        let label: &'static str = Box::leak(String::from(s).into_boxed_str());
+
+        self.leaked += s.len();
+
+        self.table.insert(label);
+
+        Ok(label)
+    }
+}
 
 pub(crate) fn wire_err(message: &'static str) -> Error {
     Error::Protocol {
@@ -32,96 +71,45 @@ pub(crate) fn wire_err(message: &'static str) -> Error {
     }
 }
 
-/// Leak a string to obtain `&'static str`.
-pub(crate) fn leak_str(s: &str) -> Result<&'static str, Error> {
-    if s.len() > MAX_LABEL_LEN {
-        return Err(wire_err("label exceeds 256 bytes"));
-    }
-
-    let prev = LEAKED_BYTES.fetch_add(s.len(), Ordering::Relaxed);
-    if prev + s.len() > MAX_TOTAL_LEAKED {
-        LEAKED_BYTES.fetch_sub(s.len(), Ordering::Relaxed);
-        return Err(wire_err("total leaked label bytes exceeds 64 KB"));
-    }
-
-    Ok(Box::leak(String::from(s).into_boxed_str()))
-}
-
-/// Resets the per-decode leak budget.
-pub(crate) fn reset_leak_budget() {
-    LEAKED_BYTES.store(0, Ordering::Relaxed);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    static LEAK_TEST_LOCK: Mutex<()> = Mutex::new(());
+    #[test]
+    fn repeated_label_is_leaked_once() {
+        let mut interner = Interner::new();
 
-    fn leak_test_guard() -> MutexGuard<'static, ()> {
-        let guard = LEAK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        reset_leak_budget();
+        let first = interner.intern("boolean").unwrap();
+        let again = interner.intern(&String::from("boolean")).unwrap();
 
-        guard
-    }
-
-    pub(crate) fn leaked_bytes() -> usize {
-        LEAKED_BYTES.load(Ordering::Relaxed)
+        assert_eq!(first, "boolean");
+        assert!(core::ptr::eq(first, again));
+        assert_eq!(interner.leaked, 7);
     }
 
     #[test]
-    fn leak_str_basic() {
-        let _guard = leak_test_guard();
+    fn label_length_is_capped() {
+        let mut interner = Interner::new();
 
-        let s = leak_str("hello").unwrap();
-
-        assert_eq!(s, "hello");
-        assert_eq!(leaked_bytes(), 5);
+        assert_eq!(
+            interner.intern(&"b".repeat(MAX_LABEL_LEN)).unwrap().len(),
+            MAX_LABEL_LEN
+        );
+        assert!(interner.intern(&"x".repeat(MAX_LABEL_LEN + 1)).is_err());
+        assert_eq!(interner.leaked, MAX_LABEL_LEN);
     }
 
     #[test]
-    fn leak_str_rejects_oversized_label() {
-        let _guard = leak_test_guard();
+    fn budget_bounds_distinct_bytes_only() {
+        let mut interner = Interner::new();
 
-        let big = "x".repeat(MAX_LABEL_LEN + 1);
-
-        assert!(leak_str(&big).is_err());
-        assert_eq!(leaked_bytes(), 0);
-    }
-
-    #[test]
-    fn leak_str_rejects_when_global_cap_exceeded() {
-        let _guard = leak_test_guard();
-
-        let label = "a".repeat(MAX_LABEL_LEN);
-        let fills_needed = MAX_TOTAL_LEAKED / MAX_LABEL_LEN;
-
-        for _ in 0..fills_needed {
-            let _ = leak_str(&label);
+        for i in 0..MAX_TOTAL_LEAKED / MAX_LABEL_LEN {
+            interner.intern(&format!("{i:0>MAX_LABEL_LEN$}")).unwrap();
         }
 
-        assert!(leak_str(&label).is_err());
-    }
-
-    #[test]
-    fn leak_str_empty_succeeds() {
-        let _guard = leak_test_guard();
-
-        let s = leak_str("").unwrap();
-        assert_eq!(s, "");
-    }
-
-    #[test]
-    fn leak_str_exactly_max_label() {
-        let _guard = leak_test_guard();
-
-        let label = "b".repeat(MAX_LABEL_LEN);
-        let result = leak_str(&label);
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), MAX_LABEL_LEN);
+        assert!(interner.intern("fresh").is_err());
+        assert!(interner.intern(&format!("{:0>MAX_LABEL_LEN$}", 0)).is_ok());
+        assert!(interner.intern("").is_ok());
+        assert_eq!(interner.leaked, MAX_TOTAL_LEAKED);
     }
 }

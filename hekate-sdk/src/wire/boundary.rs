@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::errors::Result;
 use hekate_math::TowerField;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget};
@@ -11,8 +11,8 @@ use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget};
 use super::field::{field_to_lo_hi, lo_hi_to_field};
 use crate::generated::program as fb;
 
-pub fn serialize_boundary<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_boundary<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     bc: &BoundaryConstraint<F>,
 ) -> flatbuffers::WIPOffset<fb::BoundaryConstraint<'a>> {
     let (kind, public_input_idx, constant_value) = match &bc.target {
@@ -67,8 +67,8 @@ pub fn deserialize_boundary<F: TowerField>(
     }
 }
 
-pub fn serialize_boundaries<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_boundaries<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     bcs: &[BoundaryConstraint<F>],
 ) -> flatbuffers::WIPOffset<
     flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::BoundaryConstraint<'a>>>,

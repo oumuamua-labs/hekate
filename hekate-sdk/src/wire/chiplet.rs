@@ -2,21 +2,21 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::wire_err;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::errors::Result;
 use hekate_math::TowerField;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::BoundaryConstraint;
 use hekate_program::{Air, InlineKernelHint};
 
+use super::{Interner, wire_err};
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, expander, fixed_column, permutation, trace};
 
-pub fn serialize_chiplet<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_chiplet<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     chiplet: &ChipletDef<F>,
 ) -> flatbuffers::WIPOffset<fb::ChipletDef<'a>> {
     let name = fbb.create_string(&chiplet.name());
@@ -63,8 +63,8 @@ pub fn serialize_chiplet<'a, F: TowerField>(
     )
 }
 
-pub fn serialize_chiplets<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_chiplets<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     defs: &[ChipletDef<F>],
 ) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::ChipletDef<'a>>>>
 {
@@ -73,8 +73,8 @@ pub fn serialize_chiplets<'a, F: TowerField>(
     fbb.create_vector(&offsets)
 }
 
-pub fn serialize_kernel_hints<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_kernel_hints<'a, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     hints: &[InlineKernelHint],
 ) -> flatbuffers::WIPOffset<
     flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::InlineKernelHint<'a>>>,
@@ -98,10 +98,11 @@ pub fn serialize_kernel_hints<'a>(
 
 pub fn deserialize_chiplets<'a, F: TowerField>(
     cds: flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::ChipletDef<'a>>>,
+    interner: &mut Interner,
 ) -> Result<Vec<ChipletDef<F>>> {
     let mut defs = Vec::with_capacity(cds.len());
     for i in 0..cds.len() {
-        defs.push(deserialize_chiplet::<F>(cds.get(i))?);
+        defs.push(deserialize_chiplet::<F>(cds.get(i), interner)?);
     }
 
     Ok(defs)
@@ -123,7 +124,10 @@ pub fn deserialize_kernel_hints<'a>(
         .collect()
 }
 
-pub fn deserialize_chiplet<F: TowerField>(fb_cd: fb::ChipletDef<'_>) -> Result<ChipletDef<F>> {
+pub fn deserialize_chiplet<F: TowerField>(
+    fb_cd: fb::ChipletDef<'_>,
+    interner: &mut Interner,
+) -> Result<ChipletDef<F>> {
     let name = fb_cd
         .name()
         .ok_or(wire_err("missing chiplet name"))?
@@ -145,7 +149,7 @@ pub fn deserialize_chiplet<F: TowerField>(fb_cd: fb::ChipletDef<'_>) -> Result<C
 
     let constraint_ast = fb_cd
         .constraint_ast()
-        .map(|a| ast::deserialize_ast::<F>(a))
+        .map(|a| ast::deserialize_ast::<F>(a, interner))
         .transpose()?
         .ok_or(wire_err("missing chiplet constraint_ast"))?;
 
@@ -158,7 +162,7 @@ pub fn deserialize_chiplet<F: TowerField>(fb_cd: fb::ChipletDef<'_>) -> Result<C
         Some(eps) => {
             let mut checks = Vec::with_capacity(eps.len());
             for i in 0..eps.len() {
-                checks.push(permutation::deserialize_bus_endpoint(eps.get(i))?);
+                checks.push(permutation::deserialize_bus_endpoint(eps.get(i), interner)?);
             }
 
             checks
@@ -177,7 +181,7 @@ pub fn deserialize_chiplet<F: TowerField>(fb_cd: fb::ChipletDef<'_>) -> Result<C
     };
 
     let inline_chiplets = match fb_cd.inline_chiplets() {
-        Some(cds) => deserialize_chiplets::<F>(cds)?,
+        Some(cds) => deserialize_chiplets::<F>(cds, interner)?,
         None => Vec::new(),
     };
 

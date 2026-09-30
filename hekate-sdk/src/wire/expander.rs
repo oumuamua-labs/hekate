@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::errors::{Error, Result};
 use hekate_core::trace::ColumnType;
 use hekate_program::expander::{ExpansionEntry, VirtualExpander};
@@ -11,8 +11,8 @@ use hekate_program::expander::{ExpansionEntry, VirtualExpander};
 use crate::generated::program as fb;
 use crate::wire::trace::column_type_to_fb;
 
-pub fn serialize_expander<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_expander<'a, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     expander: &VirtualExpander,
 ) -> flatbuffers::WIPOffset<fb::VirtualExpander<'a>> {
     let specs = expander.expansion_entries();

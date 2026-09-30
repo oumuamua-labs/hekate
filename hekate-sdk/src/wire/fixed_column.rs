@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::errors::Result;
 use hekate_math::TowerField;
 use hekate_program::{CadenceSegment, FixedColumn, FixedShape};
@@ -12,8 +12,8 @@ use super::field::{field_to_lo_hi, lo_hi_to_field};
 use super::wire_err;
 use crate::generated::program as fb;
 
-pub fn serialize_fixed_column<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_fixed_column<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     fc: &FixedColumn<F>,
 ) -> flatbuffers::WIPOffset<fb::FixedColumn<'a>> {
     let mut args = fb::FixedColumnArgs {
@@ -176,8 +176,8 @@ pub fn deserialize_fixed_column<F: TowerField>(
     Ok(FixedColumn { col_idx, shape })
 }
 
-pub fn serialize_fixed_columns<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_fixed_columns<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     fixed: &[FixedColumn<F>],
 ) -> flatbuffers::WIPOffset<
     flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::FixedColumn<'a>>>,

@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::config::Config;
 use hekate_core::errors::Result;
 
 use crate::generated::program as fb;
 
-pub fn serialize_config<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_config<'a, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     config: &Config,
 ) -> flatbuffers::WIPOffset<fb::Config<'a>> {
     fb::Config::create(

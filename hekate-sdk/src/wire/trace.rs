@@ -4,7 +4,7 @@
 
 use super::wire_err;
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::errors::{Error, Result};
 use hekate_core::trace::{ColumnTrace, ColumnType, Trace, TraceColumn};
 use hekate_math::{Bit, Block8, Block16, Block32, Block64, Block128, Flat};
@@ -21,8 +21,11 @@ const _: () = assert!(size_of::<Flat<Block32>>() == 4);
 const _: () = assert!(size_of::<Flat<Block64>>() == 8);
 const _: () = assert!(size_of::<Flat<Block128>>() == 16);
 
-pub fn serialize_trace<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
+const COLUMN_OVERHEAD: usize = 64;
+const TRACE_OVERHEAD: usize = 64;
+
+pub fn serialize_trace<'a, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     trace: &impl Trace,
 ) -> flatbuffers::WIPOffset<fb::ColumnTrace<'a>> {
     let mut col_offsets = Vec::with_capacity(trace.columns().len());
@@ -66,7 +69,7 @@ pub fn deserialize_trace(fb_trace: fb::ColumnTrace<'_>) -> Result<ColumnTrace> {
 
     let num_vars = num_rows.trailing_zeros() as usize;
 
-    let mut trace = ColumnTrace::new(num_vars)?;
+    let mut trace = ColumnTrace::new_secret(num_vars)?;
 
     for i in 0..fb_columns.len() {
         let fb_col = fb_columns.get(i);
@@ -107,8 +110,8 @@ pub fn column_type_from_fb(ct: fb::ColumnType) -> Result<ColumnType> {
     }
 }
 
-pub fn serialize_column_layout<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_column_layout<'a, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     layout: &[ColumnType],
 ) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, fb::ColumnType>> {
     let fb_types: Vec<fb::ColumnType> = layout.iter().map(|ct| column_type_to_fb(*ct)).collect();
@@ -124,6 +127,16 @@ pub fn deserialize_column_layout(
     }
 
     Ok(layout)
+}
+
+pub(crate) fn serialized_size_bound(trace: &impl Trace) -> usize {
+    let columns: usize = trace
+        .columns()
+        .iter()
+        .map(|col| column_as_bytes(col).len() + COLUMN_OVERHEAD)
+        .sum();
+
+    columns + TRACE_OVERHEAD
 }
 
 /// # Safety
