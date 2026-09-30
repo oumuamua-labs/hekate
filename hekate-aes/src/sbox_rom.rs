@@ -26,6 +26,8 @@ use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, ServiceSlot};
 use hekate_program::{Air, FixedColumn};
 use once_cell::race::OnceBox;
+use subtle::{Choice, ConstantTimeEq};
+use zeroize::{Zeroize, Zeroizing};
 
 /// FIPS 197 §5.1.1 affine transform columns.
 /// Column k = Σ_j A[j][k] * 2^j where A is
@@ -234,6 +236,7 @@ impl<F: TowerField> Air<F> for SboxRomChiplet {
 }
 
 /// One round's 16 S-box evaluations.
+#[derive(Zeroize)]
 pub struct SboxRound {
     pub inputs: [u8; 16],
     pub outputs: [u8; 16],
@@ -257,15 +260,16 @@ pub fn generate_sbox_rom_trace(
         });
     }
 
-    for round in rounds {
-        for j in 0..16 {
-            if round.outputs[j] != ct_sbox(round.inputs[j]) {
-                return Err(Error::Protocol {
-                    protocol: "aes_sbox_rom",
-                    message: "entry does not match FIPS 197 S-box",
-                });
-            }
-        }
+    let matches = rounds
+        .iter()
+        .flat_map(|round| round.inputs.iter().zip(&round.outputs))
+        .fold(Choice::from(1), |acc, (&x, y)| acc & y.ct_eq(&ct_sbox(x)));
+
+    if !bool::from(matches) {
+        return Err(Error::Protocol {
+            protocol: "aes_sbox_rom",
+            message: "entry does not match FIPS 197 S-box",
+        });
     }
 
     let num_vars = num_rows.trailing_zeros() as usize;
@@ -277,7 +281,7 @@ pub fn generate_sbox_rom_trace(
 
     let layout = Air::<Block128>::column_layout(&chiplet);
 
-    let mut tb = TraceBuilder::new(layout, num_vars)?;
+    let mut tb = TraceBuilder::new_secret(layout, num_vars)?;
 
     for (row, round) in rounds.iter().enumerate() {
         tb.set_b8_array(PhysSboxRomColumns::P_INPUT, row, &round.inputs.map(Block8))?;
@@ -287,15 +291,11 @@ pub fn generate_sbox_rom_trace(
             &round.outputs.map(Block8),
         )?;
 
-        let mut inv_bytes = [0u8; 16];
+        let mut inv_bytes = Zeroizing::new([0u8; 16]);
         for (j, inv) in inv_bytes.iter_mut().enumerate() {
             *inv = gf256_inv(round.inputs[j]);
 
-            let z = if round.inputs[j] == 0 {
-                Bit::ONE
-            } else {
-                Bit::ZERO
-            };
+            let z = Bit::from(round.inputs[j].ct_eq(&0).unwrap_u8());
 
             tb.set_bit(PhysSboxRomColumns::P_Z + j, row, z)?;
         }

@@ -24,6 +24,7 @@ use hekate_program::define_columns;
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, ServiceSlot};
 use hekate_program::{Air, FixedColumn, FixedShape, fix};
+use zeroize::Zeroizing;
 
 use super::sbox_rom;
 use super::{AES_BYTE_LABELS, ROT_MAP};
@@ -497,7 +498,6 @@ where
     ) -> Result<Vec<ColumnTrace>, Error> {
         let aes_trace = super::trace::generate_aes_trace(calls, self.num_rows)?;
 
-        let mut sbox_rounds = Vec::new();
         let s_active = aes_trace.columns[PhysAes128Columns::P_S_ACTIVE]
             .as_bit_slice()
             .ok_or(Error::Protocol {
@@ -505,6 +505,12 @@ where
                 message: "S_ACTIVE column type mismatch",
             })?;
 
+        let active_rows = s_active
+            .iter()
+            .filter(|&&active| active == hekate_math::Bit::ONE)
+            .count();
+
+        let mut sbox_rounds = Zeroizing::new(Vec::with_capacity(active_rows));
         for (row, &active) in s_active.iter().enumerate() {
             if active != hekate_math::Bit::ONE {
                 continue;
