@@ -605,7 +605,7 @@ pub fn generate_ram_trace(
     }
 
     let num_vars = num_rows.trailing_zeros() as usize;
-    let mut tb = TraceBuilder::new(&RamChiplet::build_physical_layout(), num_vars)?;
+    let mut tb = TraceBuilder::new_secret(&RamChiplet::build_physical_layout(), num_vars)?;
 
     for (i, event) in sorted_events.iter().enumerate() {
         let addr_bytes = event.addr_bytes();

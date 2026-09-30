@@ -251,7 +251,7 @@ pub fn generate_rom_trace(
     }
 
     let num_vars = num_rows.trailing_zeros() as usize;
-    let mut tb = TraceBuilder::new(&RomColumns::build_layout(), num_vars)?;
+    let mut tb = TraceBuilder::new_secret(&RomColumns::build_layout(), num_vars)?;
 
     for (i, instr) in instructions.iter().enumerate() {
         let pc = instr.pc_bytes();
