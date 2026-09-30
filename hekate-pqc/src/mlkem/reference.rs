@@ -107,5 +107,5 @@ fn sponge(input: &[u8], rate: usize, domain: u8, out: &mut [u8]) {
     let mut sponge = KeccakSpongeNative::new();
     sponge.absorb(input, 8 * rate, domain);
 
-    out.copy_from_slice(&Zeroizing::new(sponge.squeeze(out.len(), 8 * rate)));
+    out.copy_from_slice(&sponge.squeeze(out.len(), 8 * rate));
 }
