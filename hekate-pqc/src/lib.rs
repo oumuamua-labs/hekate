@@ -6,13 +6,19 @@
 
 extern crate alloc;
 
-pub mod basemul;
+pub mod codec;
+pub mod gadgets;
 pub mod high_bits;
-#[allow(clippy::needless_range_loop)]
+pub mod kem_select;
 pub mod mldsa;
-#[allow(clippy::needless_range_loop)]
 pub mod mlkem;
-pub mod norm_check;
 pub mod ntt;
-pub mod twiddle_rom;
+pub mod poly_arith;
+pub mod sampler;
 pub mod utils;
+pub mod wiring;
+
+pub(crate) mod ctrl;
+
+#[cfg(test)]
+mod census;

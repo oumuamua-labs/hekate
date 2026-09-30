@@ -6,7 +6,7 @@ license.workspace = true
 homepage.workspace = true
 authors.workspace = true
 repository = "https://github.com/oumuamua-labs/hekate/tree/main/hekate-pqc"
-description = "Post-quantum AIR chiplets for the Hekate ZK proving system: ML-KEM, ML-DSA, NTT, Basemul, HighBits, NormCheck."
+description = "Post-quantum AIR chiplets for the Hekate ZK proving system: ML-KEM, ML-DSA, NTT, PolyArith, Sampler, Codec, HighBits."
 keywords = ["zk", "cryptography", "mlkem", "mldsa", "no-std"]
 categories = ["cryptography", "no-std"]
 readme = "README.md"
@@ -26,6 +26,7 @@ std = [
 blake3 = ["hekate-core/blake3", "hekate-keccak/blake3"]
 sha2 = ["hekate-core/sha2", "hekate-keccak/sha2"]
 sha3 = ["hekate-core/sha3", "hekate-keccak/sha3"]
+forgery = []
 
 [dependencies]
 hekate-math = { workspace = true }
@@ -33,14 +34,16 @@ hekate-core = { workspace = true }
 hekate-program = { workspace = true }
 hekate-gadgets = { workspace = true }
 hekate-keccak = { workspace = true }
-once_cell = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
+hekate-pqc = { path = ".", features = ["forgery"] }
 hekate-crypto = { workspace = true, features = ["std", "blake3"] }
 hekate-verifier = { workspace = true, features = ["std", "blake3"] }
-hekate-sdk = { workspace = true, features = ["std", "blake3"] }
+hekate-sdk = { workspace = true, features = ["std", "blake3", "parallel"] }
 hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
 hekate-scribble = { workspace = true }
 ml-kem = { version = "0.3", features = ["getrandom"] }
 ml-dsa = "0.1"
-rand = "0.9"
+sha3 = "0.12"
