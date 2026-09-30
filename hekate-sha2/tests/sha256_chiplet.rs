@@ -23,6 +23,7 @@ use hekate_sha2::{
 use hekate_verifier::HekateVerifier;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
@@ -37,7 +38,7 @@ struct Statement {
     sha: Sha256Chiplet<F>,
     block: CpuSha256Block,
     cpu_rows: usize,
-    blocks: Vec<[u32; BLOCK_WORDS]>,
+    blocks: Zeroizing<Vec<[u32; BLOCK_WORDS]>>,
     digest: [u32; STATE_WORDS],
 }
 
@@ -115,7 +116,7 @@ fn cpu_calls(st: &Statement) -> Vec<Sha256Call> {
     let mut calls = Vec::with_capacity(st.blocks.len());
     let mut h = IV;
 
-    for block in &st.blocks {
+    for block in st.blocks.iter() {
         let call = Sha256Call {
             h_in: h,
             block: *block,
