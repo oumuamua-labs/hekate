@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "hekate"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "bincode",
  "dhat",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-aes"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-core"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "criterion",
  "dhat",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-crypto"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-gadgets"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-keccak"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "hekate-core",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-pqc"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-program"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "hashbrown",
  "hekate-core",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-prover-sys"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-rsa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-scribble"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "hekate-core",
  "hekate-gadgets",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-sdk"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "flatbuffers",
  "hashbrown",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-sha2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-verifier"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
