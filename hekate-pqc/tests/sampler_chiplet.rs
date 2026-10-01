@@ -160,10 +160,8 @@ impl Case {
     fn seeds(&self) -> LaneValues {
         let mut seeds = LaneValues::default();
         for (stream, seed) in &self.streams {
-            let lanes = seed
-                .chunks_exact(8)
-                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-                .collect();
+            let (words, _) = seed.as_chunks::<8>();
+            let lanes = words.iter().copied().map(u64::from_le_bytes).collect();
 
             seeds.insert(*stream, lanes).unwrap();
         }

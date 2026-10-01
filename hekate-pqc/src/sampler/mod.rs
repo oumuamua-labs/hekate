@@ -372,11 +372,10 @@ impl SamplerStep {
         block[rate - 1] ^= PAD_LAST;
 
         let mut lanes = [0u64; LANES];
-        for (lane, bytes) in lanes.iter_mut().zip(block[..rate].chunks_exact(8)) {
-            let mut le = [0u8; 8];
-            le.copy_from_slice(bytes);
+        let (words, _) = block[..rate].as_chunks::<8>();
 
-            *lane = u64::from_le_bytes(le);
+        for (lane, bytes) in lanes.iter_mut().zip(words) {
+            *lane = u64::from_le_bytes(*bytes);
         }
 
         lanes
