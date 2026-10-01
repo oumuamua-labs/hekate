@@ -21,7 +21,7 @@ use hekate_program::{
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
-const WIRE_FORMAT_VERSION: u32 = 5;
+const WIRE_FORMAT_VERSION: u32 = 6;
 
 pub struct DeserializedBundle<F: TowerField> {
     pub name: String,
@@ -158,40 +158,17 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
         .transpose()?;
 
     let chiplet_defs = match bundle.chiplet_defs() {
-        Some(cds) => {
-            let mut defs = Vec::with_capacity(cds.len());
-            for i in 0..cds.len() {
-                defs.push(chiplet::deserialize_chiplet::<F>(cds.get(i))?);
-            }
-
-            defs
-        }
+        Some(cds) => chiplet::deserialize_chiplets::<F>(cds)?,
         None => Vec::new(),
     };
 
     let inline_chiplets = match bundle.inline_chiplets() {
-        Some(cds) => {
-            let mut defs = Vec::with_capacity(cds.len());
-            for i in 0..cds.len() {
-                defs.push(chiplet::deserialize_chiplet::<F>(cds.get(i))?);
-            }
-
-            defs
-        }
+        Some(cds) => chiplet::deserialize_chiplets::<F>(cds)?,
         None => Vec::new(),
     };
 
-    let inline_chiplet_kernels: Vec<InlineKernelHint> = match bundle.inline_chiplet_kernels() {
-        Some(hs) => (0..hs.len())
-            .map(|i| {
-                let h = hs.get(i);
-                InlineKernelHint {
-                    chiplet_idx: h.chiplet_idx() as usize,
-                    root_offset: h.root_offset() as usize,
-                    column_offset: h.column_offset() as usize,
-                }
-            })
-            .collect(),
+    let inline_chiplet_kernels = match bundle.inline_chiplet_kernels() {
+        Some(hints) => chiplet::deserialize_kernel_hints(hints),
         None => Vec::new(),
     };
 
@@ -298,35 +275,13 @@ where
         .virtual_expander()
         .map(|e| expander::serialize_expander(&mut fbb, e));
 
-    let chiplet_defs_list = program.chiplet_defs()?;
-    let chiplet_offsets: Vec<_> = chiplet_defs_list
-        .iter()
-        .map(|cd| chiplet::serialize_chiplet(&mut fbb, cd))
-        .collect();
-    let chiplets = fbb.create_vector(&chiplet_offsets);
+    let chiplets = chiplet::serialize_chiplets(&mut fbb, &program.chiplet_defs()?);
 
-    let inline_chiplet_defs = <P as Air<F>>::inline_chiplets(program)?;
-    let inline_chiplet_offsets: Vec<_> = inline_chiplet_defs
-        .iter()
-        .map(|cd| chiplet::serialize_chiplet(&mut fbb, cd))
-        .collect();
-    let inline_chiplets = fbb.create_vector(&inline_chiplet_offsets);
+    let inline_chiplets =
+        chiplet::serialize_chiplets(&mut fbb, &<P as Air<F>>::inline_chiplets(program)?);
 
-    let hint_offsets: Vec<_> = <P as Air<F>>::inline_chiplet_kernels(program)
-        .iter()
-        .map(|h| {
-            fb::InlineKernelHint::create(
-                &mut fbb,
-                &fb::InlineKernelHintArgs {
-                    chiplet_idx: h.chiplet_idx as u32,
-                    root_offset: h.root_offset as u32,
-                    column_offset: h.column_offset as u32,
-                },
-            )
-        })
-        .collect();
-
-    let inline_chiplet_kernels = fbb.create_vector(&hint_offsets);
+    let inline_chiplet_kernels =
+        chiplet::serialize_kernel_hints(&mut fbb, &<P as Air<F>>::inline_chiplet_kernels(program));
 
     let public_inputs_blocks: Vec<fb::Block128> = instance
         .public_inputs()

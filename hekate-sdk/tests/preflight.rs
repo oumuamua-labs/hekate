@@ -6,6 +6,7 @@ use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
 use hekate_math::{Bit, Block32, Block128, HardwareField, TowerField};
 use hekate_program::chiplet::ChipletDef;
+use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use hekate_program::expander::VirtualExpander;
@@ -552,6 +553,142 @@ fn chiplet_virtual_expansion_detects_violation() {
 
     assert_eq!(chiplet_violations.len(), 1);
     assert_eq!(chiplet_violations[0].row_idx, 0);
+}
+
+#[derive(Clone)]
+struct HandBuiltViews;
+
+impl HandBuiltViews {
+    const MOUNTED: usize = 33;
+    const MOUNTED_WORD: usize = 65;
+}
+
+impl Air<F> for HandBuiltViews {
+    fn column_layout(&self) -> &[ColumnType] {
+        &[ColumnType::B32, ColumnType::B32]
+    }
+
+    fn virtual_expander(&self) -> Option<&VirtualExpander> {
+        static E: std::sync::OnceLock<VirtualExpander> = std::sync::OnceLock::new();
+
+        Some(E.get_or_init(|| {
+            VirtualExpander::new()
+                .pass_through(1, ColumnType::B32)
+                .reuse_expand_bits(0, 1)
+                .expand_bits(1, ColumnType::B32)
+                .reuse_pass_through(1, 1)
+                .build()
+                .expect("HandBuiltViews expander")
+        }))
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+
+        for i in 0..BitUnpackChiplet::VIRTUAL_COLS {
+            cs.assert_boolean(cs.col(Self::MOUNTED + i));
+        }
+
+        cs.constrain_named(
+            "bits_01_equal",
+            cs.col(Self::MOUNTED) + cs.col(Self::MOUNTED + 1),
+        );
+        cs.constrain_named("words_equal", cs.col(0) + cs.col(Self::MOUNTED_WORD));
+        cs.constrain_named("low_bits_equal", cs.col(1) + cs.col(Self::MOUNTED));
+
+        cs.build()
+    }
+}
+
+impl Program<F> for HandBuiltViews {}
+
+fn circuit_views() -> CircuitProgram<F> {
+    let mut cx = Circuit::<F>::new("CircuitViews", 4).unwrap();
+
+    let word = cx.pass_through(1, ColumnType::B32);
+    let word_bits = cx.reuse_expand_bits(cx.physical(word).unwrap());
+    let mounted = cx.mount_unlinked(ChipletDef::from_air(&BitUnpackChiplet).unwrap());
+    let mounted_word = cx.reuse_pass_through(mounted.physical());
+
+    let cs = cx.cs();
+
+    cs.constrain_named(
+        "words_equal",
+        cs.col(word.at(0).index()) + cs.col(mounted_word.at(0).index()),
+    );
+    cs.constrain_named(
+        "low_bits_equal",
+        cs.col(word_bits.bits(0).at(0).index()) + cs.col(mounted.col(0).index()),
+    );
+
+    cx.compile().unwrap()
+}
+
+fn word_pair_trace(rows: &[(u32, u32)]) -> ColumnTrace {
+    let mut tb = TraceBuilder::new(&[ColumnType::B32, ColumnType::B32], 2).unwrap();
+    for (i, &(word, mounted)) in rows.iter().enumerate() {
+        tb.set_b32(0, i, Block32::from(word)).unwrap();
+        tb.set_b32(1, i, Block32::from(mounted)).unwrap();
+    }
+
+    tb.build()
+}
+
+#[test]
+fn circuit_views_preflight_like_hand_built_expander() {
+    let circuit = circuit_views();
+
+    assert_eq!(
+        circuit.virtual_expander().unwrap().expansion_entries(),
+        HandBuiltViews
+            .virtual_expander()
+            .unwrap()
+            .expansion_entries()
+    );
+    assert_eq!(
+        circuit.constraint_ast().to_constraints(),
+        HandBuiltViews.constraint_ast().to_constraints()
+    );
+
+    let instance = ProgramInstance::new(4, vec![]);
+
+    let honest = [
+        (0x3, 0x3),
+        (0x0, 0x0),
+        (0xFFFF_FFFF, 0xFFFF_FFFF),
+        (0x7, 0x7),
+    ];
+    let witness = ProgramWitness::<F>::new(word_pair_trace(&honest));
+
+    assert!(preflight(&circuit, &instance, &witness).unwrap().is_clean());
+    assert!(
+        preflight(&HandBuiltViews, &instance, &witness)
+            .unwrap()
+            .is_clean()
+    );
+
+    let tampered = [(0x3, 0x3), (0x0, 0x0), (0x2, 0x3), (0x7, 0x7)];
+    let witness = ProgramWitness::<F>::new(word_pair_trace(&tampered));
+
+    let by_circuit: Vec<_> = preflight(&circuit, &instance, &witness)
+        .unwrap()
+        .constraint_violations
+        .iter()
+        .map(|v| (v.label, v.row_idx))
+        .collect();
+
+    let by_hand: Vec<_> = preflight(&HandBuiltViews, &instance, &witness)
+        .unwrap()
+        .constraint_violations
+        .iter()
+        .map(|v| (v.label, v.row_idx))
+        .collect();
+
+    assert_eq!(
+        by_circuit,
+        vec![(Some("words_equal"), 2), (Some("low_bits_equal"), 2)]
+    );
+    assert_eq!(by_circuit, by_hand);
 }
 
 // =================================================================

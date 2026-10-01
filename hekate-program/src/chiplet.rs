@@ -12,7 +12,7 @@
 use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use crate::expander::VirtualExpander;
 use crate::permutation::{PermutationCheckSpec, validate_fixed_selectors};
-use crate::{Air, FixedColumn, validate_fixed_columns};
+use crate::{Air, FixedColumn, InlineKernelHint, validate_fixed_columns};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -32,6 +32,9 @@ pub struct ChipletDef<F: TowerField> {
     boundary_constraints: Vec<BoundaryConstraint<F>>,
     fixed_columns: Vec<FixedColumn<F>>,
     expander: Option<VirtualExpander>,
+    inline_chiplets: Vec<ChipletDef<F>>,
+    inline_kernels: Vec<InlineKernelHint>,
+
     pub permutation_checks: Vec<(String, PermutationCheckSpec)>,
 }
 
@@ -51,12 +54,20 @@ impl<F: TowerField> ChipletDef<F> {
         let constraint_ast = p.constraint_ast();
         let boundary_constraints = p.boundary_constraints();
         let fixed_columns = p.fixed_columns();
+        let inline_chiplets = p.inline_chiplets()?;
+        let inline_kernels = p.inline_chiplet_kernels();
 
         validate_fixed_selectors(&permutation_checks, &fixed_columns)?;
         validate_chiplet_boundaries(&boundary_constraints, p.num_columns())?;
         validate_fixed_columns(&fixed_columns, p.virtual_column_layout(), None)?;
         validate_expander_coverage(p.virtual_expander(), p.column_layout())?;
         validate_column_count(p.num_columns(), p.virtual_column_layout().len())?;
+        validate_inline_kernels(
+            &inline_kernels,
+            &inline_chiplets,
+            constraint_ast.roots.len(),
+            p.num_columns(),
+        )?;
 
         Ok(Self {
             name: p.name(),
@@ -67,6 +78,8 @@ impl<F: TowerField> ChipletDef<F> {
             boundary_constraints,
             fixed_columns,
             expander: p.virtual_expander().cloned(),
+            inline_chiplets,
+            inline_kernels,
             permutation_checks,
         })
     }
@@ -82,6 +95,14 @@ impl<F: TowerField> ChipletDef<F> {
 
     pub fn pins(&self) -> &[FixedColumn<F>] {
         &self.fixed_columns
+    }
+
+    pub fn inline_defs(&self) -> &[ChipletDef<F>] {
+        &self.inline_chiplets
+    }
+
+    pub fn inline_hints(&self) -> &[InlineKernelHint] {
+        &self.inline_kernels
     }
 
     /// Prefixes internal bus_ids with a namespace.
@@ -126,6 +147,8 @@ impl<F: TowerField> ChipletDef<F> {
         fixed_columns: Vec<FixedColumn<F>>,
         expander: Option<VirtualExpander>,
         permutation_checks: Vec<(String, PermutationCheckSpec)>,
+        inline_chiplets: Vec<ChipletDef<F>>,
+        inline_kernels: Vec<InlineKernelHint>,
     ) -> errors::Result<Self> {
         for (bus_id, spec) in &permutation_checks {
             spec.validate_clock_stitching(bus_id)?;
@@ -141,18 +164,28 @@ impl<F: TowerField> ChipletDef<F> {
 
         validate_fixed_columns(&fixed_columns, virt_layout, None)?;
         validate_column_count(num_columns, virt_layout.len())?;
-
-        Ok(Self::from_parts(
-            name,
+        validate_inline_kernels(
+            &inline_kernels,
+            &inline_chiplets,
+            constraint_ast.roots.len(),
             num_columns,
-            constraint_ast,
-            column_layout,
-            virtual_column_layout,
-            boundary_constraints,
-            fixed_columns,
-            expander,
-            permutation_checks,
-        ))
+        )?;
+
+        Ok(Self {
+            inline_chiplets,
+            inline_kernels,
+            ..Self::from_parts(
+                name,
+                num_columns,
+                constraint_ast,
+                column_layout,
+                virtual_column_layout,
+                boundary_constraints,
+                fixed_columns,
+                expander,
+                permutation_checks,
+            )
+        })
     }
 
     /// Main-table construction path; callers own
@@ -178,6 +211,8 @@ impl<F: TowerField> ChipletDef<F> {
             boundary_constraints,
             fixed_columns,
             expander,
+            inline_chiplets: Vec::new(),
+            inline_kernels: Vec::new(),
             permutation_checks,
         }
     }
@@ -245,6 +280,14 @@ impl<F: TowerField> Air<F> for ChipletDef<F> {
 
     fn constraint_ast(&self) -> ConstraintAst<F> {
         self.constraint_ast.clone()
+    }
+
+    fn inline_chiplets(&self) -> errors::Result<Vec<ChipletDef<F>>> {
+        Ok(self.inline_chiplets.clone())
+    }
+
+    fn inline_chiplet_kernels(&self) -> Vec<InlineKernelHint> {
+        self.inline_kernels.clone()
     }
 }
 
@@ -548,6 +591,32 @@ fn validate_column_count(num_columns: usize, virtual_columns: usize) -> errors::
     Ok(())
 }
 
+fn validate_inline_kernels<F: TowerField>(
+    hints: &[InlineKernelHint],
+    chiplets: &[ChipletDef<F>],
+    num_roots: usize,
+    num_columns: usize,
+) -> errors::Result<()> {
+    for hint in hints {
+        let inside = chiplets.get(hint.chiplet_idx).is_some_and(|cd| {
+            let roots_end = hint.root_offset.checked_add(cd.constraint_ast.roots.len());
+            let columns_end = hint.column_offset.checked_add(cd.num_columns);
+
+            roots_end.is_some_and(|end| end <= num_roots)
+                && columns_end.is_some_and(|end| end <= num_columns)
+        });
+
+        if !inside {
+            return Err(errors::Error::Protocol {
+                protocol: "chiplet",
+                message: "inline kernel hint outside the snapshot",
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +733,41 @@ mod tests {
 
         fn constraint_ast(&self) -> ConstraintAst<F> {
             ConstraintSystem::<F>::new().build()
+        }
+    }
+
+    #[derive(Clone)]
+    struct HintedAir {
+        hints: Vec<InlineKernelHint>,
+    }
+
+    impl Air<F> for HintedAir {
+        fn num_columns(&self) -> usize {
+            2
+        }
+
+        fn column_layout(&self) -> &[ColumnType] {
+            &[ColumnType::B32, ColumnType::Bit]
+        }
+
+        fn constraint_ast(&self) -> ConstraintAst<F> {
+            let cs = ConstraintSystem::<F>::new();
+            cs.assert_boolean(cs.col(1));
+
+            cs.build()
+        }
+
+        fn inline_chiplets(&self) -> errors::Result<Vec<ChipletDef<F>>> {
+            match self.hints.is_empty() {
+                true => Ok(Vec::new()),
+                false => Ok(vec![ChipletDef::from_air(&HintedAir {
+                    hints: Vec::new(),
+                })?]),
+            }
+        }
+
+        fn inline_chiplet_kernels(&self) -> Vec<InlineKernelHint> {
+            self.hints.clone()
         }
     }
 
@@ -787,6 +891,30 @@ mod tests {
     }
 
     #[test]
+    fn chiplet_def_rejects_hint_outside_the_snapshot() {
+        let hint = |chiplet_idx, root_offset, column_offset| HintedAir {
+            hints: vec![InlineKernelHint {
+                chiplet_idx,
+                root_offset,
+                column_offset,
+            }],
+        };
+
+        let def = ChipletDef::<F>::from_air(&hint(0, 0, 0)).unwrap();
+
+        assert_eq!(def.inline_chiplet_kernels(), hint(0, 0, 0).hints);
+
+        for stray in [
+            hint(1, 0, 0),
+            hint(0, 1, 0),
+            hint(0, 0, 1),
+            hint(0, usize::MAX, 0),
+        ] {
+            assert!(ChipletDef::<F>::from_air(&stray).is_err());
+        }
+    }
+
+    #[test]
     fn validator_rejects_recv_selector_without_send_selector() {
         let spec = PermutationCheckSpec {
             sources: vec![
@@ -839,5 +967,34 @@ mod tests {
 
         validate_fixed_selectors(&[("svc".into(), spec)], &liveness_pin(1))
             .expect("overlay-pinned selector must accept");
+    }
+
+    #[test]
+    fn from_wire_rejects_hint_outside_snapshot() {
+        let bare = HintedAir { hints: Vec::new() };
+
+        let wire = |chiplet_idx, root_offset| {
+            ChipletDef::<F>::from_wire(
+                String::from("wired"),
+                2,
+                bare.constraint_ast(),
+                bare.column_layout().to_vec(),
+                bare.column_layout().to_vec(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                vec![ChipletDef::from_air(&bare).unwrap()],
+                vec![InlineKernelHint {
+                    chiplet_idx,
+                    root_offset,
+                    column_offset: 0,
+                }],
+            )
+        };
+
+        assert!(wire(0, 0).is_ok());
+        assert!(wire(1, 0).is_err());
+        assert!(wire(0, 1).is_err());
     }
 }

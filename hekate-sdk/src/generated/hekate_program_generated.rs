@@ -3407,6 +3407,8 @@ pub mod hekate {
             pub const VT_BOUNDARY_CONSTRAINTS: ::flatbuffers::VOffsetT = 16;
             pub const VT_FIXED_COLUMNS: ::flatbuffers::VOffsetT = 18;
             pub const VT_PERMUTATION_CHECKS: ::flatbuffers::VOffsetT = 20;
+            pub const VT_INLINE_CHIPLETS: ::flatbuffers::VOffsetT = 22;
+            pub const VT_INLINE_CHIPLET_KERNELS: ::flatbuffers::VOffsetT = 24;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3423,6 +3425,12 @@ pub mod hekate {
                 args: &'args ChipletDefArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<ChipletDef<'bldr>> {
                 let mut builder = ChipletDefBuilder::new(_fbb);
+                if let Some(x) = args.inline_chiplet_kernels {
+                    builder.add_inline_chiplet_kernels(x);
+                }
+                if let Some(x) = args.inline_chiplets {
+                    builder.add_inline_chiplets(x);
+                }
                 if let Some(x) = args.permutation_checks {
                     builder.add_permutation_checks(x);
                 }
@@ -3562,6 +3570,35 @@ pub mod hekate {
                     >>(ChipletDef::VT_PERMUTATION_CHECKS, None)
                 }
             }
+            #[inline]
+            pub fn inline_chiplets(
+                &self,
+            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ChipletDef<'a>>>>
+            {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab.get::<::flatbuffers::ForwardsUOffset<
+                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ChipletDef>>,
+                    >>(ChipletDef::VT_INLINE_CHIPLETS, None)
+                }
+            }
+            #[inline]
+            pub fn inline_chiplet_kernels(
+                &self,
+            ) -> Option<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<InlineKernelHint<'a>>>,
+            > {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab.get::<::flatbuffers::ForwardsUOffset<
+                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<InlineKernelHint>>,
+                    >>(ChipletDef::VT_INLINE_CHIPLET_KERNELS, None)
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for ChipletDef<'_> {
@@ -3580,6 +3617,8 @@ pub mod hekate {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<BoundaryConstraint>>>>("boundary_constraints", Self::VT_BOUNDARY_CONSTRAINTS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<FixedColumn>>>>("fixed_columns", Self::VT_FIXED_COLUMNS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<BusEndpoint>>>>("permutation_checks", Self::VT_PERMUTATION_CHECKS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ChipletDef>>>>("inline_chiplets", Self::VT_INLINE_CHIPLETS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<InlineKernelHint>>>>("inline_chiplet_kernels", Self::VT_INLINE_CHIPLET_KERNELS, false)?
      .finish();
                 Ok(())
             }
@@ -3611,6 +3650,16 @@ pub mod hekate {
                     ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BusEndpoint<'a>>>,
                 >,
             >,
+            pub inline_chiplets: Option<
+                ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ChipletDef<'a>>>,
+                >,
+            >,
+            pub inline_chiplet_kernels: Option<
+                ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<InlineKernelHint<'a>>>,
+                >,
+            >,
         }
         impl<'a> Default for ChipletDefArgs<'a> {
             #[inline]
@@ -3625,6 +3674,8 @@ pub mod hekate {
                     boundary_constraints: None,
                     fixed_columns: None,
                     permutation_checks: None,
+                    inline_chiplets: None,
+                    inline_chiplet_kernels: None,
                 }
             }
         }
@@ -3728,6 +3779,30 @@ pub mod hekate {
                 );
             }
             #[inline]
+            pub fn add_inline_chiplets(
+                &mut self,
+                inline_chiplets: ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<ChipletDef<'b>>>,
+                >,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    ChipletDef::VT_INLINE_CHIPLETS,
+                    inline_chiplets,
+                );
+            }
+            #[inline]
+            pub fn add_inline_chiplet_kernels(
+                &mut self,
+                inline_chiplet_kernels: ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<InlineKernelHint<'b>>>,
+                >,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    ChipletDef::VT_INLINE_CHIPLET_KERNELS,
+                    inline_chiplet_kernels,
+                );
+            }
+            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> ChipletDefBuilder<'a, 'b, A> {
@@ -3756,6 +3831,8 @@ pub mod hekate {
                 ds.field("boundary_constraints", &self.boundary_constraints());
                 ds.field("fixed_columns", &self.fixed_columns());
                 ds.field("permutation_checks", &self.permutation_checks());
+                ds.field("inline_chiplets", &self.inline_chiplets());
+                ds.field("inline_chiplet_kernels", &self.inline_chiplet_kernels());
                 ds.finish()
             }
         }

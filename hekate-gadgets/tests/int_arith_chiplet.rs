@@ -48,6 +48,23 @@ fn arith_cpu_layout(bit_width: usize) -> Vec<ColumnType> {
 }
 
 fn arith_cpu_program(bit_width: usize, arith_num_rows: usize, num_ops: usize) -> CircuitProgram<F> {
+    let chiplet = IntArithmeticChiplet::new(bit_width, arith_num_rows, num_ops)
+        .expect("IntArithmeticChiplet::new in test program");
+
+    arith_cpu_program_attaching(
+        bit_width,
+        arith_num_rows,
+        num_ops,
+        ChipletDef::from_air(&chiplet).unwrap(),
+    )
+}
+
+fn arith_cpu_program_attaching(
+    bit_width: usize,
+    arith_num_rows: usize,
+    num_ops: usize,
+    arith: ChipletDef<F>,
+) -> CircuitProgram<F> {
     let mut cx = Circuit::<F>::new("ArithCpu", arith_num_rows).unwrap();
     let cpu = cx.schema(&arith_cpu_layout(bit_width));
 
@@ -76,15 +93,24 @@ fn arith_cpu_program(bit_width: usize, arith_num_rows: usize, num_ops: usize) ->
     cs.assert_zero_when(not_active, cs.col(CpuArithColumns::VAL_RES));
     cs.assert_zero_when(not_active, cs.col(CpuArithColumns::OPCODE));
 
-    cx.attach(
-        ChipletDef::from_air(
-            &IntArithmeticChiplet::new(bit_width, arith_num_rows, num_ops)
-                .expect("IntArithmeticChiplet::new in test program"),
-        )
-        .unwrap(),
-    );
-
+    cx.attach(arith);
     cx.compile().unwrap()
+}
+
+fn composite_arith_def(arith_num_rows: usize, num_ops: usize, extra: bool) -> ChipletDef<F> {
+    let chiplet = IntArithmeticChiplet::new(32, arith_num_rows, num_ops).unwrap();
+
+    let mut cx = Circuit::<F>::new("ArithComposite", arith_num_rows).unwrap();
+    cx.mount(ChipletDef::from_air(&chiplet).unwrap());
+
+    if extra {
+        let col = cx.column(ColumnType::B32);
+
+        let cs = cx.cs();
+        cs.constrain(cs.col(col.index()) * cs.col(col.index()));
+    }
+
+    ChipletDef::from_air(&cx.compile().unwrap()).unwrap()
 }
 
 // =================================================================
@@ -1047,4 +1073,50 @@ fn scribble_arithmetic_flip_selector_caught() {
             .mutations([MutationKind::FlipSelector])
             .cases(64),
     );
+}
+
+// =================================================================
+// 11. ATTACHED COMPOSITE THROUGH THE WIRE
+// =================================================================
+
+#[test]
+fn attached_composite_proves_through_wire() {
+    let ops = with_cpu_row_idx(&[
+        op_add(10, 20),
+        op_sub(100, 50),
+        op_and(0xFF, 0x0F),
+        op_xor(0xAA, 0x55),
+        op_not(0),
+        op_lt(10, 20),
+    ]);
+
+    let num_rows = ops.len().next_power_of_two();
+    let layout = IntArithmeticLayout::compute(32);
+
+    for extra in [false, true] {
+        let mut arith_trace = generate_arithmetic_trace(&ops, &layout, num_rows).unwrap();
+
+        if extra {
+            arith_trace
+                .add_column(TraceColumn::B32(vec![b32_cell(0); num_rows]))
+                .unwrap();
+        }
+
+        let program = arith_cpu_program_attaching(
+            32,
+            num_rows,
+            ops.len(),
+            composite_arith_def(num_rows, ops.len(), extra),
+        );
+
+        let instance = ProgramInstance::new(num_rows, vec![]);
+        let witness = ProgramWitness::new(generate_cpu_trace(&ops, num_rows, 32))
+            .with_chiplets(vec![arith_trace]);
+
+        assert!(preflight(&program, &instance, &witness).unwrap().is_clean());
+        assert_eq!(
+            run_prover_verifier(&program, &instance, &witness, b"ARITH_COMPOSITE"),
+            Ok(true)
+        );
+    }
 }
