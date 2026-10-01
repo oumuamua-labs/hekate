@@ -63,17 +63,11 @@ fn shipped_tables() -> Vec<Snapshot> {
         ),
         (
             "Aes128Chiplet",
-            Aes128Chiplet::<F>::new(num_rows, num_rows, 4)
-                .unwrap()
-                .composite()
-                .flatten_defs(),
+            Aes128Chiplet::new(num_rows, num_rows, 4).unwrap().defs(),
         ),
         (
             "Aes256Chiplet",
-            Aes256Chiplet::<F>::new(num_rows, num_rows, 4)
-                .unwrap()
-                .composite()
-                .flatten_defs(),
+            Aes256Chiplet::new(num_rows, num_rows, 4).unwrap().defs(),
         ),
         (
             "Sha256Chiplet",
