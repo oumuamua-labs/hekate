@@ -3,3 +3,4 @@
 .DS_Store
 fuzz-*
 .claude
+hekate/tests/probes
