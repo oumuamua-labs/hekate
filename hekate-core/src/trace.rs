@@ -329,10 +329,9 @@ pub trait Trace: Send + Sync {
 /// order to parse the raw LDT bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnType {
-    /// AIR authors MUST `cs.assert_boolean(cs.col(idx))`
-    /// on every `Bit` used as selector, constraint operand,
-    /// or LogUp source, parse is byte-preserving, the
-    /// verifier accepts any byte and lifts it to `F`.
+    /// AIR authors MUST `cs.assert_boolean(cs.col(idx))` on
+    /// every `Bit` used as selector, constraint operand, or
+    /// LogUp source: the commitment binds a cell only to GF(2^32).
     Bit,
     B8,
     B16,
