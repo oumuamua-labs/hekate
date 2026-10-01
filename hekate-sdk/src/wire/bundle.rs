@@ -2,10 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::wire_err;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use core::convert::Infallible;
+use core::ops::{Deref, DerefMut};
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::config::Config;
 use hekate_core::errors::{Error, Result};
 use hekate_core::trace::{ColumnType, Trace};
@@ -17,7 +19,9 @@ use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{
     Air, FixedColumn, InlineKernelHint, Program, ProgramInstance, ProgramWitness,
 };
+use zeroize::Zeroizing;
 
+use super::{Interner, wire_err};
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
@@ -42,18 +46,66 @@ pub struct DeserializedBundle<F: TowerField> {
     pub config: Config,
 }
 
+struct Wiping(Zeroizing<Vec<u8>>);
+
+impl Deref for Wiping {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl DerefMut for Wiping {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+/// # Safety
+/// `grow_downwards` moves the old contents to the end of
+/// a buffer twice as long, as `FlatBufferBuilder` expects.
+unsafe impl Allocator for Wiping {
+    type Error = Infallible;
+
+    fn grow_downwards(&mut self) -> core::result::Result<(), Infallible> {
+        let len = self.0.len();
+        let mut grown = Zeroizing::new(vec![0u8; (2 * len).max(1)]);
+
+        let at = grown.len() - len;
+        grown[at..].copy_from_slice(&self.0);
+
+        self.0 = grown;
+
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 pub fn serialize_bundle<F, P, T>(
     program: &P,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F, T>,
     cfg: &Config,
-) -> Result<Vec<u8>>
+) -> Result<Zeroizing<Vec<u8>>>
 where
     F: TowerField,
     P: Program<F>,
     T: Trace,
 {
-    let mut fbb = FlatBufferBuilder::with_capacity(1024 * 1024);
+    // Alignment pads at most double the program part the header measures.
+    let capacity = 2 * serialize_bundle_header(program, instance, cfg)?.len()
+        + trace::serialized_size_bound(&witness.trace)
+        + witness
+            .chiplet_traces
+            .iter()
+            .map(trace::serialized_size_bound)
+            .sum::<usize>();
+
+    let mut fbb = FlatBufferBuilder::new_in(Wiping(Zeroizing::new(vec![0u8; capacity])));
 
     let main_trace = trace::serialize_trace(&mut fbb, &witness.trace);
 
@@ -64,7 +116,13 @@ where
         .collect();
     let chiplet_traces = fbb.create_vector(&chiplet_trace_offsets);
 
-    finish_bundle(fbb, program, instance, cfg, main_trace, chiplet_traces)
+    let fbb = finish_bundle(fbb, program, instance, cfg, main_trace, chiplet_traces)?;
+
+    let (Wiping(mut bundle), head) = fbb.collapse_in();
+
+    bundle.drain(..head);
+
+    Ok(bundle)
 }
 
 /// Serialize program + instance + config + chiplet defs
@@ -93,11 +151,13 @@ where
 
     let chiplet_traces = fbb.create_vector::<flatbuffers::ForwardsUOffset<fb::ColumnTrace>>(&[]);
 
-    finish_bundle(fbb, program, instance, cfg, main_trace, chiplet_traces)
+    let fbb = finish_bundle(fbb, program, instance, cfg, main_trace, chiplet_traces)?;
+
+    Ok(fbb.finished_data().to_vec())
 }
 
 pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBundle<F>> {
-    super::reset_leak_budget();
+    let mut interner = Interner::new();
 
     let bundle = flatbuffers::root::<fb::ProgramBundle>(bytes).map_err(|_| Error::Protocol {
         protocol: "wire",
@@ -131,7 +191,7 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
 
     let constraint_ast = bundle
         .constraint_ast()
-        .map(|a| ast::deserialize_ast::<F>(a))
+        .map(|a| ast::deserialize_ast::<F>(a, &mut interner))
         .transpose()?
         .ok_or(wire_err("missing constraint_ast"))?;
 
@@ -144,7 +204,10 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
         Some(eps) => {
             let mut checks = Vec::with_capacity(eps.len());
             for i in 0..eps.len() {
-                checks.push(permutation::deserialize_bus_endpoint(eps.get(i))?);
+                checks.push(permutation::deserialize_bus_endpoint(
+                    eps.get(i),
+                    &mut interner,
+                )?);
             }
 
             checks
@@ -158,12 +221,12 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
         .transpose()?;
 
     let chiplet_defs = match bundle.chiplet_defs() {
-        Some(cds) => chiplet::deserialize_chiplets::<F>(cds)?,
+        Some(cds) => chiplet::deserialize_chiplets::<F>(cds, &mut interner)?,
         None => Vec::new(),
     };
 
     let inline_chiplets = match bundle.inline_chiplets() {
-        Some(cds) => chiplet::deserialize_chiplets::<F>(cds)?,
+        Some(cds) => chiplet::deserialize_chiplets::<F>(cds, &mut interner)?,
         None => Vec::new(),
     };
 
@@ -243,8 +306,8 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
     })
 }
 
-fn finish_bundle<'a, F, P>(
-    mut fbb: FlatBufferBuilder<'a>,
+fn finish_bundle<'a, F, P, A>(
+    mut fbb: FlatBufferBuilder<'a, A>,
     program: &P,
     instance: &ProgramInstance<F>,
     cfg: &Config,
@@ -252,10 +315,11 @@ fn finish_bundle<'a, F, P>(
     chiplet_traces: flatbuffers::WIPOffset<
         flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::ColumnTrace<'a>>>,
     >,
-) -> Result<Vec<u8>>
+) -> Result<FlatBufferBuilder<'a, A>>
 where
     F: TowerField,
     P: Program<F>,
+    A: Allocator + 'a,
 {
     let layout = trace::serialize_column_layout(&mut fbb, program.column_layout());
     let virtual_layout = trace::serialize_column_layout(&mut fbb, program.virtual_column_layout());
@@ -327,13 +391,92 @@ where
 
     fbb.finish(bundle, None);
 
-    Ok(fbb.finished_data().to_vec())
+    Ok(fbb)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::{MAX_LABEL_LEN, MAX_TOTAL_LEAKED};
+    use hekate_core::trace::TraceBuilder;
     use hekate_math::Block128;
+    use hekate_program::constraint::builder::ConstraintSystem;
+
+    #[derive(Clone)]
+    struct LabelChiplet {
+        labels: Vec<&'static str>,
+    }
+
+    impl Air<Block128> for LabelChiplet {
+        fn num_columns(&self) -> usize {
+            1
+        }
+
+        fn column_layout(&self) -> &[ColumnType] {
+            &[ColumnType::Bit]
+        }
+
+        fn constraint_ast(&self) -> ConstraintAst<Block128> {
+            labelled_ast(&self.labels)
+        }
+    }
+
+    #[derive(Clone)]
+    struct LabelProgram {
+        main: Vec<&'static str>,
+        chiplet: Vec<&'static str>,
+    }
+
+    impl Air<Block128> for LabelProgram {
+        fn num_columns(&self) -> usize {
+            1
+        }
+
+        fn column_layout(&self) -> &[ColumnType] {
+            &[ColumnType::Bit]
+        }
+
+        fn constraint_ast(&self) -> ConstraintAst<Block128> {
+            labelled_ast(&self.main)
+        }
+    }
+
+    impl Program<Block128> for LabelProgram {
+        fn chiplet_defs(&self) -> Result<Vec<ChipletDef<Block128>>> {
+            Ok(vec![ChipletDef::from_air(&LabelChiplet {
+                labels: self.chiplet.clone(),
+            })?])
+        }
+    }
+
+    fn labelled_ast(labels: &[&'static str]) -> ConstraintAst<Block128> {
+        let cs = ConstraintSystem::new();
+
+        for &label in labels {
+            cs.constrain_named(label, cs.col(0));
+        }
+
+        cs.build()
+    }
+
+    fn round_trip(program: &LabelProgram) -> Result<DeserializedBundle<Block128>> {
+        let num_vars = 3;
+
+        let main = TraceBuilder::new(&[ColumnType::Bit], num_vars)?.build();
+        let chip = TraceBuilder::new(&[ColumnType::Bit], num_vars)?.build();
+
+        let instance = ProgramInstance::new(1 << num_vars, Vec::new());
+        let witness = ProgramWitness::new(main).with_chiplets(vec![chip]);
+
+        let bytes = serialize_bundle(program, &instance, &witness, &Config::default())?;
+
+        deserialize_bundle(&bytes)
+    }
+
+    fn distinct_labels(ids: core::ops::Range<usize>) -> Vec<&'static str> {
+        ids.map(|i| -> &'static str { format!("{i:0>MAX_LABEL_LEN$}").leak() })
+            .collect()
+    }
 
     #[test]
     fn previous_wire_format_is_rejected() {
@@ -355,5 +498,56 @@ mod tests {
                 message: "wire format version mismatch",
             })
         );
+    }
+
+    #[test]
+    fn repeated_labels_decode_past_budget() {
+        let repeats = MAX_TOTAL_LEAKED / "boolean".len() + 1;
+        let program = LabelProgram {
+            main: vec!["boolean"; repeats],
+            chiplet: vec!["boolean"; repeats],
+        };
+
+        let restored = round_trip(&program).unwrap();
+
+        assert_eq!(
+            restored.constraint_ast.labels,
+            vec![Some("boolean"); repeats]
+        );
+        assert_eq!(
+            restored.chiplet_defs[0].constraint_ast().labels,
+            vec![Some("boolean"); repeats]
+        );
+    }
+
+    #[test]
+    fn distinct_labels_share_one_budget_per_bundle() {
+        let fit = MAX_TOTAL_LEAKED / MAX_LABEL_LEN;
+        let program = LabelProgram {
+            main: distinct_labels(0..fit / 2),
+            chiplet: distinct_labels(fit / 2..fit + 1),
+        };
+
+        assert_eq!(
+            round_trip(&program).err(),
+            Some(Error::Protocol {
+                protocol: "wire",
+                message: "distinct label bytes exceed 64 KB",
+            })
+        );
+    }
+
+    #[test]
+    fn wiping_growth_matches_default_builder() {
+        let mut wiping = FlatBufferBuilder::new_in(Wiping(Zeroizing::new(Vec::new())));
+        let mut default = FlatBufferBuilder::new();
+
+        let root = wiping.create_vector(&[7u8; 300]);
+        wiping.finish(root, None);
+
+        let root = default.create_vector(&[7u8; 300]);
+        default.finish(root, None);
+
+        assert_eq!(wiping.finished_data(), default.finished_data());
     }
 }

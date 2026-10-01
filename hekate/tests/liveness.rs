@@ -8,14 +8,15 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_gadgets::{IntArithmeticChiplet, ModexpChiplet, RamChiplet, RomChiplet};
 use hekate_keccak::KeccakChiplet;
-use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaLevel};
-use hekate_pqc::mlkem::{MlKemChiplet, MlKemLevel};
+use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
+use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::outer::TableShape;
 use hekate_program::{Air, FixedColumn};
 use hekate_sha2::Sha256Chiplet;
 
 const NUM_ROWS: usize = 256;
+const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
 
 type F = Block128;
 type Snapshot = (&'static str, errors::Result<Vec<ChipletDef<F>>>);
@@ -84,19 +85,21 @@ fn shipped_tables() -> Vec<Snapshot> {
             "ModexpChiplet",
             ModexpChiplet::new().and_then(|c| c.def()).map(|d| vec![d]),
         ),
-        (
-            "MlKemChiplet",
-            MlKemChiplet::<F>::new(MlKemLevel::MLKEM_768)
-                .composite()
-                .flatten_defs(),
-        ),
-        (
-            "MlDsaChiplet",
-            MlDsaChiplet::<F>::new(MlDsaLevel::MLDSA_65, 64)
-                .composite()
-                .flatten_defs(),
-        ),
+        ("ML-DSA-44", dsa(MlDsaParams::ML_DSA_44)),
+        ("ML-DSA-65", dsa(MlDsaParams::ML_DSA_65)),
+        ("ML-DSA-87", dsa(MlDsaParams::ML_DSA_87)),
+        ("ML-KEM-512", kem(MlKemParams::ML_KEM_512)),
+        ("ML-KEM-768", kem(MlKemParams::ML_KEM_768)),
+        ("ML-KEM-1024", kem(MlKemParams::ML_KEM_1024)),
     ]
+}
+
+fn dsa(params: MlDsaParams) -> errors::Result<Vec<ChipletDef<F>>> {
+    MlDsaChiplet::<F>::new(params, &[32])?.defs()
+}
+
+fn kem(params: MlKemParams) -> errors::Result<Vec<ChipletDef<F>>> {
+    MlKemChiplet::<F>::new(params, &KEM_CALLS)?.defs()
 }
 
 #[test]

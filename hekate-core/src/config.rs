@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::errors;
 use core::fmt;
+
+use crate::errors;
+use crate::utils::support_floor_vars;
 
 /// Production soundness floor.
 pub const MIN_PRODUCTION_BITS: usize = 100;
@@ -178,6 +180,12 @@ impl Config {
     /// Blind columns committed with the whole eval master.
     pub fn blind_units(&self) -> usize {
         usize::from(self.zero_knowledge)
+    }
+
+    /// Fewest rows a table needs for its grid to hold the
+    /// LDT support; `check_security` rejects shorter tables.
+    pub fn min_table_rows(&self) -> usize {
+        1 << support_floor_vars(self.ldt_support_size)
     }
 
     /// Committed row-code width for the chosen per-table mode.

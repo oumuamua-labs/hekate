@@ -9,6 +9,13 @@
 //! kernel hints, and the expander are engine-derived;
 //! public inputs exist only through `publish`.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::ops::Range;
+use hekate_core::errors;
+use hekate_core::trace::ColumnType;
+use hekate_math::{HardwareField, TowerField};
+
 use crate::chiplet::ChipletDef;
 use crate::constraint::builder::ConstraintSystem;
 use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
@@ -18,11 +25,6 @@ use crate::permutation::{
     validate_fixed_selectors, validate_ordered_emits,
 };
 use crate::{Air, FixedColumn, FixedShape, InlineKernelHint, Program, validate_fixed_columns};
-use alloc::string::String;
-use alloc::vec::Vec;
-use hekate_core::errors;
-use hekate_core::trace::ColumnType;
-use hekate_math::{HardwareField, TowerField};
 
 /// Virtual column handle issued by `Circuit`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,6 +187,7 @@ pub struct Circuit<F: TowerField> {
     inline_chiplets: Vec<ChipletDef<F>>,
     inline_hints: Vec<InlineKernelHint>,
     chiplet_defs: Vec<ChipletDef<F>>,
+    namespaces: Vec<(String, Range<usize>)>,
 }
 
 impl<F: TowerField + HardwareField> Circuit<F> {
@@ -213,6 +216,7 @@ impl<F: TowerField + HardwareField> Circuit<F> {
             inline_chiplets: Vec::new(),
             inline_hints: Vec::new(),
             chiplet_defs: Vec::new(),
+            namespaces: Vec::new(),
         })
     }
 
@@ -250,6 +254,7 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         let start = self.num_virtual;
 
         self.physical.extend(core::iter::repeat_n(ty, count));
+
         self.num_virtual += count;
 
         match self.pending_run.take() {
@@ -452,6 +457,52 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         self.chiplet_defs.push(def);
     }
 
+    /// Attaches `defs` as independent tables, renaming every bus
+    /// but `external` to `"{namespace}::{id}"`: two attached
+    /// groups whose buses share an id cannot trade tokens.
+    pub fn attach_namespaced(
+        &mut self,
+        namespace: &str,
+        defs: Vec<ChipletDef<F>>,
+        external: &[&str],
+    ) -> errors::Result<()> {
+        if namespace.is_empty()
+            || namespace.contains(':')
+            || self.namespaces.iter().any(|(n, _)| n == namespace)
+        {
+            return Err(errors::Error::Protocol {
+                protocol: "circuit",
+                message: "namespace is empty, holds ':' or is already attached",
+            });
+        }
+
+        let unknown = external.iter().any(|&id| {
+            !defs
+                .iter()
+                .any(|def| def.permutation_checks().iter().any(|(bus, _)| bus == id))
+        });
+
+        if unknown {
+            return Err(errors::Error::Protocol {
+                protocol: "circuit",
+                message: "external bus id names no bus of the attached tables",
+            });
+        }
+
+        let exempt: Vec<String> = external.iter().map(|&id| String::from(id)).collect();
+        let start = self.chiplet_defs.len();
+
+        for mut def in defs {
+            def.prefix_bus_ids(namespace, &exempt);
+            self.chiplet_defs.push(def);
+        }
+
+        self.namespaces
+            .push((String::from(namespace), start..self.chiplet_defs.len()));
+
+        Ok(())
+    }
+
     /// Pins `col` at `row` to a fresh public input slot,
     /// returned. Whether the AIR determines the pinned
     /// cell is the audited circuit's burden, not checked.
@@ -525,6 +576,26 @@ impl<F: TowerField + HardwareField> Circuit<F> {
             .iter()
             .map(|cd| cd.permutation_checks())
             .collect();
+
+        for (namespace, group) in &self.namespaces {
+            let mut prefix = namespace.clone();
+            prefix.push_str("::");
+
+            let outside = chiplet_specs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !group.contains(i))
+                .flat_map(|(_, specs)| specs)
+                .chain(&self.buses)
+                .any(|(id, _)| id.starts_with(&prefix));
+
+            if outside {
+                return Err(errors::Error::Protocol {
+                    protocol: "circuit",
+                    message: "bus outside a namespace carries its prefix",
+                });
+            }
+        }
 
         let endpoints = self
             .buses
@@ -1311,6 +1382,90 @@ mod tests {
         assert_ne!(
             program(Side::Request, Side::Response),
             program(Side::Response, Side::Request)
+        );
+    }
+
+    #[test]
+    fn attach_namespaced_renames_all_but_external_buses() {
+        let server = Server {
+            calls: 2,
+            spec: ordered_service().respond(&[0], 1).unwrap(),
+        };
+
+        let mut cx = Circuit::<F>::new("namespaced", 16).unwrap();
+
+        let value = cx.column(ColumnType::B32);
+        let sel = cx.column(ColumnType::Bit);
+
+        cx.fix(sel, two_emit_calls(2));
+        cx.call(&ordered_service(), &[value], sel).unwrap();
+
+        let defs = vec![ChipletDef::from_air(&server).unwrap(), mini_def()];
+
+        cx.attach_namespaced("grp", defs, &["svc"]).unwrap();
+
+        let ids: Vec<String> = cx
+            .compile()
+            .unwrap()
+            .chiplet_defs()
+            .unwrap()
+            .iter()
+            .flat_map(|def| def.permutation_checks())
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(ids, ["svc", "grp::mini_bus"]);
+    }
+
+    #[test]
+    fn attach_namespaced_rejects_empty_and_reused_namespaces() {
+        let mut cx = Circuit::<F>::new("twice", 16).unwrap();
+
+        cx.attach_namespaced("grp", vec![mini_def()], &[]).unwrap();
+
+        assert!(cx.attach_namespaced("grp", vec![mini_def()], &[]).is_err());
+        assert!(cx.attach_namespaced("", vec![mini_def()], &[]).is_err());
+    }
+
+    #[test]
+    fn attach_namespaced_rejects_nested_namespaces_and_unknown_external_ids() {
+        let mut cx = Circuit::<F>::new("nested", 16).unwrap();
+
+        assert_eq!(
+            cx.attach_namespaced("a::b", vec![mini_def()], &[]).err(),
+            Some(errors::Error::Protocol {
+                protocol: "circuit",
+                message: "namespace is empty, holds ':' or is already attached",
+            })
+        );
+        assert_eq!(
+            cx.attach_namespaced("grp", vec![mini_def()], &["svc"])
+                .err(),
+            Some(errors::Error::Protocol {
+                protocol: "circuit",
+                message: "external bus id names no bus of the attached tables",
+            })
+        );
+    }
+
+    #[test]
+    fn bus_outside_namespace_cannot_carry_its_prefix() {
+        let mut cx = Circuit::<F>::new("prefixed", 16).unwrap();
+
+        let value = cx.column(ColumnType::B32);
+        let sel = cx.column(ColumnType::Bit);
+
+        cx.fix(sel, two_emit_calls(2));
+        cx.bus("grp::mini_bus", clocked_spec(value.index(), sel.index()));
+
+        cx.attach_namespaced("grp", vec![mini_def()], &[]).unwrap();
+
+        assert_eq!(
+            cx.compile().err(),
+            Some(errors::Error::Protocol {
+                protocol: "circuit",
+                message: "bus outside a namespace carries its prefix",
+            })
         );
     }
 }

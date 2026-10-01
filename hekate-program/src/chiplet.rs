@@ -7,14 +7,8 @@
 //! A `ChipletDef` snapshots a chiplet's full AIR
 //! (constraints, layout, bus specs) into an owned struct.
 //! The prover runs an independent ZeroCheck per chiplet.
-//! The bus (GPA) reconnects chiplets to the main trace.
+//! The LogUp bus reconnects chiplets to the main trace.
 
-use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
-use crate::expander::VirtualExpander;
-use crate::permutation::{
-    PermutationCheckSpec, RankTable, TableHeight, validate_fixed_selectors, validate_ordered_buses,
-};
-use crate::{Air, FixedColumn, InlineKernelHint, validate_fixed_columns};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -22,6 +16,13 @@ use hekate_core::errors;
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{ColumnTrace, ColumnType, Trace, TraceCompatibleField};
 use hekate_math::{Flat, HardwareField, PackableField, TowerField};
+
+use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
+use crate::expander::VirtualExpander;
+use crate::permutation::{
+    PermutationCheckSpec, RankTable, TableHeight, validate_fixed_selectors, validate_ordered_buses,
+};
+use crate::{Air, FixedColumn, InlineKernelHint, validate_fixed_columns};
 
 /// Pre-computed chiplet AIR definition.
 #[derive(Clone)]
@@ -310,7 +311,6 @@ impl<F: TowerField> Air<F> for ChipletDef<F> {
 /// Factory trait for deterministic ChipletDef construction.
 trait AirFactory<F: TowerField>: Send + Sync {
     fn build(&self) -> errors::Result<ChipletDef<F>>;
-    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)>;
     fn clone_box(&self) -> Box<dyn AirFactory<F>>;
 }
 
@@ -322,10 +322,6 @@ where
 {
     fn build(&self) -> errors::Result<ChipletDef<F>> {
         ChipletDef::from_air(self)
-    }
-
-    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        Air::permutation_checks(self)
     }
 
     fn clone_box(&self) -> Box<dyn AirFactory<F>> {
@@ -458,34 +454,11 @@ impl<F: TraceCompatibleField> CompositeChipletBuilder<F> {
         self
     }
 
-    /// Finalize the composite.
-    ///
-    /// Validates selector orthogonality:
-    /// two specs on different bus_ids must not share a selector column
-    /// index. Same bus_id is exempt for dual-spec intra-table check.
+    /// Finalize the composite, validating
+    /// the clock stitching of every external bus.
     pub fn build(self) -> errors::Result<CompositeChiplet<F>> {
         for (bus_id, spec) in &self.external_buses {
             spec.validate_clock_stitching(bus_id)?;
-        }
-
-        for entry in &self.chiplets {
-            let checks = entry.air.permutation_checks();
-            for i in 0..checks.len() {
-                for j in (i + 1)..checks.len() {
-                    if checks[i].0 == checks[j].0 {
-                        continue;
-                    }
-
-                    if let (Some(sel_i), Some(sel_j)) = (checks[i].1.selector, checks[j].1.selector)
-                        && sel_i == sel_j
-                    {
-                        return Err(errors::Error::Protocol {
-                            protocol: "composite_chiplet",
-                            message: "different bus_ids share a selector column",
-                        });
-                    }
-                }
-            }
         }
 
         Ok(CompositeChiplet {

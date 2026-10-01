@@ -5,10 +5,12 @@
 use hekate_gadgets::{IntArithmeticChiplet, RamChiplet};
 use hekate_keccak::KeccakChiplet;
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
-use hekate_pqc::norm_check::NormCheckChiplet;
-use hekate_pqc::ntt::{NttChiplet, NttSchedule};
+use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
+use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::Air;
 use hekate_program::predicate::{ClaimLayout, compile, wire_values};
+
+const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
 
 type F = Block128;
 
@@ -85,14 +87,35 @@ fn check<A: Air<F>>(name: &str, air: &A) {
 #[test]
 fn compiler_reproduces_evaluation_on_real_chiplets() {
     check("keccak", &KeccakChiplet::new(1 << 15, (1 << 15) / 25));
-    check(
-        "ntt",
-        &NttChiplet::new(8380417, 1 << 12, NttSchedule::empty()),
-    );
-    check(
-        "norm_check",
-        &NormCheckChiplet::new(8380417, 1 << 17, 1 << 12, 1 << 12),
-    );
+
+    for (level, params) in [
+        ("ML-DSA-44", MlDsaParams::ML_DSA_44),
+        ("ML-DSA-65", MlDsaParams::ML_DSA_65),
+        ("ML-DSA-87", MlDsaParams::ML_DSA_87),
+    ] {
+        for def in MlDsaChiplet::<F>::new(params, &[32])
+            .unwrap()
+            .defs()
+            .unwrap()
+        {
+            check(&format!("{level} {}", def.name()), &def);
+        }
+    }
+
+    for (level, params) in [
+        ("ML-KEM-512", MlKemParams::ML_KEM_512),
+        ("ML-KEM-768", MlKemParams::ML_KEM_768),
+        ("ML-KEM-1024", MlKemParams::ML_KEM_1024),
+    ] {
+        for def in MlKemChiplet::<F>::new(params, &KEM_CALLS)
+            .unwrap()
+            .defs()
+            .unwrap()
+        {
+            check(&format!("{level} {}", def.name()), &def);
+        }
+    }
+
     check("ram", &RamChiplet::new(1 << 12, 1 << 12));
     check(
         "int_arith",

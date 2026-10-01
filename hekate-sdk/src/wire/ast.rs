@@ -3,16 +3,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::vec::Vec;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use hekate_core::errors::{Error, Result};
 use hekate_math::TowerField;
 use hekate_program::ProgramCell;
 use hekate_program::constraint::{ConstraintArena, ConstraintAst, ConstraintExpr, ExprId};
 
+use super::Interner;
 use crate::generated::program as fb;
 
-pub fn serialize_ast<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+pub fn serialize_ast<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     ast: &ConstraintAst<F>,
 ) -> flatbuffers::WIPOffset<fb::ConstraintAst<'a>> {
     let num_nodes = ast.arena.len();
@@ -49,7 +50,10 @@ pub fn serialize_ast<'a, F: TowerField>(
     )
 }
 
-pub fn deserialize_ast<F: TowerField>(fb_ast: fb::ConstraintAst<'_>) -> Result<ConstraintAst<F>> {
+pub fn deserialize_ast<F: TowerField>(
+    fb_ast: fb::ConstraintAst<'_>,
+    interner: &mut Interner,
+) -> Result<ConstraintAst<F>> {
     let fb_nodes = fb_ast.nodes().ok_or(Error::Protocol {
         protocol: "wire",
         message: "missing AST nodes",
@@ -81,7 +85,7 @@ pub fn deserialize_ast<F: TowerField>(fb_ast: fb::ConstraintAst<'_>) -> Result<C
                 if s.is_empty() {
                     l.push(None);
                 } else {
-                    l.push(Some(super::leak_str(s)?));
+                    l.push(Some(interner.intern(s)?));
                 }
             }
 
@@ -97,8 +101,8 @@ pub fn deserialize_ast<F: TowerField>(fb_ast: fb::ConstraintAst<'_>) -> Result<C
     })
 }
 
-fn serialize_expr<'a, F: TowerField>(
-    fbb: &mut FlatBufferBuilder<'a>,
+fn serialize_expr<'a, F: TowerField, A: Allocator + 'a>(
+    fbb: &mut FlatBufferBuilder<'a, A>,
     expr: &ConstraintExpr<F>,
 ) -> flatbuffers::WIPOffset<fb::AstNode<'a>> {
     match expr {

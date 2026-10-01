@@ -47,7 +47,7 @@ and fuzzer ship as independent crates you compose as needed.
 | [`hekate-aes`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-aes)               | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
 | [`hekate-sha2`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-sha2)             | SHA-256 compression chiplet (FIPS 180-4). Bit-expanded B32 columns, degree 2, 1-16 rounds per row.          |
 | [`hekate-rsa`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-rsa)               | RSA-2048 PKCS#1 v1.5 signature statements (RFC 8017) over the modexp and SHA-256 chiplets.                  |
-| [`hekate-pqc`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-pqc)               | ML-KEM decapsulation and ML-DSA verification (FIPS 203 / 204), with NTT, basemul, norm-check.               |
+| [`hekate-pqc`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-pqc)               | ML-KEM KeyGen, Encaps and Decaps and ML-DSA verification (FIPS 203 / 204) over NTT, Sampler, Codec tables.  |
 | [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile)                          | Wraps a Rust prover into a signed iOS `.xcframework` / Android `.aar` with a typed Swift / Kotlin API.      |
 | [`hekate-scribble`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-scribble)     | Trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.                   |
 
@@ -70,8 +70,9 @@ registers. 16x memory savings.
 **Linear-code commitments**, Brakedown PCS: O(N) prover, O(N) memory. MDS Reed-Solomon row code via additive
 binary-field FFT, exact distance δ = 1 − rate. Merkle tree over encoded columns only (raw trace never hashed, true ZK).
 
-**Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) decapsulation, AES-128/256,
-all proven natively in binary fields without bit-decomposition overhead.
+**Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) key generation,
+encapsulation and decapsulation, AES-128/256. AES and Keccak are native to binary fields; lattice arithmetic
+mod q runs on bit-decomposed carry chains.
 
 ### Hardware Support
 
@@ -288,7 +289,10 @@ binary you can run with `cargo run --release --example <name>`.
 
 - [ML-DSA signature verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs) (FIPS 204;
   44 / 65 / 87 levels)
-- [ML-KEM-768 decapsulation](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem.rs) (FIPS 203)
+- [ML-KEM sender](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_sender.rs) (FIPS 203
+  Encaps with an AES-256-CTR payload; 512 / 768 / 1024 levels)
+- [ML-KEM receiver](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_receiver.rs) (FIPS 203
+  KeyGen chained into Decaps; 512 / 768 / 1024 levels)
 - [AES-128 / AES-256 block proving](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs) (FIPS 197)
 - [Keccak inline kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak_inline.rs) (CPU AIR
   with embedded f1600 permutation)
@@ -345,12 +349,12 @@ HEKATE_NUM_VARS=21 HEKATE_ROUNDS_PER_ROW=4 just example sha256 public
 
 | Workload             | Proving       | Verify         | Proof Size          | Peak memory   |
 |:---------------------|:--------------|:---------------|:--------------------|:--------------|
-| ML-DSA-44            | 886 / 873 ms  | 43.2 / 23.9 ms | 4,172 / 3,677 KiB   | 489 / 478 MiB |
-| ML-DSA-65            | 927 / 853 ms  | 45.5 / 24.3 ms | 4,184 / 3,687 KiB   | 477 / 473 MiB |
-| ML-DSA-87            | 1.36 / 1.25 s | 53.8 / 25.0 ms | 5,464 / 4,892 KiB   | 811 / 786 MiB |
+| ML-DSA-44            | 558 / 467 ms  | 51.6 / 22.2 ms | 2,877 / 2,449 KiB   | 280 / 220 MiB |
+| ML-DSA-65            | 617 / 521 ms  | 53.8 / 23.5 ms | 2,958 / 2,543 KiB   | 274 / 239 MiB |
+| ML-DSA-87            | 776 / 689 ms  | 58.5 / 28.4 ms | 3,326 / 2,918 KiB   | 361 / 303 MiB |
 | RSA-2048 PKCS#1 v1.5 | 355 / 297 ms  | 31.2 / 11.9 ms | 14,585 / 14,348 KiB | 503 / 485 MiB |
 
-Each ML-DSA level runs 7 chiplet tables. RSA-2048 proves `s^65537 mod N == PKCS1-v1_5(H)`
+Each ML-DSA level runs 6 chiplet tables. RSA-2048 proves `s^65537 mod N == PKCS1-v1_5(H)`
 over a 200-byte message, with the modulus public and the signature witness.
 
 ```bash
@@ -360,19 +364,22 @@ just example rsa_pkcs1 public
 
 ### Encryption and key exchange
 
-| Workload                 | Proving       | Verify         | Proof Size        | Peak memory       |
-|:-------------------------|:--------------|:---------------|:------------------|:------------------|
-| ML-KEM-768 decapsulation | 659 / 580 ms  | 33.1 / 18.8 ms | 3,481 / 3,090 KiB | 484 / 468 MiB     |
-| AES-128, 31,250 blocks   | 1.30 / 1.20 s | 20.6 / 15.4 ms | 4,674 / 4,362 KiB | 1,204 / 1,179 MiB |
-| AES-256, 31,250 blocks   | 1.41 / 1.33 s | 20.2 / 15.6 ms | 4,959 / 4,647 KiB | 1,496 / 1,469 MiB |
+| Workload                     | Proving       | Verify         | Proof Size        | Peak memory       |
+|:-----------------------------|:--------------|:---------------|:------------------|:------------------|
+| ML-KEM-768 sender            | 573 / 450 ms  | 72.6 / 25.9 ms | 3,512 / 2,962 KiB | 248 / 165 MiB     |
+| ML-KEM-768 receiver          | 746 / 605 ms  | 90.3 / 34.2 ms | 3,895 / 3,359 KiB | 359 / 255 MiB     |
+| AES-128, 31,250 blocks       | 1.30 / 1.20 s | 20.6 / 15.4 ms | 4,674 / 4,362 KiB | 1,204 / 1,179 MiB |
+| AES-256, 31,250 blocks       | 1.41 / 1.33 s | 20.2 / 15.6 ms | 4,959 / 4,647 KiB | 1,496 / 1,469 MiB |
 
-ML-KEM-768 runs 6 chiplet tables, AES 2. Each AES run covers ~500 KB of plaintext on a
-2^16-row CPU trace with Round-AIR and S-box ROM chiplets at 2^19, which is ~42 µs per
-block for AES-128 and ~45 µs for AES-256.
+The ML-KEM sender proves Encaps and AES-256-CTR over the default 87-byte message on 6 ML-KEM
+tables and 2 AES tables. The receiver proves KeyGen chained into Decaps on 7 tables. Each AES
+run covers ~500 KB of plaintext on a 2^16-row CPU trace with Round-AIR and S-box ROM chiplets
+at 2^19, which is ~42 µs per block for AES-128 and ~45 µs for AES-256.
 
 ```bash
-just example mlkem public
-HEKATE_LEVEL=256 just example aes public    # 128 | 256
+HEKATE_LEVEL=768 just example mlkem_sender public     # HEKATE_MESSAGE=<text> sets the payload
+HEKATE_LEVEL=768 just example mlkem_receiver public   # 512 | 768 | 1024
+HEKATE_LEVEL=256 just example aes public              # 128 | 256
 ```
 
 ### Integer arithmetic

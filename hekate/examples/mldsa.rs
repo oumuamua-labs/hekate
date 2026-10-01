@@ -2,174 +2,187 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! ML-DSA signature verification
-//! proof (FIPS 204).
-//!
-//! Usage:
-//! HEKATE_LEVEL=[44|65|87] mldsa
-//!
-//! Proof existence IS the verdict:
-//! an honest transcript requires
-//! c̃ == c̃'. Invalid signatures yield
-//! an unsatisfiable constraint system,
-//! no valid proof can be constructed,
-//! so no verdict-bit column is needed.
+//! ML-DSA verification (FIPS 204) with the public key and
+//! the signature in the witness: the statement publishes M'
+//! and tr = H(pk). Usage: HEKATE_LEVEL=[44|65|87] mldsa
 
 #[path = "common/mod.rs"]
 mod common;
 
-use hekate::core::trace::TraceBuilder;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128};
+use hekate::math::{Bit, Block32, Block128, TowerField};
 use hekate_core::config::Config;
 use hekate_core::errors;
-use hekate_math::TowerField;
-use hekate_pqc::mldsa::{
-    self, CpuMlDsaColumns, MlDsaChiplet, MlDsaLevel, MlDsaPublicKey, MlDsaSignature,
-};
+use hekate_core::trace::{ColumnTrace, TraceBuilder};
+use hekate_pqc::mldsa::{self, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaParams};
 use hekate_program::circuit::{Circuit, CircuitProgram};
+use hekate_program::define_columns;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
-use ml_dsa::signature::{Keypair, Signer};
 use ml_dsa::{B32, MlDsa44, MlDsa65, MlDsa87, SigningKey};
-use rand::TryRngCore;
-use rand::rngs::OsRng;
+use rand::{TryRngCore, rngs::OsRng};
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
 
-// =================================================================
-// ML-DSA Verification Program
-// =================================================================
+const DIGEST_WORDS: usize = 16;
 
-/// The commitment hash words are read on the rows
-/// the pinned `SELECTOR` forces onto the data bus.
-fn build_program(
-    cpu_rows: usize,
-    num_public: usize,
-    mldsa: &MlDsaChiplet<F>,
+define_columns! {
+    VerifyColumns {
+        WORD: B32,
+        SEL: Bit,
+    }
+}
+
+struct Signed {
+    pk: Zeroizing<Vec<u8>>,
+    signature: Zeroizing<Vec<u8>>,
+}
+
+/// The host requests one word a row, in the order the pipeline
+/// serves them: pk, M' and σ in, then tr and μ out.
+fn build(
+    pipeline: &MlDsaChiplet<F>,
+    rows: usize,
+    words: usize,
+    published: &[usize],
 ) -> errors::Result<CircuitProgram<F>> {
-    let mut cx = Circuit::<F>::new("MlDsaVerifyProgram", cpu_rows)?;
-    let cpu = cx.schema(&CpuMlDsaColumns::build_layout());
+    let mut cx = Circuit::<F>::new("MlDsaVerify", rows)?;
 
-    let data = cpu.at(CpuMlDsaColumns::DATA);
-    let selector = cpu.at(CpuMlDsaColumns::SELECTOR);
+    let cols = cx.schema(&VerifyColumns::build_layout());
 
-    cx.bus(mldsa::MLDSA_DATA_BUS_ID, mldsa::cpu_data_spec());
+    let word = cols.at(VerifyColumns::WORD);
+    let sel = cols.at(VerifyColumns::SEL);
 
     cx.fix(
-        selector,
+        sel,
         FixedShape::Cadence {
             stride: 1,
-            count: num_public,
+            count: words,
             origin: 0,
             values: vec![F::ONE],
         },
     );
 
-    for row in 0..num_public {
-        cx.publish(data, row);
+    let cs = cx.cs();
+
+    // WORD is zero past the service rows: no free cell on padding
+    cs.constrain((cs.one() + cs.col(sel.index())) * cs.col(word.index()));
+
+    cx.call(&mldsa::service(), &[word], sel)?;
+
+    for &row in published {
+        cx.publish(word, row);
     }
 
-    for def in mldsa.composite().flatten_defs()? {
-        cx.attach(def);
-    }
+    cx.attach_namespaced("mldsa", pipeline.defs()?, &[MLDSA_DATA_BUS_ID])?;
 
     cx.compile()
 }
 
-// =================================================================
-// Main
-// =================================================================
+fn host_trace(words: &[u32], rows: usize) -> errors::Result<ColumnTrace> {
+    let mut tb = TraceBuilder::new_secret(
+        &VerifyColumns::build_layout(),
+        rows.trailing_zeros() as usize,
+    )?;
 
-fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], msg: &[u8]) {
+    for (r, &word) in words.iter().enumerate() {
+        tb.set_b32(VerifyColumns::WORD, r, Block32::from(word))?;
+        tb.set_bit(VerifyColumns::SEL, r, Bit::ONE)?;
+    }
+
+    Ok(tb.build())
+}
+
+/// Signs M' with ml-dsa's sign_internal (FIPS 204 Algorithm 7).
+/// The context-taking sign would wrap M' a second time, and
+/// the pipeline, which verifies M' as given, would reject it.
+fn sign<P: ml_dsa::MlDsaParams>(m_prime: &[u8]) -> Signed {
+    let mut seed = Zeroizing::new([0u8; 32]);
+    let mut rnd = Zeroizing::new([0u8; 32]);
+
+    OsRng.try_fill_bytes(&mut *seed).unwrap();
+    OsRng.try_fill_bytes(&mut *rnd).unwrap();
+
+    let key = SigningKey::<P>::from_seed(&B32::from(*seed));
+    let expanded = key.expanded_key();
+    let signature = expanded.sign_internal(&[m_prime], &B32::from(*rnd));
+
+    Signed {
+        pk: Zeroizing::new(expanded.verifying_key().encode().to_vec()),
+        signature: Zeroizing::new(signature.encode().to_vec()),
+    }
+}
+
+fn run(label: &str, params: MlDsaParams, m_prime: &[u8], signed: &Signed) {
     common::init(label);
 
-    let cpu_num_rows: usize = 1 << 10;
-    let domain = b"ML-DSA_Verify";
+    println!("  Public key:     {} bytes, private", signed.pk.len());
+    println!(
+        "  Signature:      {} bytes, private",
+        signed.signature.len()
+    );
+    println!("  M':             {} bytes, public", m_prime.len());
 
-    println!("  Public key:     {} bytes", pk_bytes.len());
-    println!("  Signature:      {} bytes", sig_bytes.len());
-    println!("  Message:        {} bytes", msg.len());
+    let pipeline = MlDsaChiplet::<F>::new(params, &[m_prime.len()]).expect("pipeline build");
 
-    let pk = MlDsaPublicKey::from_bytes(level, pk_bytes);
-    let sig = MlDsaSignature::from_bytes(level, sig_bytes).expect("NIST signature must parse");
+    let traced = common::phase("Trace Generation", || {
+        let input = MlDsaInput {
+            pk: &signed.pk,
+            message: m_prime,
+            signature: &signed.signature,
+        };
 
-    // Phase 1:
-    // Generate traces.
-    let mldsa_chiplet = MlDsaChiplet::<F>::new(level, msg.len());
-
-    let (cpu_trace, chiplet_traces, io_public) = common::phase("Trace Generation", || {
-        let chiplet_traces = mldsa_chiplet
-            .generate_traces(&pk, &sig, msg)
-            .expect("Trace generation failed");
-
-        let layout = CpuMlDsaColumns::build_layout();
-        let cpu_vars = cpu_num_rows.trailing_zeros() as usize;
-
-        let mut cpu_tb = TraceBuilder::new(&layout, cpu_vars).expect("CPU trace build failed");
-
-        // Public input:
-        // c̃ from the signature, B32-aligned.
-        let mut io_buf = sig.c_tilde.clone();
-        while !io_buf.len().is_multiple_of(4) {
-            io_buf.push(0);
-        }
-
-        for (i, chunk) in io_buf.chunks(4).enumerate() {
-            let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-
-            cpu_tb
-                .set_b32(CpuMlDsaColumns::DATA, i, Block32::from(val))
-                .expect("CPU DATA set");
-            cpu_tb
-                .set_bit(CpuMlDsaColumns::SELECTOR, i, Bit::ONE)
-                .expect("CPU SELECTOR set");
-        }
-
-        let cpu_trace = cpu_tb.build();
-
-        (cpu_trace, chiplet_traces, io_buf)
+        pipeline.trace(&[input]).expect("the signature verifies")
     });
 
-    println!("  Chiplet traces: {}", chiplet_traces.len());
+    let words = &traced.words;
+    let rows = words.len().next_power_of_two();
 
-    let ct_public: Vec<F> = io_public
-        .chunks(4)
-        .map(|chunk| Block128(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u128))
+    // Public: M', right after the pk words, and tr, the first
+    // of the two digests the host receives (tr, then μ).
+    let pk_words = params.pk_bytes() / 4;
+    let tr_row = words.len() - 2 * DIGEST_WORDS;
+
+    let published: Vec<usize> = (pk_words..pk_words + m_prime.len().div_ceil(4))
+        .chain(tr_row..tr_row + DIGEST_WORDS)
+        .collect();
+
+    let public_inputs: Vec<F> = published
+        .iter()
+        .map(|&row| F::from(u128::from(words[row])))
         .collect();
 
     println!(
-        "  Public inputs:  {} (c̃ as {} × B32)",
-        ct_public.len(),
-        ct_public.len()
+        "  Public inputs:  {} words, M' then tr",
+        public_inputs.len()
     );
 
-    // Phase 2:
-    // Prove
-    let air = build_program(cpu_num_rows, ct_public.len(), &mldsa_chiplet).unwrap();
+    let program = build(&pipeline, rows, words.len(), &published).expect("program build");
+    let host = host_trace(words, rows).expect("host trace");
 
-    let instance = ProgramInstance::new(cpu_num_rows, ct_public);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
+    let instance = ProgramInstance::new(rows, public_inputs);
+    let witness = ProgramWitness::new(host).with_chiplets(traced.traces);
 
     let config = Config {
         zero_knowledge: common::zero_knowledge(),
         ..Config::default()
     };
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+    let mut blinding_seed = Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
     let proof = common::phase("Proving", || {
         prove(
-            domain,
-            &air,
+            b"MlDsa_E2E",
+            &program,
             &instance,
             &witness,
             &config,
-            blinding_seed,
+            *blinding_seed,
             None,
         )
         .expect("Prover failed")
@@ -177,15 +190,13 @@ fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], 
 
     common::proof_breakdown(&proof);
 
-    // Phase 3:
-    // Verify
-    let mut verifier_transcript = Transcript::<H>::new(domain);
-    let pinned_id = common::audited_id(&air);
+    let mut verifier_transcript = Transcript::<H>::new(b"MlDsa_E2E");
+    let pinned_id = common::audited_id(&program);
 
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
-            &air,
+            &program,
             &instance,
             &proof,
             &mut verifier_transcript,
@@ -198,59 +209,27 @@ fn run_mldsa(label: &str, level: MlDsaLevel, pk_bytes: &[u8], sig_bytes: &[u8], 
 }
 
 fn main() {
-    let level_arg = common::level("65");
+    let level = common::level("65");
+    let message = format!("Hekate ML-DSA-{level} verification example");
 
-    let mut seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut seed).unwrap();
+    // FIPS 204 Algorithm 2:
+    // M' = 0 ∥ |ctx| ∥ ctx ∥ M, here with the empty context.
+    let m_prime = [&[0u8, 0][..], message.as_bytes()].concat();
 
-    let xi = B32::from(seed);
-
-    match level_arg.as_str() {
-        "44" => {
-            let key = SigningKey::<MlDsa44>::from_seed(&xi);
-            let msg = b"Hekate ML-DSA-44 verification example";
-            let pk = key.verifying_key().encode();
-            let sig = key.sign(msg).encode();
-
-            run_mldsa(
-                "ML-DSA-44 Signature Verification",
-                MlDsaLevel::MLDSA_44,
-                &pk,
-                &sig,
-                msg,
-            );
-        }
-        "65" => {
-            let key = SigningKey::<MlDsa65>::from_seed(&xi);
-            let msg = b"Hekate ML-DSA-65 verification example";
-            let pk = key.verifying_key().encode();
-            let sig = key.sign(msg).encode();
-
-            run_mldsa(
-                "ML-DSA-65 Signature Verification",
-                MlDsaLevel::MLDSA_65,
-                &pk,
-                &sig,
-                msg,
-            );
-        }
-        "87" => {
-            let key = SigningKey::<MlDsa87>::from_seed(&xi);
-            let msg = b"Hekate ML-DSA-87 verification example";
-            let pk = key.verifying_key().encode();
-            let sig = key.sign(msg).encode();
-
-            run_mldsa(
-                "ML-DSA-87 Signature Verification",
-                MlDsaLevel::MLDSA_87,
-                &pk,
-                &sig,
-                msg,
-            );
-        }
+    let (params, signed) = match level.as_str() {
+        "44" => (MlDsaParams::ML_DSA_44, sign::<MlDsa44>(&m_prime)),
+        "65" => (MlDsaParams::ML_DSA_65, sign::<MlDsa65>(&m_prime)),
+        "87" => (MlDsaParams::ML_DSA_87, sign::<MlDsa87>(&m_prime)),
         other => {
-            eprintln!("Usage: HEKATE_LEVEL=[44|65|87] mldsa (got {:?})", other);
+            eprintln!("Usage: HEKATE_LEVEL=[44|65|87] mldsa (got {other:?})");
             std::process::exit(1);
         }
-    }
+    };
+
+    run(
+        &format!("ML-DSA-{level} Signature Verification"),
+        params,
+        &m_prime,
+        &signed,
+    );
 }
