@@ -16,8 +16,8 @@ use alloc::vec::Vec;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceCompatibleField};
 use hekate_math::TowerField;
-use hekate_math::{Flat, HardwareField, PackableField};
-use hekate_program::chiplet::CompositeChiplet;
+use hekate_math::{HardwareField, PackableField};
+use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::define_columns;
@@ -432,22 +432,21 @@ define_columns! {
 }
 
 // =================================================================
-// AES-128 Composite Chiplet
+// AES-128 Chiplet
 // =================================================================
 
 #[derive(Clone)]
-pub struct Aes128Chiplet<F: TraceCompatibleField> {
-    composite: CompositeChiplet<F>,
+pub struct Aes128Chiplet {
+    round_air: AesRound128Air,
+    sbox_rom: sbox_rom::SboxRomChiplet,
     num_rows: usize,
     sbox_rom_rows: usize,
 }
 
-impl<F> Aes128Chiplet<F>
-where
-    F: TowerField + TraceCompatibleField + PackableField + HardwareField + 'static,
-    <F as PackableField>::Packed: Copy + Send + Sync,
-    Flat<F>: Send + Sync,
-{
+impl Aes128Chiplet {
+    pub const EXTERNAL_BUS_IDS: [&'static str; 2] =
+        [AesRound128Air::LINK_BUS_ID, AesRound128Air::KEY_BUS_ID];
+
     pub fn new(num_rows: usize, sbox_rom_rows: usize, num_blocks: usize) -> Result<Self, Error> {
         if !num_rows.is_power_of_two() {
             return Err(Error::Protocol {
@@ -474,22 +473,26 @@ where
         let sbox_rom =
             sbox_rom::SboxRomChiplet::new(sbox_rom_rows, num_blocks * AesRound128Air::ACTIVE_ROWS)?;
 
-        let composite = CompositeChiplet::<F>::builder("aes128")
-            .chiplet(round_air)
-            .chiplet(sbox_rom)
-            .external_bus(AesRound128Air::LINK_BUS_ID, AesRound128Air::link_spec())
-            .external_bus(AesRound128Air::KEY_BUS_ID, AesRound128Air::key_spec())
-            .build()?;
-
         Ok(Self {
-            composite,
+            round_air,
+            sbox_rom,
             num_rows,
             sbox_rom_rows,
         })
     }
 
-    pub fn composite(&self) -> &CompositeChiplet<F> {
-        &self.composite
+    /// The round table and the S-box ROM as chiplets
+    /// for a host program to attach, in the order
+    /// `generate_traces` returns their traces.
+    pub fn defs<F>(&self) -> Result<Vec<ChipletDef<F>>, Error>
+    where
+        F: TraceCompatibleField + PackableField + HardwareField + 'static,
+        <F as PackableField>::Packed: Copy + Send + Sync,
+    {
+        Ok(vec![
+            ChipletDef::from_air(&self.round_air)?,
+            ChipletDef::from_air(&self.sbox_rom)?,
+        ])
     }
 
     pub fn generate_traces(
@@ -544,7 +547,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hekate_math::Block128;
+    use hekate_math::{Block128, Flat};
     use hekate_program::permutation::EMIT_RANK_LABEL;
 
     type F = Block128;
@@ -686,16 +689,23 @@ mod tests {
     }
 
     #[test]
-    fn composite_builds() {
-        let aes = Aes128Chiplet::<F>::new(16, 256, 1).unwrap();
-        assert_eq!(aes.composite().flatten_defs().unwrap().len(), 2);
+    fn defs_follow_trace_order() {
+        let aes = Aes128Chiplet::new(16, 256, 1).unwrap();
+        let names: Vec<String> = aes
+            .defs::<F>()
+            .unwrap()
+            .iter()
+            .map(Air::<F>::name)
+            .collect();
+
+        assert_eq!(names, ["AesRound128Air", "SboxRomChiplet"]);
     }
 
     #[test]
     fn new_validates() {
-        assert!(Aes128Chiplet::<F>::new(100, 256, 1).is_err());
-        assert!(Aes128Chiplet::<F>::new(16, 7, 1).is_err());
-        assert!(Aes128Chiplet::<F>::new(16, 16, 2).is_err());
-        assert!(Aes128Chiplet::<F>::new(16, 16, 1).is_ok());
+        assert!(Aes128Chiplet::new(100, 256, 1).is_err());
+        assert!(Aes128Chiplet::new(16, 7, 1).is_err());
+        assert!(Aes128Chiplet::new(16, 16, 2).is_err());
+        assert!(Aes128Chiplet::new(16, 16, 1).is_ok());
     }
 }

@@ -166,7 +166,7 @@ impl Ctr {
 
 fn build(
     pipeline: &MlKemChiplet<F>,
-    aes: &Aes256Chiplet<F>,
+    aes: &Aes256Chiplet,
     layout: &Layout,
     message_len: usize,
     rows: usize,
@@ -311,10 +311,7 @@ fn build(
     }
 
     cx.attach_namespaced("mlkem", pipeline.defs()?, &[MLKEM_DATA_BUS_ID])?;
-
-    for def in aes.composite().flatten_defs()? {
-        cx.attach(def);
-    }
+    cx.attach_namespaced("aes256", aes.defs()?, &Aes256Chiplet::EXTERNAL_BUS_IDS)?;
 
     cx.compile()
 }
@@ -429,7 +426,7 @@ where
     let floor = Config::default().min_table_rows();
 
     let pipeline = MlKemChiplet::<F>::new(params, &[MlKemCall::Encaps]).expect("pipeline build");
-    let aes = Aes256Chiplet::<F>::new(
+    let aes = Aes256Chiplet::new(
         (blocks * AES_ROWS).next_power_of_two().max(floor),
         (blocks * SBOX_ROUNDS).next_power_of_two().max(floor),
         blocks,

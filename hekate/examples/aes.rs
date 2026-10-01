@@ -57,7 +57,7 @@ const CPU_IO_PER_BLOCK: usize = 2;
 fn build_aes128_program(
     cpu_rows: usize,
     num_blocks: usize,
-    aes: &Aes128Chiplet<F>,
+    aes: &Aes128Chiplet,
 ) -> errors::Result<CircuitProgram<F>> {
     let mut cx = Circuit::<F>::new("Aes128", cpu_rows)?;
     let cpu = cx.schema(&CpuAes128Columns::build_layout());
@@ -78,9 +78,7 @@ fn build_aes128_program(
     cx.fix(selector, host_selector_shape(2, num_blocks));
     cx.fix(key_selector, host_key_selector_shape(2, num_blocks));
 
-    for def in aes.composite().flatten_defs()? {
-        cx.attach(def);
-    }
+    cx.attach_namespaced("aes128", aes.defs()?, &Aes128Chiplet::EXTERNAL_BUS_IDS)?;
 
     cx.compile()
 }
@@ -88,7 +86,7 @@ fn build_aes128_program(
 fn build_aes256_program(
     cpu_rows: usize,
     num_blocks: usize,
-    aes: &Aes256Chiplet<F>,
+    aes: &Aes256Chiplet,
 ) -> errors::Result<CircuitProgram<F>> {
     let mut cx = Circuit::<F>::new("Aes256", cpu_rows)?;
     let cpu = cx.schema(&CpuAes256Columns::build_layout());
@@ -109,9 +107,7 @@ fn build_aes256_program(
     cx.fix(selector, host_selector_shape(2, num_blocks));
     cx.fix(key_selector, host_key_selector_shape(2, num_blocks));
 
-    for def in aes.composite().flatten_defs()? {
-        cx.attach(def);
-    }
+    cx.attach_namespaced("aes256", aes.defs()?, &Aes256Chiplet::EXTERNAL_BUS_IDS)?;
 
     cx.compile()
 }
@@ -272,7 +268,7 @@ fn run_aes128() {
             })
             .collect();
 
-        let aes = Aes128Chiplet::<F>::new(chiplet_rows, sbox_rom_rows, NUM_BLOCKS).unwrap();
+        let aes = Aes128Chiplet::new(chiplet_rows, sbox_rom_rows, NUM_BLOCKS).unwrap();
         let chiplet_traces = aes.generate_traces(&calls).unwrap();
 
         let ciphertexts: Vec<[u8; 16]> = (0..NUM_BLOCKS)
@@ -376,7 +372,7 @@ fn run_aes256() {
             })
             .collect();
 
-        let aes = Aes256Chiplet::<F>::new(chiplet_rows, sbox_rom_rows, NUM_BLOCKS).unwrap();
+        let aes = Aes256Chiplet::new(chiplet_rows, sbox_rom_rows, NUM_BLOCKS).unwrap();
         let chiplet_traces = aes.generate_traces(&calls).unwrap();
 
         let ciphertexts: Vec<[u8; 16]> = (0..NUM_BLOCKS)

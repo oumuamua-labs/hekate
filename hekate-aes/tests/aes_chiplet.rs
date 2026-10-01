@@ -61,7 +61,7 @@ const CPU128_ROWS: usize = 4;
 #[derive(Clone)]
 struct Aes128TestProgram {
     program: CircuitProgram<F>,
-    aes: Aes128Chiplet<F>,
+    aes: Aes128Chiplet,
 }
 
 /// CPU trace:
@@ -116,9 +116,12 @@ fn make_128_program() -> Aes128TestProgram {
     cx.fix(selector, host_selector_shape(2, 1));
     cx.fix(key_selector, host_key_selector_shape(2, 1));
 
-    for def in aes.composite().flatten_defs().unwrap() {
-        cx.attach(def);
-    }
+    cx.attach_namespaced(
+        "aes128",
+        aes.defs().unwrap(),
+        &Aes128Chiplet::EXTERNAL_BUS_IDS,
+    )
+    .unwrap();
 
     Aes128TestProgram {
         program: cx.compile().unwrap(),
@@ -793,7 +796,7 @@ fn fips256_call() -> Aes256Call {
 #[derive(Clone)]
 struct Aes256TestProgram {
     program: CircuitProgram<F>,
-    aes: Aes256Chiplet<F>,
+    aes: Aes256Chiplet,
 }
 
 fn build_cpu256_trace(call: &Aes256Call, ciphertext: &[u8; 16]) -> ColumnTrace {
@@ -845,9 +848,12 @@ fn make_256_program() -> Aes256TestProgram {
     cx.fix(selector, host_selector_shape(2, 1));
     cx.fix(key_selector, host_key_selector_shape(2, 1));
 
-    for def in aes.composite().flatten_defs().unwrap() {
-        cx.attach(def);
-    }
+    cx.attach_namespaced(
+        "aes256",
+        aes.defs().unwrap(),
+        &Aes256Chiplet::EXTERNAL_BUS_IDS,
+    )
+    .unwrap();
 
     Aes256TestProgram {
         program: cx.compile().unwrap(),

@@ -139,8 +139,8 @@ fn fires(shape: &FixedShape<F>) -> bool {
 }
 
 fn all_tables() -> Vec<(&'static str, ChipletDef<F>)> {
-    let aes128 = Aes128Chiplet::<F>::new(PROBE_ROWS, SBOX_ROM_ROWS, PROBE_BLOCKS).unwrap();
-    let aes256 = Aes256Chiplet::<F>::new(PROBE_ROWS, SBOX_ROM_ROWS, PROBE_BLOCKS).unwrap();
+    let aes128 = Aes128Chiplet::new(PROBE_ROWS, SBOX_ROM_ROWS, PROBE_BLOCKS).unwrap();
+    let aes256 = Aes256Chiplet::new(PROBE_ROWS, SBOX_ROM_ROWS, PROBE_BLOCKS).unwrap();
 
     let mut defs = vec![
         (
@@ -193,17 +193,11 @@ fn all_tables() -> Vec<(&'static str, ChipletDef<F>)> {
         defs.extend(pipeline.defs().unwrap().into_iter().map(|d| (owner, d)));
     }
 
-    for (owner, composite) in [
-        ("aes128", aes128.composite()),
-        ("aes256", aes256.composite()),
+    for (owner, tables) in [
+        ("aes128", aes128.defs().unwrap()),
+        ("aes256", aes256.defs().unwrap()),
     ] {
-        defs.extend(
-            composite
-                .flatten_defs()
-                .unwrap()
-                .into_iter()
-                .map(|d| (owner, d)),
-        );
+        defs.extend(tables.into_iter().map(|d| (owner, d)));
     }
 
     defs

@@ -10,9 +10,9 @@ use hekate::math::{Block128, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
-use hekate_keccak::KeccakChiplet;
 use hekate_math::{Bit, Block32};
-use hekate_program::chiplet::{ChipletDef, CompositeChiplet};
+use hekate_program::chiplet::ChipletDef;
+use hekate_program::circuit::Circuit;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
@@ -58,10 +58,10 @@ fn prove_and_verify<P: Program<F>>(
     config: &Config,
 ) -> bool {
     let seed = [0xCCu8; 32];
-    let proof = prove(b"CompositeTest", air, instance, witness, config, seed, None)
-        .expect("proving failed");
+    let proof =
+        prove(b"ChipletBuses", air, instance, witness, config, seed, None).expect("proving failed");
 
-    let mut vt = Transcript::<H>::new(b"CompositeTest");
+    let mut vt = Transcript::<H>::new(b"ChipletBuses");
     let pinned_id = program_id(air).unwrap();
 
     HekateVerifier::<F, H>::verify(&pinned_id, air, instance, &proof, &mut vt, config)
@@ -76,14 +76,14 @@ fn try_prove_and_verify<P: Program<F>>(
 ) -> Result<bool, errors::Error> {
     let seed = [0xCCu8; 32];
     let proof =
-        prove(b"CompositeTest", air, instance, witness, config, seed, None).map_err(|_| {
+        prove(b"ChipletBuses", air, instance, witness, config, seed, None).map_err(|_| {
             errors::Error::Protocol {
                 protocol: "ffi",
                 message: "prove failed",
             }
         })?;
 
-    let mut vt = Transcript::<H>::new(b"CompositeTest");
+    let mut vt = Transcript::<H>::new(b"ChipletBuses");
     let pinned_id = program_id(air).unwrap();
 
     HekateVerifier::<F, H>::verify(&pinned_id, air, instance, &proof, &mut vt, config)
@@ -128,8 +128,7 @@ impl Program<F> for BareMainAir {
 }
 
 // ==========================================================
-// Phase 1:
-// Verifier Bus Matching Tests
+// Verifier bus matching
 // ==========================================================
 
 /// Two chiplets with matching bus_ids
@@ -353,152 +352,28 @@ fn main_chiplet_bus_backward_compat() {
     );
 }
 
-// ==========================================================
-// Phase 4:
-// CompositeChiplet Struct Tests
-// ==========================================================
-
-/// flatten_defs() called twice produces
-/// identical results. kernel_builder must
-/// be non-None for chiplets that provide kernels.
+/// Full E2E prove/verify of two RomChiplets
+/// attached under one namespace, with identical
+/// data on their internal chiplet<>chiplet bus.
 #[test]
-fn composite_flatten_deterministic() {
-    let composite = CompositeChiplet::<F>::builder("test")
-        .chiplet(KeccakChiplet::new(64, 2))
-        .build()
-        .unwrap();
-
-    let defs_a = composite.flatten_defs().unwrap();
-    let defs_b = composite.flatten_defs().unwrap();
-
-    assert_eq!(defs_a.len(), defs_b.len());
-
-    for (a, b) in defs_a.iter().zip(defs_b.iter()) {
-        assert_eq!(a.permutation_checks.len(), b.permutation_checks.len());
-
-        for ((id_a, spec_a), (id_b, spec_b)) in
-            a.permutation_checks.iter().zip(b.permutation_checks.iter())
-        {
-            assert_eq!(id_a, id_b, "bus_ids must match across flatten calls");
-            assert_eq!(spec_a.selector, spec_b.selector, "selectors must match");
-        }
-
-        // Column layout must match
-        assert_eq!(a.column_layout(), b.column_layout());
-        assert_eq!(a.num_columns(), b.num_columns());
-    }
-}
-
-/// External bus_ids are NOT
-/// prefixed by flatten_defs().
-#[test]
-fn composite_prefix_external_bus_untouched() {
-    let composite = CompositeChiplet::<F>::builder("mycomp")
-        .chiplet(RomChiplet::new(64, 64))
-        .external_bus(RomChiplet::BUS_ID, RomChiplet::cpu_linking_spec())
-        .build()
-        .unwrap();
-
-    let defs = composite.flatten_defs().unwrap();
-    assert_eq!(defs.len(), 1);
-
-    // RomChiplet declares bus_id "rom_link".
-    // Since "rom_link" is in external_bus_ids,
-    // it must NOT be prefixed.
-    let bus_ids: Vec<&str> = defs[0]
-        .permutation_checks
-        .iter()
-        .map(|(id, _)| id.as_str())
-        .collect();
-
-    assert!(
-        bus_ids.contains(&RomChiplet::BUS_ID),
-        "external bus_id must not be prefixed, got: {:?}",
-        bus_ids
-    );
-}
-
-/// Internal bus_ids ARE
-/// prefixed with "{name}::".
-#[test]
-fn composite_prefix_internal_bus_namespaced() {
-    let composite = CompositeChiplet::<F>::builder("mycomp")
-        .chiplet(RomChiplet::new(64, 64))
-        .build()
-        .unwrap();
-
-    let defs = composite.flatten_defs().unwrap();
-    assert_eq!(defs.len(), 1);
-
-    // RomChiplet declares bus_id "rom_link".
-    // No external_bus declared,
-    // so "rom_link" IS internal -> prefixed.
-    let bus_ids: Vec<&str> = defs[0]
-        .permutation_checks
-        .iter()
-        .map(|(id, _)| id.as_str())
-        .collect();
-
-    let expected = "mycomp::rom_link";
-    assert!(
-        bus_ids.contains(&expected),
-        "internal bus_id must be prefixed with 'mycomp::', got: {:?}",
-        bus_ids
-    );
-}
-
-/// Full E2E prove/verify with CompositeChiplet
-/// wrapping two chiplets connected by an
-/// internal bus. Uses two RomChiplets with
-/// identical data to produce matching products
-/// on a chiplet<>chiplet bus.
-#[test]
-fn composite_end_to_end_prove_verify() {
+fn namespaced_end_to_end_prove_verify() {
     let num_rows = 1 << TEST_NUM_VARS;
     let instructions = test_instructions(num_rows);
 
-    let composite = CompositeChiplet::<F>::builder("dual_rom")
-        .chiplet(RomChiplet::new(num_rows, num_rows))
-        .chiplet(RomChiplet::new(num_rows, num_rows))
-        .build()
-        .unwrap();
+    let mut cx = Circuit::<F>::new("DualRom", num_rows).unwrap();
 
-    // No external buses, both chiplets
-    // share internal bus "dual_rom::rom_link".
+    cx.column(ColumnType::Bit);
+    cx.attach_namespaced(
+        "dual_rom",
+        vec![
+            ChipletDef::from_air(&RomChiplet::new(num_rows, num_rows)).unwrap(),
+            ChipletDef::from_air(&RomChiplet::new(num_rows, num_rows)).unwrap(),
+        ],
+        &[],
+    )
+    .unwrap();
 
-    #[derive(Clone)]
-    struct CompositeTestAir {
-        composite: CompositeChiplet<F>,
-    }
-
-    impl Air<F> for CompositeTestAir {
-        fn num_columns(&self) -> usize {
-            1
-        }
-
-        fn column_layout(&self) -> &[ColumnType] {
-            &[ColumnType::Bit]
-        }
-
-        fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-            self.composite.external_buses()
-        }
-
-        fn constraint_ast(&self) -> ConstraintAst<F> {
-            let cs = ConstraintSystem::<F>::new();
-            cs.assert_boolean(cs.col(0));
-
-            cs.build()
-        }
-    }
-
-    impl Program<F> for CompositeTestAir {
-        fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
-            self.composite.flatten_defs()
-        }
-    }
-
-    let air = CompositeTestAir { composite };
+    let air = cx.compile().unwrap();
 
     let trace1 = generate_rom_trace(&instructions, num_rows).unwrap();
     let trace2 = generate_rom_trace(&instructions, num_rows).unwrap();
@@ -507,8 +382,5 @@ fn composite_end_to_end_prove_verify() {
     let witness =
         ProgramWitness::new(dummy_main_trace(TEST_NUM_VARS)).with_chiplets(vec![trace1, trace2]);
 
-    assert!(
-        prove_and_verify(&air, &instance, &witness, &test_config()),
-        "composite with internal chiplet↔chiplet bus must verify"
-    );
+    assert!(prove_and_verify(&air, &instance, &witness, &test_config()));
 }

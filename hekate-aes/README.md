@@ -59,7 +59,7 @@ fn encrypt(
 
     let rows = |per_block: usize| (per_block * blocks).next_power_of_two().max(floor);
 
-    let aes = Aes256Chiplet::<F>::new(
+    let aes = Aes256Chiplet::new(
         rows(AesRound256Air::BLOCK_ROWS),
         rows(AesRound256Air::ACTIVE_ROWS),
         blocks,
@@ -94,9 +94,7 @@ fn encrypt(
     cx.fix(sel, host_selector_shape(2, blocks));
     cx.fix(key_sel, host_key_selector_shape(2, blocks));
 
-    for def in aes.composite().flatten_defs()? {
-        cx.attach(def);
-    }
+    cx.attach_namespaced("aes256", aes.defs()?, &Aes256Chiplet::EXTERNAL_BUS_IDS)?;
 
     Ok((cx.compile()?, traces))
 }

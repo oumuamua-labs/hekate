@@ -1462,8 +1462,8 @@ fn chiplet_pipeline_witness_isolation() {
     let num_rows = 1usize << num_vars;
 
     // Two copies share bus_ids by design,
-    // `Program::chiplet_defs()`does NOT
-    // auto-namespace (only `CompositeChiplet` does),
+    // `Program::chiplet_defs()` does NOT
+    // auto-namespace (only `Circuit::attach_namespaced` does),
     // so each bus pairs across the two copies
     // (chiplet0::bus_n <> chiplet1::bus_n)
     // and satisfies GPA bus exhaustiveness
