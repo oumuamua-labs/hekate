@@ -77,15 +77,9 @@ fn compute_u32(op: ArithmeticOpcode, a: u32, b: u32) -> u32 {
     }
 }
 
-fn with_request_idx(ops: &[(ArithmeticOpcode, u32, u32)]) -> Vec<IntArithmeticOp> {
+fn u32_ops(ops: &[(ArithmeticOpcode, u32, u32)]) -> Vec<IntArithmeticOp> {
     ops.iter()
-        .enumerate()
-        .map(|(i, &(op, a, b))| IntArithmeticOp::U32 {
-            op,
-            a,
-            b,
-            request_idx: i as u32,
-        })
+        .map(|&(op, a, b)| IntArithmeticOp::U32 { op, a, b })
         .collect()
 }
 
@@ -126,7 +120,7 @@ fn build_fixture(
     ProgramInstance<F>,
     ProgramWitness<F, ColumnTrace>,
 ) {
-    let ops = with_request_idx(raw_ops);
+    let ops = u32_ops(raw_ops);
 
     let air = arith_test_program(num_rows, ops.len());
     let cpu_trace = generate_cpu_trace(&ops, num_rows, &CpuArithColumns::build_layout());

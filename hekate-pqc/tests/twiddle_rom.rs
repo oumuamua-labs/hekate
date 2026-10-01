@@ -16,7 +16,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
@@ -39,14 +39,9 @@ fn cpu_layout() -> Vec<ColumnType> {
 }
 
 fn cpu_w_binding_spec() -> PermutationCheckSpec {
-    PermutationCheckSpec::new(
-        vec![
-            (Source::Column(CPU_BFLY), b"kappa_wb_bfly" as &[u8]),
-            (Source::Column(CPU_W), b"kappa_wb_w" as &[u8]),
-            (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
-        ],
-        Some(CPU_SEL),
-    )
+    TwiddleRomChiplet::w_binding_service()
+        .request(&[CPU_BFLY, CPU_W], CPU_SEL)
+        .expect("w_binding_service slots match the requester columns")
 }
 
 fn forward_schedule() -> NttSchedule {
@@ -62,7 +57,6 @@ fn honest_entries() -> Vec<TwiddleEntry> {
             w: (k as u32) % Q,
             is_mulonly: false,
             active: true,
-            request_idx_tr: 0,
         });
         entries.push(TwiddleEntry {
             layer: 0,
@@ -70,7 +64,6 @@ fn honest_entries() -> Vec<TwiddleEntry> {
             w: 0,
             is_mulonly: false,
             active: false,
-            request_idx_tr: 0,
         });
     }
 
@@ -238,7 +231,6 @@ fn shadow_exploit_must_be_rejected() {
     // row + matching CPU partner.
     let accepted = run_e2e(|twiddle, cpu| {
         set_bit(twiddle, TwiddleRomColumns::MULONLY_SELECTOR, 0, Bit::ONE);
-        set_b32(twiddle, TwiddleRomColumns::REQUEST_IDX_TR, 0, 0);
 
         set_b32(cpu, CPU_BFLY, 0, 0);
         set_b32(cpu, CPU_W, 0, 1);

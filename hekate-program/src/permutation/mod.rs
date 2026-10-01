@@ -21,20 +21,8 @@ pub use rank::{
 /// position fixes the `β` power, never the label.
 pub type ChallengeLabel = &'static [u8];
 
-/// Clock slot of a stateless-service bus, on both endpoints.
-pub const REQUEST_IDX_LABEL: ChallengeLabel = b"kappa_request_idx";
-
 /// Clock slot of an ordered service bus, on both endpoints.
 pub const EMIT_RANK_LABEL: ChallengeLabel = b"kappa_emit_rank";
-
-/// One label per byte of a byte-split
-/// clock, in little-endian order.
-pub const REQUEST_IDX_BYTE_LABELS: [ChallengeLabel; 4] = [
-    b"kappa_request_idx_b0",
-    b"kappa_request_idx_b1",
-    b"kappa_request_idx_b2",
-    b"kappa_request_idx_b3",
-];
 
 /// `eval_row_idx_le_mle` folds at most eight
 /// bytes; a wider clock truncates silently.
@@ -72,10 +60,8 @@ pub enum Source {
     Columns(Vec<usize>),
 
     /// Virtual clock derived from the row index;
-    /// `num_bytes` controls the byte width.
-    /// Required for `Permutation`-kind buses to
-    /// pin per-row uniqueness and prevent char-2
-    /// even-multiplicity parity collapse.
+    /// `num_bytes` controls the byte width. Pins per-row
+    /// uniqueness against char-2 parity collapse.
     RowIndexLeBytes(usize),
 
     /// Constant byte for cross-table domain separation.
@@ -104,8 +90,8 @@ pub enum Source {
 /// # Security
 /// `Permutation` kind cancels in char-2 by multiset parity;
 /// endpoints with even per-key multiplicity collapse silently.
-/// Use `Source::RowIndexLeBytes` in the key to force per-row
-/// uniqueness, or switch to `BusKind::Lookup` for positional binding.
+/// Use `Source::EmitRank` or a row-index source in the key to force
+/// per-row uniqueness, or switch to `BusKind::Lookup` for positional binding.
 #[derive(Clone, Debug)]
 pub struct PermutationCheckSpec {
     pub kind: BusKind,
@@ -171,7 +157,7 @@ impl PermutationCheckSpec {
 
     /// Audited escape hatch. `reason` must start
     /// with `"see "` and cite the load-bearing AIR
-    /// constraint (`see <path>:<line>: <argument>`).
+    /// constraint (`see <path>: <argument>`).
     pub fn with_clock_waiver(mut self, reason: impl Into<String>) -> Self {
         self.clock_waiver = Some(reason.into());
         self
@@ -224,14 +210,8 @@ impl PermutationCheckSpec {
         })
     }
 
-    pub fn has_request_idx_column(&self) -> bool {
-        self.sources
-            .iter()
-            .any(|(src, label)| matches!(src, Source::Column(_)) && is_request_idx_label(label))
-    }
-
-    /// Per-spec only. `validate_bus_set` runs the
-    /// cross-endpoint check that closes label spoofing.
+    /// A Permutation spec needs a row-index or rank source or
+    /// a well-formed waiver, never both; a Lookup spec takes no waiver.
     pub fn validate_clock_stitching(&self, _bus_id: &str) -> errors::Result<()> {
         for (src, _) in &self.sources {
             let width_ok = match src {
@@ -254,9 +234,8 @@ impl PermutationCheckSpec {
         }
 
         let waiver_status = self.clock_waiver.as_deref().map(WaiverStatus::classify);
-        let has_clock_marker = self.has_real_clock_source() || self.has_request_idx_column();
 
-        match (self.kind, has_clock_marker, waiver_status) {
+        match (self.kind, self.has_real_clock_source(), waiver_status) {
             (BusKind::Lookup, _, Some(_)) => Err(errors::Error::Protocol {
                 protocol: "logup_bus",
                 message: "lookup bus carries a clock_waiver; waivers only apply \
@@ -293,9 +272,9 @@ impl PermutationCheckSpec {
             (BusKind::Permutation, false, None) => Err(errors::Error::Protocol {
                 protocol: "logup_bus",
                 message: "permutation bus lacks per-row clock stitching; give the \
-                          Service an EmitRank, RequestIdx or RequestIdxBytes slot, \
-                          or a clock_waiver citing the AIR constraint that forces \
-                          per-row uniqueness",
+                          Service an EmitRank slot, give a raw spec a RowIndexLeBytes \
+                          or RowIndexByte source, or add a clock_waiver citing the AIR \
+                          constraint that forces per-row uniqueness",
             }),
             _ => Ok(()),
         }
@@ -312,15 +291,6 @@ pub enum ServiceSlot {
     /// (cross-table domain separation).
     Const(ChallengeLabel, u128),
 
-    /// Stateless-service clock: the requester folds
-    /// its own row index, the responder commits a
-    /// column carrying the requester's row.
-    RequestIdx { num_bytes: usize },
-
-    /// The same clock split one slot per byte, for
-    /// a responder whose AIR reads the bytes separately.
-    RequestIdxBytes { num_bytes: usize },
-
     /// Ordered-bus clock: the verifier supplies `ω^(base + t)`
     /// on both endpoints, with no committed column on either side.
     EmitRank,
@@ -333,10 +303,6 @@ pub struct Service {
     pub bus_id: &'static str,
     pub kind: BusKind,
     pub slots: Vec<ServiceSlot>,
-
-    /// Per-row uniqueness argued by a body
-    /// constraint rather than a clock slot.
-    pub clock_waiver: Option<&'static str>,
 }
 
 impl Service {
@@ -347,120 +313,48 @@ impl Service {
             .count()
     }
 
-    /// Committed columns a responder must
-    /// supply for the schema's clock slot.
-    pub fn clock_columns(&self) -> usize {
-        self.slots
-            .iter()
-            .map(|s| match s {
-                ServiceSlot::RequestIdx { .. } => 1,
-                ServiceSlot::RequestIdxBytes { num_bytes } => *num_bytes,
-                _ => 0,
-            })
-            .sum()
-    }
-
-    /// Requester endpoint: `values` bind the `Value` slots in order;
-    /// a row-index clock slot folds the requester's own row index.
+    /// Requester endpoint: `values` bind the `Value` slots
+    /// in order; the `EmitRank` slot takes the request side.
     pub fn request(
         &self,
         values: &[usize],
         selector: usize,
     ) -> errors::Result<PermutationCheckSpec> {
-        self.spec(values, None, None, selector)
+        self.spec(values, Side::Request, selector)
     }
 
-    /// Requester spec whose clock replaces the row index's
-    /// top byte with `phase_col`, leaving `8 · (num_bytes - 1)`
-    /// row-index bits. Unchecked: a phase another requester
-    /// on this bus repeats annihilates both emits.
-    pub fn request_phased(
-        &self,
-        values: &[usize],
-        phase_col: usize,
-        selector: usize,
-    ) -> errors::Result<PermutationCheckSpec> {
-        self.spec(values, None, Some(phase_col), selector)
-    }
-
-    /// Responder endpoint: `clock_cols` are the committed
-    /// columns mirroring the requester's clock sources,
-    /// one per `clock_columns()`.
+    /// Responder endpoint: `values` bind the `Value` slots
+    /// in order; the `EmitRank` slot takes the response side.
     pub fn respond(
         &self,
         values: &[usize],
-        clock_cols: &[usize],
         selector: usize,
     ) -> errors::Result<PermutationCheckSpec> {
-        self.spec(values, Some(clock_cols), None, selector)
+        self.spec(values, Side::Response, selector)
     }
 
     fn spec(
         &self,
         values: &[usize],
-        respond_idx: Option<&[usize]>,
-        phase: Option<usize>,
+        side: Side,
         selector: usize,
     ) -> errors::Result<PermutationCheckSpec> {
-        let clock_slots = self
+        let rank_slots = self
             .slots
             .iter()
-            .filter(|s| {
-                matches!(
-                    s,
-                    ServiceSlot::RequestIdx { .. }
-                        | ServiceSlot::RequestIdxBytes { .. }
-                        | ServiceSlot::EmitRank
-                )
-            })
+            .filter(|s| matches!(s, ServiceSlot::EmitRank))
             .count();
 
         let clock_ok = matches!(
-            (self.kind, clock_slots, self.clock_waiver),
-            (BusKind::Permutation, 1, None)
-                | (BusKind::Permutation, 0, Some(_))
-                | (BusKind::Lookup, 0, None)
+            (self.kind, rank_slots),
+            (BusKind::Permutation, 1) | (BusKind::Lookup, 0)
         );
 
         if !clock_ok {
             return Err(errors::Error::Protocol {
                 protocol: "service",
-                message: "Permutation schema needs exactly one clock slot or a \
-                          clock_waiver, never both; Lookup schema must have neither",
-            });
-        }
-
-        if phase.is_some() {
-            let clock_bytes = self.slots.iter().find_map(|s| match s {
-                ServiceSlot::RequestIdxBytes { num_bytes } => Some(*num_bytes),
-                _ => None,
-            });
-
-            match clock_bytes {
-                None => {
-                    return Err(errors::Error::Protocol {
-                        protocol: "service",
-                        message: "a phased clock needs a byte-split clock slot; \
-                                  a whole-word, rank, waived or lookup schema has \
-                                  no top byte to replace",
-                    });
-                }
-                Some(num_bytes) if num_bytes < 2 => {
-                    return Err(errors::Error::Protocol {
-                        protocol: "service",
-                        message: "a phased clock needs at least two clock bytes",
-                    });
-                }
-                Some(_) => {}
-            }
-        }
-
-        if let Some(cols) = respond_idx
-            && cols.len() != self.clock_columns()
-        {
-            return Err(errors::Error::Protocol {
-                protocol: "service",
-                message: "clock column count does not match the schema's clock slot",
+                message: "Permutation schema needs exactly one EmitRank slot; \
+                          Lookup schema must have none",
             });
         }
 
@@ -473,7 +367,6 @@ impl Service {
 
         let mut sources = Vec::with_capacity(self.slots.len());
         let mut next_value = values.iter();
-        let mut next_clock = respond_idx.unwrap_or(&[]).iter();
 
         for slot in &self.slots {
             match slot {
@@ -488,73 +381,15 @@ impl Service {
                 ServiceSlot::Const(label, v) => {
                     sources.push((Source::Const(*v), *label));
                 }
-                ServiceSlot::RequestIdx { num_bytes } => {
-                    if *num_bytes == 0 || *num_bytes > MAX_ROW_INDEX_BYTES {
-                        return Err(errors::Error::Protocol {
-                            protocol: "service",
-                            message: "RequestIdx num_bytes must be 1..=8; a wider \
-                                      clock is silently truncated by the row-index MLE",
-                        });
-                    }
-
-                    let source = match respond_idx {
-                        None => Source::RowIndexLeBytes(*num_bytes),
-                        Some(_) => {
-                            Source::Column(*next_clock.next().ok_or(errors::Error::Protocol {
-                                protocol: "service",
-                                message: "RequestIdx binds exactly one committed \
-                                          clock column on the responder",
-                            })?)
-                        }
-                    };
-
-                    sources.push((source, REQUEST_IDX_LABEL));
-                }
-                ServiceSlot::RequestIdxBytes { num_bytes } => {
-                    if *num_bytes == 0 || *num_bytes > REQUEST_IDX_BYTE_LABELS.len() {
-                        return Err(errors::Error::Protocol {
-                            protocol: "service",
-                            message: "byte-split clock wider than the label family",
-                        });
-                    }
-
-                    for (byte, label) in REQUEST_IDX_BYTE_LABELS.iter().enumerate().take(*num_bytes)
-                    {
-                        let top = byte + 1 == *num_bytes;
-                        let source = match (respond_idx, phase) {
-                            (Some(_), _) => Source::Column(*next_clock.next().ok_or(
-                                errors::Error::Protocol {
-                                    protocol: "service",
-                                    message: "byte-split clock binds one committed \
-                                              column per byte on the responder",
-                                },
-                            )?),
-                            (None, Some(col)) if top => Source::PhaseColumn(col),
-                            (None, _) => Source::RowIndexByte(byte),
-                        };
-
-                        sources.push((source, *label));
-                    }
-                }
                 ServiceSlot::EmitRank => {
-                    let side = match respond_idx {
-                        None => Side::Request,
-                        Some(_) => Side::Response,
-                    };
-
                     sources.push((Source::EmitRank(side), EMIT_RANK_LABEL));
                 }
             }
         }
 
-        let spec = match self.kind {
+        Ok(match self.kind {
             BusKind::Permutation => PermutationCheckSpec::new(sources, Some(selector)),
             BusKind::Lookup => PermutationCheckSpec::new_lookup(sources, Some(selector)),
-        };
-
-        Ok(match self.clock_waiver {
-            Some(reason) => spec.with_clock_waiver(reason),
-            None => spec,
         })
     }
 }
@@ -633,10 +468,8 @@ pub fn validate_fixed_selectors<F>(
     Ok(())
 }
 
-/// Every multi-endpoint `Permutation` `bus_id`
-/// must have at least one endpoint owning a real
-/// `RowIndexLeBytes`/`RowIndexByte`/`EmitRank` clock;
-/// otherwise label-only stitching admits char-2 parity collapse.
+/// Rejects a `bus_id` with a non-graphic byte, or
+/// one whose endpoints mix `Permutation` and `Lookup`.
 pub fn validate_bus_set<'a, I>(endpoints: I) -> errors::Result<()>
 where
     I: IntoIterator<Item = (&'a str, &'a PermutationCheckSpec)>,
@@ -657,7 +490,7 @@ where
         by_bus.entry(bus_id).or_default().push(spec);
     }
 
-    for (bus_id, specs) in &by_bus {
+    for specs in by_bus.values() {
         let any_lookup = specs.iter().any(|s| s.kind == BusKind::Lookup);
         let any_perm = specs.iter().any(|s| s.kind == BusKind::Permutation);
 
@@ -666,28 +499,6 @@ where
                 protocol: "logup_bus",
                 message: "bus_id has mixed BusKind across endpoints; \
                           all endpoints must agree on Permutation or Lookup",
-            });
-        }
-
-        if any_lookup {
-            continue;
-        }
-
-        if specs.len() < 2 {
-            continue;
-        }
-
-        let any_real_clock = specs.iter().any(|s| s.has_real_clock_source());
-        let all_waivered = specs.iter().all(|s| s.clock_waiver.is_some());
-
-        if !any_real_clock && !all_waivered {
-            let _ = bus_id;
-            return Err(errors::Error::Protocol {
-                protocol: "logup_bus",
-                message: "permutation bus_id has no endpoint owning a real \
-                          Source::RowIndexLeBytes/RowIndexByte/EmitRank clock and \
-                          not all endpoints declare a clock_waiver; label-only \
-                          stitching is forgeable and admits char-2 parity collapse",
             });
         }
     }
@@ -749,12 +560,6 @@ where
     acc
 }
 
-/// Whether `label` marks a committed column
-/// as carrying the partner's row index.
-pub fn is_request_idx_label(label: ChallengeLabel) -> bool {
-    label == REQUEST_IDX_LABEL || REQUEST_IDX_BYTE_LABELS.contains(&label)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,33 +573,9 @@ mod tests {
             slots: vec![
                 ServiceSlot::Value(b"k_a"),
                 ServiceSlot::Const(b"k_dom", 7),
-                ServiceSlot::RequestIdx { num_bytes: 4 },
+                ServiceSlot::EmitRank,
                 ServiceSlot::Value(b"k_dir"),
             ],
-            clock_waiver: None,
-        }
-    }
-
-    fn byte_split_service() -> Service {
-        Service {
-            bus_id: "svc",
-            kind: BusKind::Permutation,
-            slots: vec![
-                ServiceSlot::Value(b"k_a"),
-                ServiceSlot::Const(b"k_dom", 7),
-                ServiceSlot::RequestIdxBytes { num_bytes: 4 },
-                ServiceSlot::Value(b"k_dir"),
-            ],
-            clock_waiver: None,
-        }
-    }
-
-    fn ordered_service() -> Service {
-        Service {
-            bus_id: "svc",
-            kind: BusKind::Permutation,
-            slots: vec![ServiceSlot::Value(b"k_a"), ServiceSlot::EmitRank],
-            clock_waiver: None,
         }
     }
 
@@ -896,11 +677,8 @@ mod tests {
             PermutationCheckSpec::new(vec![(Source::Column(0), b"k" as ChallengeLabel)], Some(1));
         let other = clockless.clone();
 
-        assert!(validate_bus_set(vec![("ram_link", &clockless), ("ram_link", &other)]).is_err());
-
-        // A zero-width twin splits this into two
-        // single-endpoint buses that skip the
-        // clock gate; the ASCII check blocks it.
+        // A zero-width twin splits this into
+        // two buses; the ASCII check blocks it.
         assert!(
             validate_bus_set(vec![("ram_link", &clockless), ("ram_link\u{200b}", &other)]).is_err()
         );
@@ -919,27 +697,30 @@ mod tests {
         let svc = test_service();
 
         let req = svc.request(&[10, 11], 12).unwrap();
-        let resp = svc.respond(&[20, 21], &[22], 23).unwrap();
+        let resp = svc.respond(&[20, 21], 23).unwrap();
 
         let req_labels: Vec<_> = req.sources.iter().map(|(_, l)| *l).collect();
         let resp_labels: Vec<_> = resp.sources.iter().map(|(_, l)| *l).collect();
 
         assert_eq!(req_labels, resp_labels);
+        assert_eq!(req_labels[2], EMIT_RANK_LABEL);
 
         assert_eq!(req.sources[0].0, Source::Column(10));
         assert_eq!(req.sources[1].0, Source::Const(7));
-        assert_eq!(req.sources[2].0, Source::RowIndexLeBytes(4));
+        assert_eq!(req.sources[2].0, Source::EmitRank(Side::Request));
         assert_eq!(req.sources[3].0, Source::Column(11));
         assert_eq!(req.selector, Some(12));
 
         assert_eq!(resp.sources[0].0, Source::Column(20));
         assert_eq!(resp.sources[1].0, Source::Const(7));
-        assert_eq!(resp.sources[2].0, Source::Column(22));
+        assert_eq!(resp.sources[2].0, Source::EmitRank(Side::Response));
         assert_eq!(resp.sources[3].0, Source::Column(21));
         assert_eq!(resp.selector, Some(23));
 
         req.validate_clock_stitching("svc").unwrap();
         resp.validate_clock_stitching("svc").unwrap();
+
+        validate_bus_set(vec![("svc", &req), ("svc", &resp)]).unwrap();
     }
 
     #[test]
@@ -947,25 +728,35 @@ mod tests {
         let svc = test_service();
 
         assert!(svc.request(&[10], 12).is_err());
-        assert!(svc.respond(&[20, 21], &[], 23).is_err());
+        assert!(svc.respond(&[20, 21, 22], 23).is_err());
 
         let lookup = Service {
             bus_id: "rom",
             kind: BusKind::Lookup,
-            slots: vec![ServiceSlot::Value(b"k_a")],
-            clock_waiver: None,
+            slots: vec![ServiceSlot::Value(b"k_a"), ServiceSlot::EmitRank],
         };
 
-        assert!(lookup.respond(&[3], &[9], 4).is_err());
+        assert!(lookup.respond(&[3], 4).is_err());
 
         let clockless = Service {
             bus_id: "bad",
             kind: BusKind::Permutation,
             slots: vec![ServiceSlot::Value(b"k_a")],
-            clock_waiver: None,
         };
 
         assert!(clockless.request(&[1], 2).is_err());
+
+        let two_ranks = Service {
+            bus_id: "bad",
+            kind: BusKind::Permutation,
+            slots: vec![
+                ServiceSlot::EmitRank,
+                ServiceSlot::Value(b"k_a"),
+                ServiceSlot::EmitRank,
+            ],
+        };
+
+        assert!(two_ranks.request(&[1], 2).is_err());
     }
 
     #[test]
@@ -974,11 +765,10 @@ mod tests {
             bus_id: "rom",
             kind: BusKind::Lookup,
             slots: vec![ServiceSlot::Value(b"k_a")],
-            clock_waiver: None,
         };
 
         let req = svc.request(&[1], 2).unwrap();
-        let resp = svc.respond(&[3], &[], 4).unwrap();
+        let resp = svc.respond(&[3], 4).unwrap();
 
         assert_eq!(req.kind, BusKind::Lookup);
         assert_eq!(resp.kind, BusKind::Lookup);
@@ -986,76 +776,35 @@ mod tests {
     }
 
     #[test]
-    fn request_phased_replaces_only_top_clock_byte() {
-        let svc = byte_split_service();
+    fn column_clock_needs_waiver_whatever_its_label() {
+        let spoofed = PermutationCheckSpec::new(
+            vec![
+                (Source::Column(0), b"k_a" as ChallengeLabel),
+                (Source::Column(1), EMIT_RANK_LABEL),
+            ],
+            Some(2),
+        );
 
-        let phased = svc.request_phased(&[10, 11], 60, 12).unwrap();
-        let plain = svc.request(&[10, 11], 12).unwrap();
+        assert!(spoofed.validate_clock_stitching("svc").is_err());
 
-        let labels = |spec: &PermutationCheckSpec| -> Vec<ChallengeLabel> {
-            spec.sources.iter().map(|(_, l)| *l).collect()
-        };
-
-        assert_eq!(labels(&phased), labels(&plain));
-
-        assert_eq!(phased.sources[2].0, Source::RowIndexByte(0));
-        assert_eq!(phased.sources[3].0, Source::RowIndexByte(1));
-        assert_eq!(phased.sources[4].0, Source::RowIndexByte(2));
-        assert_eq!(phased.sources[5].0, Source::PhaseColumn(60));
-        assert_eq!(plain.sources[5].0, Source::RowIndexByte(3));
-
-        assert!(phased.has_real_clock_source());
-
-        phased.validate_clock_stitching("svc").unwrap();
-
-        let responder = svc.respond(&[20, 21], &[40, 41, 42, 43], 23).unwrap();
-
-        validate_bus_set(vec![("svc", &phased), ("svc", &responder)]).unwrap();
-    }
-
-    #[test]
-    fn request_phased_rejects_whole_word_clock() {
-        assert!(test_service().request_phased(&[10, 11], 60, 12).is_err());
-    }
-
-    #[test]
-    fn request_phased_rejects_clockless_schema() {
-        let waived = Service {
-            bus_id: "svc",
-            kind: BusKind::Permutation,
-            slots: vec![ServiceSlot::Value(b"k_a")],
-            clock_waiver: Some("see permutation.rs: a body constraint forces per-row uniqueness"),
-        };
-
-        assert!(waived.request_phased(&[10], 60, 12).is_err());
-        assert!(waived.request(&[10], 12).is_ok());
-
-        let lookup = Service {
-            bus_id: "svc",
-            kind: BusKind::Lookup,
-            slots: vec![ServiceSlot::Value(b"k_a")],
-            clock_waiver: None,
-        };
-
-        assert!(lookup.request_phased(&[10], 60, 12).is_err());
-        assert!(lookup.request(&[10], 12).is_ok());
-    }
-
-    #[test]
-    fn request_phased_rejects_one_byte_clock() {
-        let svc = Service {
-            slots: vec![ServiceSlot::RequestIdxBytes { num_bytes: 1 }],
-            ..byte_split_service()
-        };
-
-        assert!(svc.request_phased(&[], 60, 12).is_err());
-        assert!(svc.request(&[], 12).is_ok());
+        spoofed
+            .with_clock_waiver(
+                "see permutation/mod.rs: a body constraint forces per-row uniqueness",
+            )
+            .validate_clock_stitching("svc")
+            .unwrap();
     }
 
     #[test]
     fn witness_clock_phase_is_rejected() {
-        let svc = byte_split_service();
-        let phased = svc.request_phased(&[10, 11], 60, 12).unwrap();
+        let phased = PermutationCheckSpec::new(
+            vec![
+                (Source::Column(10), b"k_a" as ChallengeLabel),
+                (Source::RowIndexByte(0), b"k_clk_b0" as ChallengeLabel),
+                (Source::PhaseColumn(60), b"k_clk_b1" as ChallengeLabel),
+            ],
+            Some(12),
+        );
         let specs = vec![(String::from("svc"), phased)];
 
         let selector_only = vec![FixedColumn::<Block128> {
@@ -1083,38 +832,5 @@ mod tests {
         substituted[1].shape = FixedShape::LastRow;
 
         assert!(validate_fixed_selectors(&specs, &substituted).is_err());
-    }
-
-    #[test]
-    fn emit_rank_slot_takes_no_clock_column() {
-        let svc = ordered_service();
-
-        assert_eq!(svc.clock_columns(), 0);
-
-        let req = svc.request(&[10], 12).unwrap();
-        let resp = svc.respond(&[20], &[], 23).unwrap();
-
-        assert_eq!(
-            req.sources,
-            vec![
-                (Source::Column(10), b"k_a" as ChallengeLabel),
-                (Source::EmitRank(Side::Request), EMIT_RANK_LABEL),
-            ]
-        );
-        assert_eq!(
-            resp.sources,
-            vec![
-                (Source::Column(20), b"k_a" as ChallengeLabel),
-                (Source::EmitRank(Side::Response), EMIT_RANK_LABEL),
-            ]
-        );
-
-        req.validate_clock_stitching("svc").unwrap();
-        resp.validate_clock_stitching("svc").unwrap();
-
-        validate_bus_set(vec![("svc", &req), ("svc", &resp)]).unwrap();
-
-        assert!(svc.respond(&[20], &[22], 23).is_err());
-        assert!(svc.request_phased(&[10], 60, 12).is_err());
     }
 }

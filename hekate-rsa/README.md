@@ -20,7 +20,7 @@ constant limbs are pinned.
 ```
 Apple M3 Max, ZK, best of three runs (hekate/examples/rsa_pkcs1.rs):
   200-byte message, 4 blocks at 2 rounds/row, host 2^9, SHA chiplet 2^9, modexp chiplet 2^10:
-  335 ms prove, 29.7 ms verify, 14,532 KiB proof, 503 MiB
+  355 ms prove, 31.2 ms verify, 14,585 KiB proof, 503 MiB
 ```
 
 ## Examples

@@ -60,7 +60,7 @@ pub struct Sha256Layout {
     pub s_input: usize,
     pub s_mid: usize,
     pub s_last: usize,
-    pub request_idx: usize,
+
     columns: Vec<ColumnType>,
 }
 
@@ -87,7 +87,6 @@ pub struct Sha256Cols {
     pub s_input: Col,
     pub s_mid: Col,
     pub s_last: Col,
-    pub request_idx: Col,
 }
 
 struct RoundCols<'a, F: TowerField> {
@@ -142,7 +141,6 @@ impl Sha256Layout {
         let s_input = alloc(ColumnType::Bit, 1);
         let s_mid = alloc(ColumnType::Bit, 1);
         let s_last = alloc(ColumnType::Bit, 1);
-        let request_idx = alloc(ColumnType::B32, 1);
 
         Ok(Self {
             rounds_per_row,
@@ -159,7 +157,6 @@ impl Sha256Layout {
             s_input,
             s_mid,
             s_last,
-            request_idx,
             columns,
         })
     }
@@ -192,7 +189,7 @@ pub struct Sha256Chiplet<F: TowerField> {
 impl<F: TowerField> Sha256Chiplet<F> {
     /// Both endpoints derive from this schema:
     /// the input state, the message block,
-    /// the output state, the request-index clock.
+    /// the output state, then the emit rank.
     pub fn service() -> Service {
         let mut slots = Vec::with_capacity(STATE_WORDS + BLOCK_WORDS + STATE_WORDS + 1);
 
@@ -204,13 +201,12 @@ impl<F: TowerField> Sha256Chiplet<F> {
             slots.push(ServiceSlot::Value(label));
         }
 
-        slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
+        slots.push(ServiceSlot::EmitRank);
 
         Service {
             bus_id: BUS_ID,
             kind: BusKind::Permutation,
             slots,
-            clock_waiver: None,
         }
     }
 }
@@ -258,8 +254,7 @@ where
             .map(Col::index)
             .collect();
 
-        let spec =
-            Self::service().respond(&values, &[cols.request_idx.index()], cols.s_input.index())?;
+        let spec = Self::service().respond(&values, cols.s_input.index())?;
 
         cx.bus(BUS_ID, spec);
 
@@ -361,7 +356,6 @@ fn declare<F: TowerField + HardwareField>(
     let s_input = cx.column(ColumnType::Bit);
     let s_mid = cx.column(ColumnType::Bit);
     let s_last = cx.column(ColumnType::Bit);
-    let request_idx = cx.column(ColumnType::B32);
 
     Sha256Cols {
         state,
@@ -383,7 +377,6 @@ fn declare<F: TowerField + HardwareField>(
         s_input,
         s_mid,
         s_last,
-        request_idx,
     }
 }
 
@@ -636,7 +629,7 @@ fn small_sigma1<'a, F: TowerField>(cs: &'a ConstraintSystem<F>, w: &Word<'a, F>)
 mod tests {
     use super::*;
     use hekate_math::Block128;
-    use hekate_program::permutation::REQUEST_IDX_LABEL;
+    use hekate_program::permutation::EMIT_RANK_LABEL;
     use hekate_program::predicate::{ClaimLayout, compile};
 
     type F = Block128;
@@ -652,7 +645,7 @@ mod tests {
             let layout = Sha256Layout::new(r).unwrap();
 
             assert_eq!(layout.rows_per_block(), 64 / r);
-            assert_eq!(layout.columns().len(), 36 + 16 * r);
+            assert_eq!(layout.columns().len(), 35 + 16 * r);
         }
     }
 
@@ -676,7 +669,7 @@ mod tests {
         assert_eq!(spec.len(), 1);
         assert_eq!(spec[0].0, BUS_ID);
         assert_eq!(spec[0].1.num_sources(), 33);
-        assert_eq!(spec[0].1.sources[32].1, REQUEST_IDX_LABEL);
+        assert_eq!(spec[0].1.sources[32].1, EMIT_RANK_LABEL);
     }
 
     #[test]

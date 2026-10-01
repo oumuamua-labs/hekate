@@ -302,6 +302,7 @@ impl<F: TowerField + HardwareField> Circuit<F> {
         };
 
         self.physical.extend(core::iter::repeat_n(storage, count));
+
         self.num_virtual += bits.count;
 
         let expander = core::mem::take(&mut self.expander);
@@ -754,9 +755,7 @@ fn validate_source_range(source: &Source, width: usize) -> errors::Result<()> {
 mod tests {
     use super::*;
     use crate::digest::program_id;
-    use crate::permutation::{
-        BusKind, EMIT_RANK_LABEL, REQUEST_IDX_LABEL, ServiceSlot, Side, Source,
-    };
+    use crate::permutation::{BusKind, EMIT_RANK_LABEL, ServiceSlot, Side, Source};
     use alloc::string::ToString;
     use alloc::vec;
     use hekate_math::Block128;
@@ -789,7 +788,7 @@ mod tests {
                 PermutationCheckSpec::new(
                     vec![
                         (Source::Column(0), b"k_v"),
-                        (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                        (Source::RowIndexLeBytes(4), b"k_clk"),
                     ],
                     Some(1),
                 ),
@@ -851,7 +850,7 @@ mod tests {
         PermutationCheckSpec::new(
             vec![
                 (Source::Column(key_col), b"k_v"),
-                (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                (Source::RowIndexLeBytes(4), b"k_clk"),
             ],
             Some(selector),
         )
@@ -862,7 +861,6 @@ mod tests {
             bus_id: "svc",
             kind: BusKind::Permutation,
             slots: vec![ServiceSlot::Value(b"k_v"), ServiceSlot::EmitRank],
-            clock_waiver: None,
         }
     }
 
@@ -1259,7 +1257,7 @@ mod tests {
     fn compile_balances_ordered_bus_sides() {
         let responder = |calls| Server {
             calls,
-            spec: ordered_service().respond(&[0], &[], 1).unwrap(),
+            spec: ordered_service().respond(&[0], 1).unwrap(),
         };
 
         ordered_host(responder(2)).unwrap();
@@ -1273,12 +1271,10 @@ mod tests {
     #[test]
     fn compile_rejects_witness_clock_on_ordered_bus() {
         let spec = PermutationCheckSpec::new(
-            vec![
-                (Source::Column(0), b"k_v"),
-                (Source::Column(2), REQUEST_IDX_LABEL),
-            ],
+            vec![(Source::Column(0), b"k_v"), (Source::Column(2), b"k_clk")],
             Some(1),
-        );
+        )
+        .with_clock_waiver("see circuit.rs: waived to reach the ordered-bus check");
 
         assert!(rejected_by(
             ordered_host(Server { calls: 2, spec }),

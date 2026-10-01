@@ -290,16 +290,12 @@ define_columns! {
 }
 
 /// Both endpoints derive from this schema:
-/// one commitment word and the request-index clock.
+/// one commitment word, then the emit rank.
 pub fn data_service() -> Service {
     Service {
         bus_id: MLDSA_DATA_BUS_ID,
         kind: BusKind::Permutation,
-        slots: vec![
-            ServiceSlot::Value(b"kappa_mldsa_d0"),
-            ServiceSlot::RequestIdx { num_bytes: 4 },
-        ],
-        clock_waiver: None,
+        slots: vec![ServiceSlot::Value(b"kappa_mldsa_d0"), ServiceSlot::EmitRank],
     }
 }
 

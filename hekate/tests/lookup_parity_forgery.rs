@@ -12,7 +12,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::{EMIT_RANK_LABEL, PermutationCheckSpec, Side, Source};
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
@@ -92,21 +92,20 @@ impl Program<F> for LookupForgeryProgram {
     }
 }
 
-// =====================
-// REQUEST_IDX endpoints
-// =====================
+// ==================
+// EmitRank endpoints
+// ==================
 
 const RDR_KEY: usize = 0;
 const RDR_SELECTOR: usize = 1;
 
 const TBL_KEY: usize = 0;
-const TBL_REQUEST_IDX: usize = 1;
-const TBL_SELECTOR: usize = 2;
+const TBL_SELECTOR: usize = 1;
 
 #[derive(Clone)]
-struct ReqIdxReader;
+struct RankReader;
 
-impl Air<F> for ReqIdxReader {
+impl Air<F> for RankReader {
     fn num_columns(&self) -> usize {
         2
     }
@@ -122,7 +121,7 @@ impl Air<F> for ReqIdxReader {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(RDR_KEY), b"kappa_key" as &[u8]),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::EmitRank(Side::Request), EMIT_RANK_LABEL),
                 ],
                 Some(RDR_SELECTOR),
             ),
@@ -139,16 +138,16 @@ impl Air<F> for ReqIdxReader {
 }
 
 #[derive(Clone)]
-struct ReqIdxTable;
+struct RankResponder;
 
-impl Air<F> for ReqIdxTable {
+impl Air<F> for RankResponder {
     fn num_columns(&self) -> usize {
-        3
+        2
     }
 
     fn column_layout(&self) -> &[ColumnType] {
         static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
-        LAYOUT.get_or_init(|| vec![ColumnType::B32, ColumnType::B32, ColumnType::Bit])
+        LAYOUT.get_or_init(|| vec![ColumnType::B32, ColumnType::Bit])
     }
 
     fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
@@ -157,7 +156,7 @@ impl Air<F> for ReqIdxTable {
             PermutationCheckSpec::new(
                 vec![
                     (Source::Column(TBL_KEY), b"kappa_key" as &[u8]),
-                    (Source::Column(TBL_REQUEST_IDX), REQUEST_IDX_LABEL),
+                    (Source::EmitRank(Side::Response), EMIT_RANK_LABEL),
                 ],
                 Some(TBL_SELECTOR),
             ),
@@ -174,33 +173,33 @@ impl Air<F> for ReqIdxTable {
 }
 
 #[derive(Clone)]
-struct ReqIdxForgeryProgram;
+struct RankForgeryProgram;
 
-impl Air<F> for ReqIdxForgeryProgram {
+impl Air<F> for RankForgeryProgram {
     fn num_columns(&self) -> usize {
-        ReqIdxReader.num_columns()
+        RankReader.num_columns()
     }
 
     fn column_layout(&self) -> &[ColumnType] {
-        ReqIdxReader.column_layout()
+        RankReader.column_layout()
     }
 
     fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        ReqIdxReader.permutation_checks()
+        RankReader.permutation_checks()
     }
 
     fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
-        Air::<F>::fixed_columns(&ReqIdxReader)
+        Air::<F>::fixed_columns(&RankReader)
     }
 
     fn constraint_ast(&self) -> ConstraintAst<F> {
-        ReqIdxReader.constraint_ast()
+        RankReader.constraint_ast()
     }
 }
 
-impl Program<F> for ReqIdxForgeryProgram {
+impl Program<F> for RankForgeryProgram {
     fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
-        Ok(vec![ChipletDef::from_air(&ReqIdxTable)?])
+        Ok(vec![ChipletDef::from_air(&RankResponder)?])
     }
 }
 
@@ -236,16 +235,14 @@ fn build_reader_trace(rows: &[(Block32, Bit)], num_rows: usize) -> ColumnTrace {
     tb.build()
 }
 
-fn build_table_trace(rows: &[(Block32, u32, Bit)], num_rows: usize) -> ColumnTrace {
+fn build_responder_trace(rows: &[(Block32, Bit)], num_rows: usize) -> ColumnTrace {
     let num_vars = num_rows.trailing_zeros() as usize;
-    let layout = vec![ColumnType::B32, ColumnType::B32, ColumnType::Bit];
+    let layout = vec![ColumnType::B32, ColumnType::Bit];
 
     let mut tb = TraceBuilder::new(&layout, num_vars).unwrap();
 
-    for (i, (key, req_idx, sel)) in rows.iter().enumerate() {
+    for (i, (key, sel)) in rows.iter().enumerate() {
         tb.set_b32(TBL_KEY, i, *key).unwrap();
-        tb.set_b32(TBL_REQUEST_IDX, i, Block32::from(*req_idx))
-            .unwrap();
         tb.set_bit(TBL_SELECTOR, i, *sel).unwrap();
     }
 
@@ -297,14 +294,14 @@ fn run_lookup(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
     .unwrap_or(false)
 }
 
-fn run_req_idx(reader: &[(Block32, Bit)], table: &[(Block32, u32, Bit)]) -> bool {
+fn run_rank(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
     let num_rows = 4;
     let seed = [0xAAu8; 32];
 
-    let program = ReqIdxForgeryProgram;
+    let program = RankForgeryProgram;
 
     let reader_trace = build_reader_trace(reader, num_rows);
-    let table_trace = build_table_trace(table, num_rows);
+    let table_trace = build_responder_trace(table, num_rows);
 
     let witness = ProgramWitness::new(reader_trace).with_chiplets(vec![table_trace]);
     let instance = ProgramInstance::new(num_rows, vec![]);
@@ -360,12 +357,12 @@ fn honest_lookup_table() -> Vec<(Block32, Bit)> {
     ]
 }
 
-fn honest_req_idx_table() -> Vec<(Block32, u32, Bit)> {
+fn honest_rank_table() -> Vec<(Block32, Bit)> {
     vec![
-        (Block32::from(0xA1A1A1A1u32), 0, Bit::ONE),
-        (Block32::from(0xB2B2B2B2u32), 1, Bit::ONE),
-        (Block32::from(0xC3C3C3C3u32), 2, Bit::ONE),
-        (Block32::from(0xD4D4D4D4u32), 3, Bit::ONE),
+        (Block32::from(0xA1A1A1A1u32), Bit::ONE),
+        (Block32::from(0xB2B2B2B2u32), Bit::ONE),
+        (Block32::from(0xC3C3C3C3u32), Bit::ONE),
+        (Block32::from(0xD4D4D4D4u32), Bit::ONE),
     ]
 }
 
@@ -387,12 +384,12 @@ fn cancelling_lookup_table() -> Vec<(Block32, Bit)> {
     ]
 }
 
-fn cancelling_req_idx_table() -> Vec<(Block32, u32, Bit)> {
+fn cancelling_rank_table() -> Vec<(Block32, Bit)> {
     vec![
-        (Block32::from(0xA1A1A1A1u32), 0, Bit::ONE),
-        (Block32::from(0xB2B2B2B2u32), 1, Bit::ONE),
-        (Block32::from(0xFEEDFACEu32), 2, Bit::ONE),
-        (Block32::from(0xFEEDFACEu32), 3, Bit::ONE),
+        (Block32::from(0xA1A1A1A1u32), Bit::ONE),
+        (Block32::from(0xB2B2B2B2u32), Bit::ONE),
+        (Block32::from(0xFEEDFACEu32), Bit::ONE),
+        (Block32::from(0xFEEDFACEu32), Bit::ONE),
     ]
 }
 
@@ -401,14 +398,14 @@ fn cancelling_req_idx_table() -> Vec<(Block32, u32, Bit)> {
 // =====
 
 #[test]
-fn permutation_with_request_idx_rejects_forged_pair() {
-    let accepted = run_req_idx(&forged_reader(), &cancelling_req_idx_table());
+fn permutation_with_emit_rank_rejects_forged_pair() {
+    let accepted = run_rank(&forged_reader(), &cancelling_rank_table());
     assert!(!accepted);
 }
 
 #[test]
-fn permutation_with_request_idx_accepts_honest_match() {
-    let accepted = run_req_idx(&matched_reader(), &honest_req_idx_table());
+fn permutation_with_emit_rank_accepts_honest_match() {
+    let accepted = run_rank(&matched_reader(), &honest_rank_table());
     assert!(accepted);
 }
 

@@ -265,7 +265,6 @@ fn generate_workload(num_ops: usize) -> (Vec<Instruction>, Vec<IntArithmeticOp>,
             op: opcode,
             a: val_a,
             b: b_val,
-            request_idx: i as u32,
         });
 
         audit_data.push(result);
@@ -337,13 +336,7 @@ fn generate_cpu_trace(
         )?;
         tb.set_bit(CPU_FETCH + CpuFetchColumns::SELECTOR, r, Bit::ONE)?;
 
-        let IntArithmeticOp::U32 {
-            op,
-            a,
-            b,
-            request_idx: _,
-        } = ariths[i]
-        else {
+        let IntArithmeticOp::U32 { op, a, b } = ariths[i] else {
             unreachable!("composite_chiplets is u32-only");
         };
 

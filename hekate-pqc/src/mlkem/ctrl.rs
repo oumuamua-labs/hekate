@@ -17,11 +17,10 @@ use alloc::vec::Vec;
 use hekate_core::trace::ColumnType;
 use hekate_gadgets::RamChiplet;
 use hekate_keccak::KeccakChiplet;
-use hekate_keccak::{KECCAK_DIRECTION_LABEL, KECCAK_LANE_LABELS};
 use hekate_math::TowerField;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
-use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, define_columns, fix};
 
 define_columns! {
@@ -199,11 +198,6 @@ define_columns! {
         SS_MUX_SEL: Bit,
         SS_OUT_SEL: Bit,
 
-        // Partner-side row index for the
-        // ml_kem_data and ml_kem_ss buses;
-        // selectors are phase-disjoint.
-        REQUEST_IDX_OUT: B32,
-
         // Control flow
         S_ACTIVE: Bit,
 
@@ -257,30 +251,20 @@ impl MlKemCtrlChiplet {
     /// the main trace connects to.
     pub fn main_linking_spec() -> PermutationCheckSpec {
         crate::mlkem::data_service()
-            .respond(
-                &[MlKemCtrlColumns::IO_DATA],
-                &[MlKemCtrlColumns::REQUEST_IDX_OUT],
-                MlKemCtrlColumns::IO_SELECTOR,
-            )
+            .respond(&[MlKemCtrlColumns::IO_DATA], MlKemCtrlColumns::IO_SELECTOR)
             .expect("data_service slots match the responder columns")
     }
 
     /// Linking spec for the
     /// internal "keccak_link" bus.
     fn keccak_linking_spec() -> PermutationCheckSpec {
-        let mut sources = Vec::with_capacity(27);
+        let lanes: Vec<usize> = (0..25)
+            .map(|i| MlKemCtrlColumns::KECCAK_LANES + i)
+            .collect();
 
-        for (i, label) in KECCAK_LANE_LABELS.iter().enumerate() {
-            sources.push((Source::Column(MlKemCtrlColumns::KECCAK_LANES + i), *label));
-        }
-
-        sources.push((Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL));
-        sources.push((
-            Source::Column(MlKemCtrlColumns::KEC_IS_OUTPUT),
-            KECCAK_DIRECTION_LABEL,
-        ));
-
-        PermutationCheckSpec::new(sources, Some(MlKemCtrlColumns::KECCAK_SELECTOR))
+        KeccakChiplet::service()
+            .request(&lanes, MlKemCtrlColumns::KECCAK_SELECTOR)
+            .expect("service slots match the requester columns")
     }
 
     /// Linking spec for the
@@ -328,28 +312,17 @@ impl MlKemCtrlChiplet {
 
     /// Linking spec for "basemul" bus
     fn basemul_linking_spec() -> PermutationCheckSpec {
-        PermutationCheckSpec::new(
-            vec![
-                (
-                    Source::Column(MlKemCtrlColumns::BM_A),
-                    b"kappa_bm_a" as &[u8],
-                ),
-                (
-                    Source::Column(MlKemCtrlColumns::BM_B),
-                    b"kappa_bm_b" as &[u8],
-                ),
-                (
-                    Source::Column(MlKemCtrlColumns::BM_C),
-                    b"kappa_bm_c" as &[u8],
-                ),
-                (
-                    Source::Column(MlKemCtrlColumns::BM_IDX),
-                    b"kappa_bm_idx" as &[u8],
-                ),
-                (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
-            ],
-            Some(MlKemCtrlColumns::BM_SELECTOR),
-        )
+        BasemulChiplet::service()
+            .request(
+                &[
+                    MlKemCtrlColumns::BM_A,
+                    MlKemCtrlColumns::BM_B,
+                    MlKemCtrlColumns::BM_C,
+                    MlKemCtrlColumns::BM_IDX,
+                ],
+                MlKemCtrlColumns::BM_SELECTOR,
+            )
+            .expect("service slots match the requester columns")
     }
 
     /// Linking spec for "ram_link" bus.
@@ -524,11 +497,7 @@ impl MlKemCtrlChiplet {
             .collect();
 
         crate::mlkem::ss_service()
-            .respond(
-                &values,
-                &[MlKemCtrlColumns::REQUEST_IDX_OUT],
-                MlKemCtrlColumns::SS_OUT_SEL,
-            )
+            .respond(&values, MlKemCtrlColumns::SS_OUT_SEL)
             .expect("ss_service slots match the responder columns")
     }
 }
@@ -583,6 +552,7 @@ impl<F: TowerField> Air<F> for MlKemCtrlChiplet {
         vec![
             fix(MlKemCtrlColumns::IO_SELECTOR, shapes.io),
             fix(MlKemCtrlColumns::KECCAK_SELECTOR, shapes.keccak),
+            fix(MlKemCtrlColumns::KEC_IS_OUTPUT, shapes.kec_is_output),
             fix(MlKemCtrlColumns::KEC_INPUT_REF_SEL, shapes.kec_input_ref),
             fix(MlKemCtrlColumns::KEC_BIND_LO_SEL, shapes.kec_bind_lo),
             fix(MlKemCtrlColumns::BM_SELECTOR, shapes.basemul),
@@ -1444,7 +1414,7 @@ mod tests {
 
     #[test]
     fn ctrl_chiplet_column_count() {
-        assert_eq!(MlKemCtrlColumns::NUM_COLUMNS, 176);
+        assert_eq!(MlKemCtrlColumns::NUM_COLUMNS, 175);
     }
 
     #[test]

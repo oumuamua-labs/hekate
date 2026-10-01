@@ -72,12 +72,7 @@ fn generate_all_ops_workload(num_ops: usize) -> Vec<IntArithmeticOp> {
             b
         };
 
-        ops.push(IntArithmeticOp::U32 {
-            op,
-            a,
-            b,
-            request_idx: i as u32,
-        });
+        ops.push(IntArithmeticOp::U32 { op, a, b });
     }
 
     ops

@@ -31,7 +31,7 @@ use hekate_program::constraint::{
 };
 use hekate_program::define_columns;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, ServiceSlot, Source};
+use hekate_program::permutation::{BusKind, PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_sdk::{
     BundleProgram, DeserializedBundle, deserialize_bundle, deserialize_proof, serialize_bundle,
@@ -288,7 +288,6 @@ fn many_chiplets_traces(
             op: ArithmeticOpcode::ADD,
             a: val_a,
             b: val_b,
-            request_idx: i as u32,
         });
 
         let result = val_a.wrapping_add(val_b);
@@ -1441,19 +1440,16 @@ impl Air<F> for PhasedRtProgram {
     }
 
     fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        let service = Service {
-            bus_id: "rt_phased_bus",
-            kind: BusKind::Permutation,
-            slots: vec![
-                ServiceSlot::Value(b"k_key"),
-                ServiceSlot::RequestIdxBytes { num_bytes: 4 },
+        let spec = PermutationCheckSpec::new(
+            vec![
+                (Source::Column(PhasedRtCols::KEY), b"k_key"),
+                (Source::RowIndexByte(0), b"k_clk_b0"),
+                (Source::RowIndexByte(1), b"k_clk_b1"),
+                (Source::RowIndexByte(2), b"k_clk_b2"),
+                (Source::PhaseColumn(PhasedRtCols::PHASE), b"k_clk_b3"),
             ],
-            clock_waiver: None,
-        };
-
-        let spec = service
-            .request_phased(&[PhasedRtCols::KEY], PhasedRtCols::PHASE, PhasedRtCols::SEL)
-            .unwrap();
+            Some(PhasedRtCols::SEL),
+        );
 
         vec![("rt_phased_bus".into(), spec)]
     }

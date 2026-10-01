@@ -53,12 +53,6 @@ define_columns! {
         W_VALUE: B32,
         SELECTOR: Bit,
         MULONLY_SELECTOR: Bit,
-
-        // Partner ctrl row index for
-        // the twiddle_w_binding bus,
-        // gated by MULONLY_SELECTOR.
-        REQUEST_IDX_TR: B32,
-
         LAYER_INV: B32,
     }
 }
@@ -101,7 +95,6 @@ impl TwiddleRomChiplet {
                 ServiceSlot::Value(b"kappa_tw_bfly"),
                 ServiceSlot::Value(b"kappa_tw_w"),
             ],
-            clock_waiver: None,
         }
     }
 
@@ -113,9 +106,8 @@ impl TwiddleRomChiplet {
             slots: vec![
                 ServiceSlot::Value(b"kappa_wb_bfly"),
                 ServiceSlot::Value(b"kappa_wb_w"),
-                ServiceSlot::RequestIdx { num_bytes: 4 },
+                ServiceSlot::EmitRank,
             ],
-            clock_waiver: None,
         }
     }
 
@@ -129,7 +121,6 @@ impl TwiddleRomChiplet {
                     TwiddleRomColumns::BUTTERFLY_IDX,
                     TwiddleRomColumns::W_VALUE,
                 ],
-                &[],
                 TwiddleRomColumns::SELECTOR,
             )
             .expect("service slots match the responder columns")
@@ -142,7 +133,6 @@ impl TwiddleRomChiplet {
         Self::w_binding_service()
             .respond(
                 &[TwiddleRomColumns::BUTTERFLY_IDX, TwiddleRomColumns::W_VALUE],
-                &[TwiddleRomColumns::REQUEST_IDX_TR],
                 TwiddleRomColumns::MULONLY_SELECTOR,
             )
             .expect("service slots match the responder columns")
@@ -234,10 +224,6 @@ pub struct TwiddleEntry {
     pub w: u32,
     pub is_mulonly: bool,
     pub active: bool,
-
-    /// Ctrl row index of the
-    /// partnered W-bind emit.
-    pub request_idx_tr: u32,
 }
 
 /// Compute the twiddle factor table for
@@ -286,7 +272,6 @@ pub fn compute_twiddle_table(modulus: u32, root: u32) -> Vec<TwiddleEntry> {
                     w: powers[exp],
                     is_mulonly: false,
                     active: true,
-                    request_idx_tr: 0,
                 });
             }
         }
@@ -330,11 +315,6 @@ pub fn generate_twiddle_rom_trace(
 
         if entry.is_mulonly {
             tb.set_bit(TwiddleRomColumns::MULONLY_SELECTOR, i, Bit::ONE)?;
-            tb.set_b32(
-                TwiddleRomColumns::REQUEST_IDX_TR,
-                i,
-                Block32::from(entry.request_idx_tr),
-            )?;
             tb.set_b32(TwiddleRomColumns::LAYER_INV, i, Block32::ZERO)?;
         } else {
             assert_ne!(
@@ -428,7 +408,7 @@ mod tests {
 
     #[test]
     fn twiddle_rom_column_count() {
-        assert_eq!(TwiddleRomColumns::NUM_COLUMNS, 7);
+        assert_eq!(TwiddleRomColumns::NUM_COLUMNS, 6);
     }
 
     #[test]
@@ -526,7 +506,6 @@ mod tests {
                 w: 1,
                 is_mulonly: false,
                 active: true,
-                request_idx_tr: 0,
             },
             TwiddleEntry {
                 layer: BASEMUL_LAYER_MARKER,
@@ -534,7 +513,6 @@ mod tests {
                 w: 17,
                 is_mulonly: true,
                 active: true,
-                request_idx_tr: 0,
             },
         ];
 

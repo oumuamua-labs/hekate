@@ -115,11 +115,10 @@ fn cpu_calls(st: &Statement) -> Vec<Sha256Call> {
     let mut calls = Vec::with_capacity(st.blocks.len());
     let mut h = IV;
 
-    for (b, block) in st.blocks.iter().enumerate() {
+    for block in &st.blocks {
         let call = Sha256Call {
             h_in: h,
             block: *block,
-            request_idx: b as u32,
         };
 
         h = call.h_out();
@@ -351,6 +350,96 @@ fn value_pin_verdict(program: &CircuitProgram<F>, trace: ColumnTrace) -> Result<
         .map_err(|e| format!("verifier: {e:?}"))
 }
 
+fn two_call_verdicts(
+    requested: [usize; 2],
+    outputs_of: [usize; 2],
+    block_order: [usize; 2],
+) -> [bool; 2] {
+    let calls = [b"abc".as_slice(), b"abd"].map(|msg| Sha256Call {
+        h_in: IV,
+        block: pad_message(msg)[0],
+    });
+
+    let sha = Sha256Chiplet::<F>::new(16, 2, 8).unwrap();
+
+    let mut cx = Circuit::<F>::new("Sha256TwoCalls", 2).unwrap();
+
+    let block = CpuSha256Block::declare(&mut cx, 0);
+
+    let active = cx.column(ColumnType::Bit);
+
+    block.connect(&mut cx, active).unwrap();
+
+    cx.fix(
+        active,
+        FixedShape::Cadence {
+            stride: 1,
+            count: 2,
+            origin: 0,
+            values: vec![F::ONE],
+        },
+    );
+    cx.attach(sha.def().unwrap());
+
+    let program = cx.compile().unwrap();
+
+    let mut layout = CpuSha256Block::layout().to_vec();
+    layout.push(ColumnType::Bit);
+
+    let mut tb = TraceBuilder::new(&layout, 1).unwrap();
+
+    for (row, &k) in requested.iter().enumerate() {
+        let call = &calls[k];
+        let state_out = calls[outputs_of[row]].state_out();
+        let carries = feed_forward_carries(&call.h_in, &state_out);
+        let h_out = hekate_sha2::feed_forward(&call.h_in, &state_out);
+
+        let groups: [(usize, &[u32]); 5] = [
+            (CpuSha256Block::H_IN, &call.h_in),
+            (CpuSha256Block::MSG, &call.block),
+            (CpuSha256Block::STATE_OUT, &state_out),
+            (CpuSha256Block::CARRY, &carries),
+            (CpuSha256Block::H_OUT, &h_out),
+        ];
+
+        for (offset, words) in groups {
+            for (i, &word) in words.iter().enumerate() {
+                tb.set_b32(offset + i, row, Block32(word)).unwrap();
+            }
+        }
+
+        tb.set_bit(CpuSha256Block::COLUMNS, row, Bit::ONE).unwrap();
+    }
+
+    let instance = ProgramInstance::new(2, vec![]);
+    let witness = ProgramWitness::new(tb.build())
+        .with_chiplets(vec![sha.trace(&block_order.map(|k| calls[k])).unwrap()]);
+
+    [false, true].map(|zero_knowledge| {
+        let config = Config {
+            zero_knowledge,
+            ..Config::dev()
+        };
+
+        let proof = prove(
+            b"SHA256_TRADE",
+            &program,
+            &instance,
+            &witness,
+            &config,
+            [0x6Bu8; 32],
+            None,
+        )
+        .expect("the prover proves the witness it is handed");
+
+        let mut vt = Transcript::<H>::new(b"SHA256_TRADE");
+        let pinned_id = program_id(&program).unwrap();
+
+        HekateVerifier::<F, H>::verify(&pinned_id, &program, &instance, &proof, &mut vt, &config)
+            .unwrap_or(false)
+    })
+}
+
 #[test]
 fn reference_matches_sha2_crate() {
     for (seed, len) in [
@@ -563,4 +652,35 @@ fn value_pin_rejects_substituted_constant() {
     if let Ok(true) = value_pin_verdict(&program, forged) {
         panic!("accepted");
     }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn two_calls_verify() {
+    assert_eq!(
+        two_call_verdicts([0, 1], [0, 1], [0, 1]),
+        [true, true],
+        "the harness itself is broken, the rejections below are unattributable"
+    );
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn traded_digests_rejected() {
+    for block_order in [[0, 1], [1, 0]] {
+        assert_eq!(
+            two_call_verdicts([0, 1], [1, 0], block_order),
+            [false, false],
+            "block order {block_order:?}"
+        );
+    }
+}
+
+/// Two identical calls claiming the same forged digest
+/// cancel in char 2 unless ranks tell them apart.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn identical_forged_digests_rejected() {
+    assert_eq!(two_call_verdicts([0, 0], [0, 0], [0, 0]), [true, true]);
+    assert_eq!(two_call_verdicts([0, 0], [1, 1], [0, 0]), [false, false]);
 }

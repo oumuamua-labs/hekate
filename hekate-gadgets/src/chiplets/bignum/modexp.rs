@@ -164,8 +164,8 @@ impl ModexpChiplet {
 
     /// # Errors
     /// A row's bookkeeping does not satisfy the carry splits.
-    pub fn trace(&self, modexp: &Modexp, request_idx: u32) -> errors::Result<ColumnTrace> {
-        generate_trace(&self.basis, &self.layout, modexp, request_idx)
+    pub fn trace(&self, modexp: &Modexp) -> errors::Result<ColumnTrace> {
+        generate_trace(&self.basis, &self.layout, modexp)
     }
 }
 
@@ -181,7 +181,6 @@ struct Layout {
     digits: usize,
     carry_lo: usize,
     carry_hi: usize,
-    request_idx: usize,
     rc: usize,
     rcm: usize,
     first: usize,
@@ -227,7 +226,6 @@ impl Layout {
         let digits = alloc(ColumnType::B32, 4);
         let carry_lo = alloc(ColumnType::B64, CARRY_WORDS);
         let carry_hi = alloc(ColumnType::B64, 1);
-        let request_idx = alloc(ColumnType::B32, 1);
         let rc = alloc(ColumnType::Bit, 1);
         let rcm = alloc(ColumnType::Bit, 1);
         let first = alloc(ColumnType::Bit, 1);
@@ -269,7 +267,6 @@ impl Layout {
             digits,
             carry_lo,
             carry_hi,
-            request_idx,
             rc,
             rcm,
             first,
@@ -686,7 +683,6 @@ pub struct ModexpCols {
     pub digit_bits: Packed,
     pub carry_lo_bits: Packed,
     pub carry_hi_bits: ColRange,
-    pub request_idx: Col,
     pub rc: Col,
     pub rcm: Col,
     pub first: Col,
@@ -720,13 +716,12 @@ pub fn service() -> Service {
         slots.extend(core::iter::repeat_n(ServiceSlot::Value(label), LIMBS32));
     }
 
-    slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
+    slots.push(ServiceSlot::EmitRank);
 
     Service {
         bus_id: BUS_ID,
         kind: BusKind::Permutation,
         slots,
-        clock_waiver: None,
     }
 }
 
@@ -740,7 +735,6 @@ fn write_row(
     modexp: &Modexp,
     row: usize,
     v: &RowValues,
-    request_idx: u32,
 ) -> errors::Result<()> {
     let b = row / ROWS_PER_MODMUL;
     let i = row % ROWS_PER_MODMUL;
@@ -788,10 +782,6 @@ fn write_row(
     )?;
     tb.set_bit(layout.emit, row, Bit::new(u8::from(row == RESULT_ROW)))?;
 
-    if row == RESULT_ROW {
-        tb.set_b32(layout.request_idx, row, Block32::from(request_idx))?;
-    }
-
     for k in 0..ROWS_PER_MODMUL {
         tb.set_bit(layout.onehot + k, row, Bit::new(u8::from(k == i)))?;
     }
@@ -835,7 +825,6 @@ fn generate_trace(
     basis: &ExpBasis<F>,
     layout: &Layout,
     modexp: &Modexp,
-    request_idx: u32,
 ) -> errors::Result<ColumnTrace> {
     let mut tb = TraceBuilder::new(&layout.physical, NUM_VARS)?;
     let mut values = RowValues::zeroed();
@@ -851,7 +840,7 @@ fn generate_trace(
 
         values.check()?;
 
-        write_row(&mut tb, layout, modexp, row, &values, request_idx)?;
+        write_row(&mut tb, layout, modexp, row, &values)?;
     }
 
     Ok(tb.build())
@@ -876,7 +865,6 @@ fn declare(cx: &mut Circuit<F>) -> ModexpCols {
     let n = cx.reuse_pass_through(&n_bits);
     let sel_packed = cx.reuse_pass_through(&sel_bits);
 
-    let request_idx = cx.column(ColumnType::B32);
     let rc = cx.column(ColumnType::Bit);
     let rcm = cx.column(ColumnType::Bit);
     let first = cx.column(ColumnType::Bit);
@@ -922,7 +910,6 @@ fn declare(cx: &mut Circuit<F>) -> ModexpCols {
         digit_bits,
         carry_lo_bits,
         carry_hi_bits: carry_hi_word.bits(0),
-        request_idx,
         rc,
         rcm,
         first,
@@ -989,10 +976,7 @@ fn build_program(basis: &ExpBasis<F>) -> errors::Result<(CircuitProgram<F>, Mode
         .map(Col::index)
         .collect();
 
-    cx.bus(
-        BUS_ID,
-        service().respond(&values, &[k.request_idx.index()], k.emit.index())?,
-    );
+    cx.bus(BUS_ID, service().respond(&values, k.emit.index())?);
 
     let cs = cx.cs();
 

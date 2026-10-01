@@ -13,7 +13,7 @@ use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, TraceBuilder, TraceColumn};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block8, Block16, Block32, Block64, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block8, Block16, Block64, Block128, HardwareField, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
 use hekate_program::{Program, ProgramInstance, ProgramWitness};
@@ -29,12 +29,8 @@ pub const CPU_ROWS: usize = 4;
 pub const AES_ROWS: usize = 16;
 pub const SBOX_ROM_ROWS: usize = 256;
 
-pub const IN_ROW: u32 = 0;
-pub const OUT_ROW: u32 = 1;
-
-/// Any value works:
-/// both emits carry it identically.
-pub const DECOY_IDX: u32 = 0x0BAD_F00D;
+pub const IN_ROW: usize = 0;
+pub const OUT_ROW: usize = 1;
 
 #[rustfmt::skip]
 pub const FREE_CIPHER: [u8; 16] = [
@@ -142,7 +138,6 @@ pub fn make_program_128(aes_rows: usize, num_blocks: usize) -> Aes128Program {
 
     let link_values: Vec<Col> = (0..16)
         .map(|j| cpu.at(CpuAes128Columns::DATA + j))
-        .chain([key_selector])
         .collect();
 
     cx.call(&AesRound128Air::link_service(), &link_values, selector)
@@ -177,7 +172,6 @@ pub fn make_program_256(aes_rows: usize, num_blocks: usize) -> Aes256Program {
 
     let link_values: Vec<Col> = (0..16)
         .map(|j| cpu.at(CpuAes256Columns::DATA + j))
-        .chain([key_selector])
         .collect();
 
     cx.call(&AesRound256Air::link_service(), &link_values, selector)
@@ -201,8 +195,8 @@ pub fn make_program_256(aes_rows: usize, num_blocks: usize) -> Aes256Program {
     }
 }
 
-/// Block `k` emits on rows `(2k, 2k+1)`, matching the request
-/// index triples the AES trace generator assigns by default.
+/// Call `k` emits on rows `2k` and `2k + 1`,
+/// the ranks chiplet block `k` answers.
 pub fn build_cpu_trace_128(blocks: &[([u8; 16], [u8; 16])]) -> ColumnTrace {
     let num_vars = CPU_ROWS.trailing_zeros() as usize;
     let mut tb = TraceBuilder::new(&CpuAes128Columns::build_layout(), num_vars).unwrap();
@@ -236,30 +230,22 @@ pub fn build_cpu_trace_256(data_in: &[u8; 16], data_out: &[u8; 16]) -> ColumnTra
     let mut tb = TraceBuilder::new(&CpuAes256Columns::build_layout(), num_vars).unwrap();
 
     for j in 0..16 {
-        tb.set_b8(
-            CpuAes256Columns::DATA + j,
-            IN_ROW as usize,
-            Block8(data_in[j]),
-        )
-        .unwrap();
-        tb.set_b8(
-            CpuAes256Columns::DATA + j,
-            OUT_ROW as usize,
-            Block8(data_out[j]),
-        )
-        .unwrap();
-    }
-
-    for (j, &byte) in FIPS256_KEY.iter().enumerate() {
-        tb.set_b8(CpuAes256Columns::KEY + j, IN_ROW as usize, Block8(byte))
+        tb.set_b8(CpuAes256Columns::DATA + j, IN_ROW, Block8(data_in[j]))
+            .unwrap();
+        tb.set_b8(CpuAes256Columns::DATA + j, OUT_ROW, Block8(data_out[j]))
             .unwrap();
     }
 
-    tb.set_bit(CpuAes256Columns::SELECTOR, IN_ROW as usize, Bit::ONE)
+    for (j, &byte) in FIPS256_KEY.iter().enumerate() {
+        tb.set_b8(CpuAes256Columns::KEY + j, IN_ROW, Block8(byte))
+            .unwrap();
+    }
+
+    tb.set_bit(CpuAes256Columns::SELECTOR, IN_ROW, Bit::ONE)
         .unwrap();
-    tb.set_bit(CpuAes256Columns::SELECTOR, OUT_ROW as usize, Bit::ONE)
+    tb.set_bit(CpuAes256Columns::SELECTOR, OUT_ROW, Bit::ONE)
         .unwrap();
-    tb.set_bit(CpuAes256Columns::KEY_SELECTOR, IN_ROW as usize, Bit::ONE)
+    tb.set_bit(CpuAes256Columns::KEY_SELECTOR, IN_ROW, Bit::ONE)
         .unwrap();
 
     tb.build()
@@ -292,13 +278,6 @@ pub fn set_b16(trace: &mut ColumnTrace, col: usize, row: usize, val: u16) {
     match &mut trace.columns[col] {
         TraceColumn::B16(data) => data[row] = Block16(val).to_hardware(),
         _ => panic!("expected B16 column at {col}"),
-    }
-}
-
-pub fn set_b32(trace: &mut ColumnTrace, col: usize, row: usize, val: u32) {
-    match &mut trace.columns[col] {
-        TraceColumn::B32(data) => data[row] = Block32::from(val).to_hardware(),
-        _ => panic!("expected B32 column at {col}"),
     }
 }
 

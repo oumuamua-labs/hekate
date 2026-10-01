@@ -169,7 +169,6 @@ fn derive_twiddle_entries(ops: &[NttOp]) -> Vec<TwiddleEntry> {
                 w: b.w,
                 is_mulonly: false,
                 active: true,
-                request_idx_tr: 0,
             },
             NttOp::MulOnly(m) => TwiddleEntry {
                 layer: m.layer,
@@ -177,7 +176,6 @@ fn derive_twiddle_entries(ops: &[NttOp]) -> Vec<TwiddleEntry> {
                 w: m.w,
                 is_mulonly: m.is_basemul,
                 active: true,
-                request_idx_tr: 0,
             },
             NttOp::FlowCompanion(_) => TwiddleEntry {
                 layer: 0,
@@ -185,7 +183,6 @@ fn derive_twiddle_entries(ops: &[NttOp]) -> Vec<TwiddleEntry> {
                 w: 0,
                 is_mulonly: false,
                 active: false,
-                request_idx_tr: 0,
             },
         })
         .collect()

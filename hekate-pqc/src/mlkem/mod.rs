@@ -267,16 +267,12 @@ pub(crate) enum Phase {
 }
 
 /// Both endpoints derive from this schema:
-/// one ciphertext word and the request-index clock.
+/// one ciphertext word, then the emit rank.
 pub fn data_service() -> Service {
     Service {
         bus_id: MLKEM_DATA_BUS_ID,
         kind: BusKind::Permutation,
-        slots: vec![
-            ServiceSlot::Value(b"kappa_mlkem_d0"),
-            ServiceSlot::RequestIdx { num_bytes: 4 },
-        ],
-        clock_waiver: None,
+        slots: vec![ServiceSlot::Value(b"kappa_mlkem_d0"), ServiceSlot::EmitRank],
     }
 }
 
@@ -288,20 +284,19 @@ pub fn cpu_data_spec() -> PermutationCheckSpec {
 }
 
 /// Both endpoints derive from this schema: the shared
-/// secret as 4 low and 4 high words, then the clock.
+/// secret as 4 low and 4 high words, then the emit rank.
 pub fn ss_service() -> Service {
     let mut slots: Vec<ServiceSlot> = MLKEM_SS_LABELS
         .iter()
         .map(|label| ServiceSlot::Value(label))
         .collect();
 
-    slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
+    slots.push(ServiceSlot::EmitRank);
 
     Service {
         bus_id: MLKEM_SS_BUS_ID,
         kind: BusKind::Permutation,
         slots,
-        clock_waiver: None,
     }
 }
 

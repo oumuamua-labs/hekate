@@ -125,7 +125,6 @@ impl RomChiplet {
                 ServiceSlot::Value(b"kappa_arg1"),
                 ServiceSlot::Value(b"kappa_arg2"),
             ],
-            clock_waiver: None,
         }
     }
 
@@ -144,7 +143,6 @@ impl RomChiplet {
                     RomColumns::ARG1,
                     RomColumns::ARG2,
                 ],
-                &[],
                 RomColumns::SELECTOR,
             )
             .expect("service slots match the responder columns")

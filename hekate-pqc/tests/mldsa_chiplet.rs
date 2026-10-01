@@ -267,6 +267,15 @@ fn run_tampered_mldsa_65_with_cpu<T>(tamper: T) -> bool
 where
     T: FnOnce(&mut [ColumnTrace], &mut ColumnTrace),
 {
+    let (air, instance, witness) = tampered_mldsa_65(tamper);
+
+    rejected(&air, &instance, &witness)
+}
+
+fn tampered_mldsa_65<T>(tamper: T) -> (CircuitProgram<F>, ProgramInstance<F>, ProgramWitness<F>)
+where
+    T: FnOnce(&mut [ColumnTrace], &mut ColumnTrace),
+{
     let msg = b"adversarial test";
     let (nist_pk, nist_sig) = nist_mldsa_65(msg);
 
@@ -314,6 +323,14 @@ where
     let instance = ProgramInstance::new(cpu_rows, public_inputs);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
+    (air, instance, witness)
+}
+
+fn rejected(
+    air: &CircuitProgram<F>,
+    instance: &ProgramInstance<F>,
+    witness: &ProgramWitness<F>,
+) -> bool {
     let config = Config {
         zero_knowledge: true,
         ..Config::default()
@@ -324,9 +341,9 @@ where
 
     let proof_result = prove(
         b"MLDSA_Adversarial",
-        &air,
-        &instance,
-        &witness,
+        air,
+        instance,
+        witness,
         &config,
         blinding_seed,
         None,
@@ -337,9 +354,9 @@ where
         Ok(proof) => {
             let mut vt = Transcript::<H>::new(b"MLDSA_Adversarial");
             let result = HekateVerifier::<F, H>::verify(
-                &program_id(&air).unwrap(),
-                &air,
-                &instance,
+                &program_id(air).unwrap(),
+                air,
+                instance,
                 &proof,
                 &mut vt,
                 &config,
@@ -394,6 +411,25 @@ fn flip_b64(trace: &mut ColumnTrace, col: usize, row: usize, mask: u64) {
     }
 }
 
+fn squeeze_input_row(ctrl: &ColumnTrace) -> usize {
+    let bits = |col: usize| ctrl.columns[col].as_bit_slice().unwrap();
+    let words = |col: usize| ctrl.columns[col].as_b64_slice().unwrap();
+
+    let kec_sel = bits(MlDsaCtrlColumns::KECCAK_SELECTOR);
+    let kec_out = bits(MlDsaCtrlColumns::KEC_IS_OUTPUT);
+    let init = bits(MlDsaCtrlColumns::SPONGE_INIT);
+
+    (0..kec_sel.len())
+        .filter(|&r| kec_sel[r] == Bit::ONE && kec_out[r] == Bit::ZERO && init[r] == Bit::ZERO)
+        .find(|&r| {
+            (0..25).all(|k| {
+                words(MlDsaCtrlColumns::KECCAK_LANES + k)[r]
+                    == words(MlDsaCtrlColumns::RATE_REG + k)[r]
+            })
+        })
+        .expect("ML-DSA ctrl trace has no squeeze block")
+}
+
 fn swap_b32(trace: &mut ColumnTrace, col: usize, r0: usize, r1: usize) {
     match &mut trace.columns[col] {
         TraceColumn::B32(data) => data.swap(r0, r1),
@@ -406,6 +442,19 @@ fn swap_b64(trace: &mut ColumnTrace, col: usize, r0: usize, r1: usize) {
     match &mut trace.columns[col] {
         TraceColumn::B64(data) => data.swap(r0, r1),
         _ => panic!("expected B64 column at {col}"),
+    }
+}
+
+fn swap_rows(trace: &mut ColumnTrace, r0: usize, r1: usize) {
+    for column in &mut trace.columns {
+        match column {
+            TraceColumn::Bit(data) => data.swap(r0, r1),
+            TraceColumn::B8(data) => data.swap(r0, r1),
+            TraceColumn::B16(data) => data.swap(r0, r1),
+            TraceColumn::B32(data) => data.swap(r0, r1),
+            TraceColumn::B64(data) => data.swap(r0, r1),
+            TraceColumn::B128(data) => data.swap(r0, r1),
+        }
     }
 }
 
@@ -707,6 +756,43 @@ fn exploit_sponge_rate_skip() {
     );
 }
 
+/// On a squeeze block, `KEC_IS_OUTPUT` on
+/// the input row turns off capacity continuity;
+/// every root holds and only the pin rejects.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn exploit_kec_is_output_on_squeeze_block() {
+    let mut row = 0;
+
+    let (air, instance, witness) = tampered_mldsa_65(|traces, _| {
+        let ctrl = &mut traces[0];
+        row = squeeze_input_row(ctrl);
+
+        match &mut ctrl.columns[MlDsaCtrlColumns::KEC_IS_OUTPUT] {
+            TraceColumn::Bit(d) => d[row] = Bit::ONE,
+            _ => panic!("KEC_IS_OUTPUT must be Bit"),
+        }
+    });
+
+    let report = preflight(&air, &instance, &witness).unwrap();
+
+    assert!(report.constraint_violations.is_empty());
+    assert!(report.boundary_violations.is_empty());
+    assert!(report.bus_diagnostics.is_empty());
+
+    let [pin] = report.fixed_column_violations.as_slice() else {
+        panic!("expected one fixed-column violation");
+    };
+
+    assert!(pin.table == preflight::TableId::Chiplet(0));
+    assert_eq!(
+        (pin.col_idx, pin.row_idx),
+        (MlDsaCtrlColumns::KEC_IS_OUTPUT, row)
+    );
+
+    assert!(rejected(&air, &instance, &witness));
+}
+
 // IO_DATA is bus-protected.
 // RAM_VAL_PACKED must equal IO_DATA on IO rows
 // (io_sel * (IO_DATA + RAM_VAL_PACKED) = 0).
@@ -980,6 +1066,17 @@ fn exploit_hb_decomposition_swap() {
         detected,
         "HB decomposition swap must be caught by HB-RAM binding"
     );
+}
+
+/// Trading two NormCheck rows keeps each row in range
+/// and the (value, idx) multiset intact; rank pairing
+/// matches response t to the ctrl's request t.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn norm_check_responses_follow_request_order() {
+    let detected = run_tampered_mldsa_65(|traces| swap_rows(&mut traces[4], 0, 1));
+
+    assert!(detected);
 }
 
 // No hint weight accumulator column.

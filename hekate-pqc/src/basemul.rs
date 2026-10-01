@@ -92,7 +92,6 @@ pub struct BasemulLayout {
     pub bus_b: usize,
     pub bus_c: usize,
     pub bus_idx: usize,
-    pub request_idx: usize,
 
     // Control
     pub s_active: usize,
@@ -136,12 +135,11 @@ impl BasemulLayout {
         let bus_b = num_expanded_bits + 1;
         let bus_c = num_expanded_bits + 2;
         let bus_idx = num_expanded_bits + 3;
-        let request_idx = num_expanded_bits + 4;
 
-        let s_active = num_expanded_bits + 5;
+        let s_active = num_expanded_bits + 4;
 
-        let num_columns = num_expanded_bits + 6;
-        let num_physical_columns = num_packed_b32_cols + 6;
+        let num_columns = num_expanded_bits + 5;
+        let num_physical_columns = num_packed_b32_cols + 5;
 
         BasemulLayout {
             bit_width,
@@ -162,7 +160,6 @@ impl BasemulLayout {
             bus_b,
             bus_c,
             bus_idx,
-            request_idx,
             s_active,
             num_columns,
             num_physical_columns,
@@ -177,7 +174,7 @@ impl BasemulLayout {
             layout.push(ColumnType::Bit);
         }
 
-        for _ in 0..5 {
+        for _ in 0..4 {
             layout.push(ColumnType::B32);
         }
 
@@ -195,7 +192,7 @@ impl BasemulLayout {
             layout.push(ColumnType::B32);
         }
 
-        for _ in 0..5 {
+        for _ in 0..4 {
             layout.push(ColumnType::B32);
         }
 
@@ -241,7 +238,7 @@ impl BasemulChiplet {
 
         let expander = VirtualExpander::new()
             .expand_bits(layout.num_packed_b32_cols, ColumnType::B32)
-            .pass_through(5, ColumnType::B32)
+            .pass_through(4, ColumnType::B32)
             .control_bits(1)
             .build()
             .expect("BasemulChiplet expander");
@@ -260,8 +257,8 @@ impl BasemulChiplet {
         &self.layout
     }
 
-    /// Both endpoints derive from this schema:
-    /// the operand triple, the coefficient index, the clock.
+    /// Both endpoints derive from this schema: the operand
+    /// triple, the coefficient index, then the emit rank.
     pub fn service() -> Service {
         Service {
             bus_id: Self::BUS_ID,
@@ -271,9 +268,8 @@ impl BasemulChiplet {
                 ServiceSlot::Value(b"kappa_bm_b"),
                 ServiceSlot::Value(b"kappa_bm_c"),
                 ServiceSlot::Value(b"kappa_bm_idx"),
-                ServiceSlot::RequestIdx { num_bytes: 4 },
+                ServiceSlot::EmitRank,
             ],
-            clock_waiver: None,
         }
     }
 
@@ -281,11 +277,7 @@ impl BasemulChiplet {
         let ly = &self.layout;
 
         Self::service()
-            .respond(
-                &[ly.bus_a, ly.bus_b, ly.bus_c, ly.bus_idx],
-                &[ly.request_idx],
-                ly.s_active,
-            )
+            .respond(&[ly.bus_a, ly.bus_b, ly.bus_c, ly.bus_idx], ly.s_active)
             .expect("service slots match the responder columns")
     }
 
@@ -410,13 +402,12 @@ fn build_basemul_constraints<F: TowerField>(
         cs.constrain(cs.col(k));
     }
 
-    // Pin bus_idx / request_idx to 0 on padding rows;
+    // Pin bus_idx to 0 on padding rows;
     // bit_packing already pins bus_a/b/c.
     let one = cs.one();
     let not_active = one - s_active;
 
     cs.assert_zero_when(not_active, cs.col(ly.bus_idx));
-    cs.assert_zero_when(not_active, cs.col(ly.request_idx));
 
     cs.build()
 }
@@ -443,9 +434,6 @@ pub struct BasemulOp {
 
     /// RAM address for BM-RAM binding.
     pub ram_addr: u32,
-
-    /// Partner-side row index.
-    pub request_idx: u32,
 }
 
 /// Generate the basemul chiplet trace.
@@ -470,8 +458,7 @@ pub fn generate_basemul_trace(
     let phy_bus_b = num_packed + 1;
     let phy_bus_c = num_packed + 2;
     let phy_bus_idx = num_packed + 3;
-    let phy_request_idx = num_packed + 4;
-    let phy_s_active = num_packed + 5;
+    let phy_s_active = num_packed + 4;
 
     let mut bits = vec![0u32; num_packed];
 
@@ -553,7 +540,6 @@ pub fn generate_basemul_trace(
         tb.set_b32(phy_bus_b, row, Block32::from(op.b))?;
         tb.set_b32(phy_bus_c, row, Block32::from(op.c))?;
         tb.set_b32(phy_bus_idx, row, Block32::from(op.idx))?;
-        tb.set_b32(phy_request_idx, row, Block32::from(op.request_idx))?;
     }
 
     // Ghost Protocol
@@ -586,7 +572,7 @@ mod tests {
     use super::*;
     use hekate_core::trace::Trace;
     use hekate_math::{Bit, Block128, Flat};
-    use hekate_program::permutation::REQUEST_IDX_LABEL;
+    use hekate_program::permutation::EMIT_RANK_LABEL;
 
     type F = Block128;
 
@@ -594,7 +580,7 @@ mod tests {
     const BW: usize = 12;
 
     fn phy_s_active(ly: &BasemulLayout) -> usize {
-        ly.num_packed_b32_cols + 5
+        ly.num_packed_b32_cols + 4
     }
 
     fn phy_bus(ly: &BasemulLayout, offset: usize) -> usize {
@@ -646,7 +632,6 @@ mod tests {
             c: 3000,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         }];
         let trace = generate_basemul_trace(Q, &ops, 4).unwrap();
         assert_eq!(trace.num_rows().unwrap(), 4);
@@ -667,7 +652,6 @@ mod tests {
             c: (2000 + 2000) % Q,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         }];
         let trace = generate_basemul_trace(Q, &ops, 4).unwrap();
         let ly = BasemulLayout::compute(BW);
@@ -689,7 +673,6 @@ mod tests {
             c: p22,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         }];
         let trace = generate_basemul_trace(Q, &ops, 4).unwrap();
         let ly = BasemulLayout::compute(BW);
@@ -738,7 +721,6 @@ mod tests {
                 c: r0,
                 idx: 0,
                 ram_addr: 0,
-                request_idx: 0,
             },
             BasemulOp {
                 a: p01,
@@ -746,7 +728,6 @@ mod tests {
                 c: r1,
                 idx: 1,
                 ram_addr: 0,
-                request_idx: 1,
             },
             BasemulOp {
                 a: r2,
@@ -754,7 +735,6 @@ mod tests {
                 c: p22,
                 idx: 2,
                 ram_addr: 0,
-                request_idx: 2,
             }, // sub encoded as add
             BasemulOp {
                 a: p23,
@@ -762,7 +742,6 @@ mod tests {
                 c: r3,
                 idx: 3,
                 ram_addr: 0,
-                request_idx: 3,
             },
         ];
 
@@ -785,7 +764,6 @@ mod tests {
             c: 0,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         }];
         let trace = generate_basemul_trace(Q, &ops, 4).unwrap();
         assert_eq!(trace.num_rows().unwrap(), 4);
@@ -800,7 +778,6 @@ mod tests {
             c: (2 * (Q - 1)) % Q,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         }];
         let trace = generate_basemul_trace(Q, &ops, 4).unwrap();
         assert_eq!(trace.num_rows().unwrap(), 4);
@@ -816,7 +793,7 @@ mod tests {
         assert_eq!(spec.sources[1].1, b"kappa_bm_b");
         assert_eq!(spec.sources[2].1, b"kappa_bm_c");
         assert_eq!(spec.sources[3].1, b"kappa_bm_idx");
-        assert_eq!(spec.sources[4].1, REQUEST_IDX_LABEL);
+        assert_eq!(spec.sources[4].1, EMIT_RANK_LABEL);
     }
 
     #[test]
@@ -886,15 +863,15 @@ mod tests {
         let ast_no_pack = cs_no_pack.build();
 
         // 3 bus packings + tail-padding-bit zero pins
-        // + 2 padding-row pins (bus_idx, request_idx).
+        // + 1 padding-row pin (bus_idx).
         let pad_bits = ly.num_expanded_bits - ly.num_bit_cols;
-        let expected_delta = 3 + pad_bits + 2;
+        let expected_delta = 3 + pad_bits + 1;
 
         assert_eq!(
             ast.roots.len() - ast_no_pack.roots.len(),
             expected_delta,
             "Expected {expected_delta} packing+padding constraints \
-             (3 bus + {pad_bits} pad + 2 padding-row pins), \
+             (3 bus + {pad_bits} pad + 1 padding-row pin), \
              got delta={} (with={}, without={})",
             ast.roots.len() as i64 - ast_no_pack.roots.len() as i64,
             ast.roots.len(),
@@ -910,7 +887,6 @@ mod tests {
             c: 100,
             idx: 0,
             ram_addr: 0,
-            request_idx: 0,
         }];
         let trace = generate_basemul_trace(Q, &ops, 8).unwrap();
         let ly = BasemulLayout::compute(BW);
@@ -931,7 +907,6 @@ mod tests {
             c: 3000,
             idx: 7,
             ram_addr: 0,
-            request_idx: 0,
         }];
 
         let trace = generate_basemul_trace(Q, &ops, 2).unwrap();

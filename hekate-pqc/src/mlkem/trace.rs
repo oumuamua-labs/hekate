@@ -197,7 +197,6 @@ where
                         butterfly_idx: b.butterfly_idx,
                         w: b.w,
                         active: true,
-                        request_idx_tr: 0,
                     });
                 }
                 ntt::NttOp::MulOnly(m) => {
@@ -207,7 +206,6 @@ where
                         butterfly_idx: m.butterfly_idx,
                         w: m.w,
                         active: true,
-                        request_idx_tr: 0,
                     });
                 }
                 ntt::NttOp::FlowCompanion(_) => {
@@ -217,7 +215,6 @@ where
                         w: 0,
                         is_mulonly: false,
                         active: false,
-                        request_idx_tr: 0,
                     });
                 }
             }
@@ -590,14 +587,6 @@ where
         let mut k_prime_bind_seen = false;
         let mut k_bar_bind_seen = false;
 
-        let mut io_data_counter: u32 = 0;
-        let mut bm_dispatch_ctrl_rows: Vec<u32> = Vec::with_capacity(result.basemul_ops.len());
-        let mut keccak_request_idx_pairs: Vec<(u32, u32)> =
-            Vec::with_capacity(result.keccak_calls.len());
-        let mut pending_keccak_input_ctrl_row: Option<u32> = None;
-
-        let mut wbind_ctrl_rows: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
-
         for (phase, dispatch) in &schedule {
             // Sponge init:
             // zero registers before
@@ -723,8 +712,6 @@ where
 
             match dispatch {
                 CtrlDispatch::KeccakInput(input) => {
-                    pending_keccak_input_ctrl_row = Some(ctrl_row as u32);
-
                     for (lane, &val) in input.iter().enumerate() {
                         ctrl_tb.set_b64(
                             MlKemCtrlColumns::KECCAK_LANES + lane,
@@ -753,16 +740,6 @@ where
                     }
                 }
                 CtrlDispatch::KeccakOutput(output) => {
-                    let in_row =
-                        pending_keccak_input_ctrl_row
-                            .take()
-                            .ok_or(errors::Error::Protocol {
-                                protocol: "mlkem_trace",
-                                message: "KeccakOutput dispatched without preceding KeccakInput",
-                            })?;
-
-                    keccak_request_idx_pairs.push((in_row, ctrl_row as u32));
-
                     for (lane, &val) in output.iter().enumerate() {
                         ctrl_tb.set_b64(
                             MlKemCtrlColumns::KECCAK_LANES + lane,
@@ -786,8 +763,6 @@ where
                     keccak_call_idx += 1;
                 }
                 CtrlDispatch::Basemul(bm_op, ram_event) => {
-                    bm_dispatch_ctrl_rows.push(ctrl_row as u32);
-
                     ctrl_tb.set_b32(MlKemCtrlColumns::BM_A, ctrl_row, Block32::from(bm_op.a))?;
                     ctrl_tb.set_b32(MlKemCtrlColumns::BM_B, ctrl_row, Block32::from(bm_op.b))?;
                     ctrl_tb.set_b32(MlKemCtrlColumns::BM_C, ctrl_row, Block32::from(bm_op.c))?;
@@ -914,11 +889,6 @@ where
                         Block32::from(*bfly_idx),
                     )?;
                     ctrl_tb.set_bit(MlKemCtrlColumns::W_BIND_SELECTOR, ctrl_row, Bit::ONE)?;
-
-                    wbind_ctrl_rows
-                        .entry((*bfly_idx, event.val))
-                        .or_default()
-                        .push(ctrl_row as u32);
                 }
                 CtrlDispatch::NttRam(op, event) => {
                     // NTT columns (MulOnly for binding)
@@ -1196,11 +1166,6 @@ where
                 }
                 CtrlDispatch::SsOutSel => {
                     ctrl_tb.set_bit(MlKemCtrlColumns::SS_OUT_SEL, ctrl_row, Bit::ONE)?;
-                    ctrl_tb.set_b32(
-                        MlKemCtrlColumns::REQUEST_IDX_OUT,
-                        ctrl_row,
-                        Block32::from(io_data_counter),
-                    )?;
                 }
                 CtrlDispatch::KecInputWrite(event) => {
                     let mut fixed = event.clone();
@@ -1386,13 +1351,6 @@ where
                     match pad_kind {
                         None => {
                             ctrl_tb.set_bit(MlKemCtrlColumns::IO_SELECTOR, ctrl_row, Bit::ONE)?;
-                            ctrl_tb.set_b32(
-                                MlKemCtrlColumns::REQUEST_IDX_OUT,
-                                ctrl_row,
-                                Block32::from(io_data_counter),
-                            )?;
-
-                            io_data_counter += 1;
                         }
                         Some(kind) => {
                             ctrl_tb.set_bit(MlKemCtrlColumns::PAD_SEL, ctrl_row, Bit::ONE)?;
@@ -1613,43 +1571,16 @@ where
         let ctrl_trace = ctrl_tb.build();
 
         // 5. Twiddle ROW trace
-        for entry in twiddle_entries.iter_mut() {
-            if !entry.is_mulonly {
-                continue;
-            }
-
-            let rows = wbind_ctrl_rows
-                .get_mut(&(entry.butterfly_idx, entry.w))
-                .ok_or(errors::Error::Protocol {
-                    protocol: "mlkem_trace",
-                    message: "mulonly twiddle entry has no matching W-bind ctrl row",
-                })?;
-
-            entry.request_idx_tr = rows.pop().ok_or(errors::Error::Protocol {
-                protocol: "mlkem_trace",
-                message: "W-bind ctrl rows exhausted before twiddle mulonly entries",
-            })?;
-        }
-
         let twiddle_trace =
             twiddle_rom::generate_twiddle_rom_trace(&twiddle_entries, self.params.twiddle_rows)?;
 
         // 6. Keccak trace
-        let keccak_trace = keccak::generate_keccak_trace(
-            &keccak_inputs,
-            Some(&keccak_request_idx_pairs),
-            self.params.keccak_rows,
-        )?;
+        let keccak_trace = keccak::generate_keccak_trace(&keccak_inputs, self.params.keccak_rows)?;
 
         // 7. Basemul trace
-        let mut bm_ops_with_request_idx: Vec<basemul::BasemulOp> = result.basemul_ops.clone();
-        for (i, ctrl_row) in bm_dispatch_ctrl_rows.iter().enumerate() {
-            bm_ops_with_request_idx[i].request_idx = *ctrl_row;
-        }
-
         let bm_trace = basemul::generate_basemul_trace(
             MLKEM_Q,
-            &bm_ops_with_request_idx,
+            &result.basemul_ops,
             self.params.basemul_rows,
         )?;
 

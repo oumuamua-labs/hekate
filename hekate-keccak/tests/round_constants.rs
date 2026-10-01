@@ -32,11 +32,9 @@ fn build_program() -> CircuitProgram<F> {
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let call_values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &call_values, selector)
@@ -45,10 +43,6 @@ fn build_program() -> CircuitProgram<F> {
     cx.fix(
         selector,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, 1),
-    );
-    cx.fix(
-        is_output,
-        KeccakChiplet::host_direction_shape(KeccakChiplet::BLOCK_ROWS, 1),
     );
 
     cx.attach(ChipletDef::from_air(&KeccakChiplet::new(ROWS, 1)).unwrap());
@@ -96,21 +90,12 @@ fn cpu_trace(input: [u64; 25], output: [u64; 25]) -> ColumnTrace {
     tb.set_bit(CpuKeccakColumns::SELECTOR, ROUNDS, Bit::ONE)
         .unwrap();
 
-    for row in 1..=ROUNDS {
-        tb.set_bit(CpuKeccakColumns::IS_OUTPUT, row, Bit::ONE)
-            .unwrap();
-    }
-
     tb.build()
 }
 
-/// `partners` are the CPU rows the block's
-/// first and last row name on the bus.
-fn chiplet_trace(
-    input: [u64; 25],
-    schedule: &[(u32, u64)],
-    partners: (u32, u32),
-) -> (ColumnTrace, [u64; 25]) {
+/// One block run under `schedule`, emitting
+/// on its first row and on its last.
+fn chiplet_trace(input: [u64; 25], schedule: &[(u32, u64)]) -> (ColumnTrace, [u64; 25]) {
     let layout = Air::<F>::column_layout(&KeccakChiplet::new(ROWS, 1)).to_vec();
     let num_vars = ROWS.trailing_zeros() as usize;
 
@@ -130,12 +115,6 @@ fn chiplet_trace(
         if row == 0 {
             tb.set_bit(PhysKeccakColumns::P_S_IN_OUT, row, Bit::ONE)
                 .unwrap();
-            tb.set_b32(
-                PhysKeccakColumns::P_REQUEST_IDX,
-                row,
-                Block32::from(partners.0),
-            )
-            .unwrap();
         }
 
         state = KeccakWitness::keccak_f_round(state, rc);
@@ -149,21 +128,13 @@ fn chiplet_trace(
 
     tb.set_bit(PhysKeccakColumns::P_S_IN_OUT, out_row, Bit::ONE)
         .unwrap();
-    tb.set_bit(PhysKeccakColumns::P_IS_OUTPUT, out_row, Bit::ONE)
-        .unwrap();
-    tb.set_b32(
-        PhysKeccakColumns::P_REQUEST_IDX,
-        out_row,
-        Block32::from(partners.1),
-    )
-    .unwrap();
 
     (tb.build(), state)
 }
 
 fn proves_and_verifies(schedule: &[(u32, u64)]) -> bool {
     let input = test_input();
-    let (chiplet, output) = chiplet_trace(input, schedule, (0, ROUNDS as u32));
+    let (chiplet, output) = chiplet_trace(input, schedule);
 
     run(input, output, chiplet)
 }
@@ -207,17 +178,15 @@ fn layout_matches_crate() {
     let chiplet = KeccakChiplet::new(ROWS, 1);
     let layout = Air::<F>::column_layout(&chiplet);
 
-    assert_eq!(layout.len(), PhysKeccakColumns::P_IS_OUTPUT + 1);
+    assert_eq!(layout.len(), PhysKeccakColumns::P_S_IN_OUT + 1);
     assert!(
         layout[..PhysKeccakColumns::P_ROUND]
             .iter()
             .all(|c| *c == ColumnType::B64)
     );
     assert_eq!(layout[PhysKeccakColumns::P_ROUND], ColumnType::B32);
-    assert_eq!(layout[PhysKeccakColumns::P_REQUEST_IDX], ColumnType::B32);
     assert_eq!(layout[PhysKeccakColumns::P_S_ROUND], ColumnType::Bit);
     assert_eq!(layout[PhysKeccakColumns::P_S_IN_OUT], ColumnType::Bit);
-    assert_eq!(layout[PhysKeccakColumns::P_IS_OUTPUT], ColumnType::Bit);
 }
 
 #[test]
@@ -225,12 +194,8 @@ fn harness_matches_generate_keccak_trace() {
     let input = test_input();
     let block: [Block64; 25] = core::array::from_fn(|i| Block64(input[i]));
 
-    let reference = generate_keccak_trace(&[block], None, ROWS).unwrap();
-    let (mine, _) = chiplet_trace(
-        input,
-        &constant_schedule(&KeccakChiplet::ROUND_CONSTANTS),
-        (0, ROUNDS as u32),
-    );
+    let reference = generate_keccak_trace(&[block], ROWS).unwrap();
+    let (mine, _) = chiplet_trace(input, &constant_schedule(&KeccakChiplet::ROUND_CONSTANTS));
 
     for col in 0..=PhysKeccakColumns::P_S_IN_OUT {
         for row in 0..ROWS_PER_CALL {
@@ -283,16 +248,12 @@ fn truncated_schedule_rejected() {
     assert!(!proves_and_verifies(&subset_schedule(&[0], 5)));
 }
 
-/// The bus key carries no direction without `IS_OUTPUT`,
-/// which lets the block pair to the CPU backwards.
+/// The host reads the block backwards, `f(x)` in
+/// and `x` out; rank 0 holds `x` and both emits miss.
 #[test]
-fn reversed_pairing_rejected() {
+fn backwards_block_rejected() {
     let x = test_input();
-    let (chiplet, y) = chiplet_trace(
-        x,
-        &constant_schedule(&KeccakChiplet::ROUND_CONSTANTS),
-        (ROUNDS as u32, 0),
-    );
+    let (chiplet, y) = chiplet_trace(x, &constant_schedule(&KeccakChiplet::ROUND_CONSTANTS));
 
     assert!(!run(y, x, chiplet));
 }

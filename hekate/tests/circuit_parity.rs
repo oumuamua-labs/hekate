@@ -11,9 +11,7 @@
 use hekate_core::trace::ColumnType;
 use hekate_gadgets::IntArithmeticChiplet;
 use hekate_gadgets::atoms::int_arith;
-use hekate_keccak::{
-    CpuKeccakColumns, KECCAK_DIRECTION_LABEL, KECCAK_LANE_LABELS, KeccakChiplet, KeccakColumns,
-};
+use hekate_keccak::{CpuKeccakColumns, KECCAK_LANE_LABELS, KeccakChiplet, KeccakColumns};
 use hekate_math::{Block128, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
@@ -21,7 +19,7 @@ use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
 use hekate_program::expander::VirtualExpander;
-use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::{EMIT_RANK_LABEL, PermutationCheckSpec, Side, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, InlineKernelHint, Program, fix};
 
 type F = Block128;
@@ -30,8 +28,8 @@ const KECCAK_OFFSET: usize = CpuKeccakColumns::NUM_COLUMNS;
 const NUM_ROWS: usize = 256;
 
 // =================================================================
-// Frozen hand authoring:
-// keccak_inline host as shipped before the Circuit layer.
+// Hand authoring:
+// keccak_inline host without the Circuit layer.
 // =================================================================
 
 #[derive(Clone)]
@@ -41,53 +39,35 @@ struct HandKeccakInline {
 
 impl HandKeccakInline {
     fn cpu_spec() -> PermutationCheckSpec {
-        let mut sources = Vec::with_capacity(27);
+        let mut sources = Vec::with_capacity(26);
 
         for (i, label) in KECCAK_LANE_LABELS.iter().enumerate() {
             sources.push((Source::Column(CpuKeccakColumns::LANES + i), *label));
         }
 
-        sources.push((Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL));
-        sources.push((
-            Source::Column(CpuKeccakColumns::IS_OUTPUT),
-            KECCAK_DIRECTION_LABEL,
-        ));
+        sources.push((Source::EmitRank(Side::Request), EMIT_RANK_LABEL));
 
         PermutationCheckSpec::new(sources, Some(CpuKeccakColumns::SELECTOR))
     }
 
     fn cpu_pins(num_blocks: usize) -> Vec<FixedColumn<F>> {
-        let block = |values: Vec<F>| FixedShape::Cadence {
-            stride: 25,
-            count: num_blocks,
-            origin: 0,
-            values,
-        };
-
-        vec![
-            fix(
-                CpuKeccakColumns::SELECTOR,
-                block(
-                    (0..25)
-                        .map(|off| {
-                            if off == 0 || off == 24 {
-                                F::ONE
-                            } else {
-                                F::ZERO
-                            }
-                        })
-                        .collect(),
-                ),
-            ),
-            fix(
-                CpuKeccakColumns::IS_OUTPUT,
-                block(
-                    (0..25)
-                        .map(|off| if off == 0 { F::ZERO } else { F::ONE })
-                        .collect(),
-                ),
-            ),
-        ]
+        vec![fix(
+            CpuKeccakColumns::SELECTOR,
+            FixedShape::Cadence {
+                stride: 25,
+                count: num_blocks,
+                origin: 0,
+                values: (0..25)
+                    .map(|off| {
+                        if off == 0 || off == 24 {
+                            F::ONE
+                        } else {
+                            F::ZERO
+                        }
+                    })
+                    .collect(),
+            },
+        )]
     }
 }
 
@@ -148,7 +128,7 @@ impl Air<F> for HandKeccakInline {
         Some(E.get_or_init(|| {
             let cpu = VirtualExpander::new()
                 .pass_through(25, ColumnType::B64)
-                .control_bits(2);
+                .control_bits(1);
 
             KeccakChiplet::expand_into(cpu, KECCAK_OFFSET)
                 .build()
@@ -196,11 +176,9 @@ fn circuit_keccak_inline(num_rows: usize) -> CircuitProgram<F> {
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let call_values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &call_values, selector)
@@ -209,10 +187,6 @@ fn circuit_keccak_inline(num_rows: usize) -> CircuitProgram<F> {
     cx.fix(
         selector,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
-    );
-    cx.fix(
-        is_output,
-        KeccakChiplet::host_direction_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
     );
 
     cx.mount(ChipletDef::from_air(&KeccakChiplet::new(num_rows, num_blocks)).unwrap());

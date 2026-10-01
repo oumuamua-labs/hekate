@@ -124,7 +124,6 @@ fn generate_workload(num_ops: usize) -> (Vec<Instruction>, Vec<IntArithmeticOp>,
             op: opcode,
             a: val_a,
             b: b_val,
-            request_idx: i as u32,
         });
 
         mems.push(MemoryEvent::write((i * 4) as u32, i as u32, result));
@@ -201,13 +200,7 @@ fn generate_cpu_trace(
         tb.set_bit(CPU_FETCH + CpuFetchColumns::SELECTOR, r, Bit::ONE)?;
 
         // CPU Arith columns (offset CPU_ARITH = 9)
-        let IntArithmeticOp::U32 {
-            op,
-            a,
-            b,
-            request_idx: _,
-        } = ariths[i]
-        else {
+        let IntArithmeticOp::U32 { op, a, b } = ariths[i] else {
             unreachable!("many_chiplets is u32-only");
         };
 

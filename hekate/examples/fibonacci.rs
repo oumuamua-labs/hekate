@@ -91,13 +91,12 @@ fn generate_fib_trace(num_rows: usize) -> errors::Result<(ColumnTrace, u32)> {
 
     let mut ops: Vec<IntArithmeticOp> = Vec::with_capacity(num_rows - 1);
 
-    for i in 0..num_rows - 1 {
+    for _ in 0..num_rows - 1 {
         let sum = a.wrapping_add(b);
         ops.push(IntArithmeticOp::U32 {
             op: ArithmeticOpcode::ADD,
             a,
             b,
-            request_idx: i as u32,
         });
 
         prev_b = b;

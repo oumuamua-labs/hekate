@@ -22,7 +22,7 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{PermutationCheckSpec, REQUEST_IDX_LABEL, Source};
+use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, ServiceSlot};
 use hekate_program::{
     Air, CadenceSegment, FixedColumn, FixedShape, ProgramInstance, ProgramWitness, fix,
 };
@@ -38,8 +38,7 @@ const GEN_BUS_ID: &str = "gen_service";
 const KAPPA_GEN_X: &[u8] = b"kappa_gen_x";
 
 const CHIP_X: usize = 0;
-const CHIP_REQ: usize = 1;
-const CHIP_SEL: usize = 2;
+const CHIP_SEL: usize = 1;
 
 struct Rng(u64);
 
@@ -74,12 +73,12 @@ struct GenChiplet {
 
 impl Air<F> for GenChiplet {
     fn num_columns(&self) -> usize {
-        3
+        2
     }
 
     fn column_layout(&self) -> &[ColumnType] {
         static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
-        LAYOUT.get_or_init(|| vec![ColumnType::B32, ColumnType::B32, ColumnType::Bit])
+        LAYOUT.get_or_init(|| vec![ColumnType::B32, ColumnType::Bit])
     }
 
     fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
@@ -97,13 +96,7 @@ impl Air<F> for GenChiplet {
     fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
         vec![(
             GEN_BUS_ID.into(),
-            PermutationCheckSpec::new(
-                vec![
-                    (Source::Column(CHIP_X), KAPPA_GEN_X),
-                    (Source::Column(CHIP_REQ), REQUEST_IDX_LABEL),
-                ],
-                Some(CHIP_SEL),
-            ),
+            gen_service().respond(&[CHIP_X], CHIP_SEL).unwrap(),
         )]
     }
 
@@ -112,7 +105,6 @@ impl Air<F> for GenChiplet {
         let not_sel = cs.one() + cs.col(CHIP_SEL);
 
         cs.assert_zero_when(not_sel, cs.col(CHIP_X));
-        cs.assert_zero_when(not_sel, cs.col(CHIP_REQ));
 
         cs.build()
     }
@@ -166,16 +158,7 @@ fn build_air(s: &Sample) -> CircuitProgram<F> {
     cx.publish(cols[s.publish_triple].2, s.publish_row);
 
     if s.with_bus {
-        cx.bus(
-            GEN_BUS_ID,
-            PermutationCheckSpec::new(
-                vec![
-                    (Source::Column(cols[0].0.index()), KAPPA_GEN_X),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
-                ],
-                Some(gate_col.index()),
-            ),
-        );
+        cx.call(&gen_service(), &[cols[0].0], gate_col).unwrap();
 
         cx.attach(
             ChipletDef::from_air(&GenChiplet {
@@ -218,13 +201,11 @@ fn build_witness(
     let main = tb.build();
 
     let chip = s.with_bus.then(|| {
-        let chip_layout = [ColumnType::B32, ColumnType::B32, ColumnType::Bit];
+        let chip_layout = [ColumnType::B32, ColumnType::Bit];
         let mut tb = TraceBuilder::new(&chip_layout, s.num_vars).unwrap();
 
-        for (j, &row) in s.active.iter().enumerate() {
-            let (a, _, _) = vals[0][j];
+        for (j, &(a, _, _)) in vals[0].iter().enumerate() {
             tb.set_b32(CHIP_X, j, a).unwrap();
-            tb.set_b32(CHIP_REQ, j, Block32(row as u32)).unwrap();
             tb.set_bit(CHIP_SEL, j, Bit::ONE).unwrap();
         }
 
@@ -401,6 +382,14 @@ fn sample_gate(rng: &mut Rng, num_rows: usize) -> (FixedShape<F>, Vec<usize>) {
 
             (FixedShape::Segments(vec![seg(o1, c1), seg(o2, c2)]), rows)
         }
+    }
+}
+
+fn gen_service() -> Service {
+    Service {
+        bus_id: GEN_BUS_ID,
+        kind: BusKind::Permutation,
+        slots: vec![ServiceSlot::Value(KAPPA_GEN_X), ServiceSlot::EmitRank],
     }
 }
 

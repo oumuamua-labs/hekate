@@ -76,6 +76,7 @@ pub(crate) struct MlKemCtrlSchedule {
 pub(crate) struct MlKemCtrlShapes<F> {
     pub(crate) io: FixedShape<F>,
     pub(crate) keccak: FixedShape<F>,
+    pub(crate) kec_is_output: FixedShape<F>,
     pub(crate) kec_input_ref: FixedShape<F>,
     pub(crate) kec_bind_lo: FixedShape<F>,
     pub(crate) basemul: FixedShape<F>,
@@ -212,6 +213,7 @@ impl MlKemCtrlSchedule {
     pub(crate) fn fixed_shapes<F: TowerField>(&self) -> MlKemCtrlShapes<F> {
         let mut io = Vec::new();
         let mut keccak = Vec::new();
+        let mut kec_is_output = Vec::new();
         let mut kec_input_ref = Vec::new();
         let mut kec_bind_lo = Vec::new();
         let mut basemul = Vec::new();
@@ -240,6 +242,13 @@ impl MlKemCtrlSchedule {
                         BLOCK_FULL,
                         blocks,
                         &ones_pattern(BLOCK_FULL, [42, BLOCK_FULL - 1]),
+                    );
+                    push_seg(
+                        &mut kec_is_output,
+                        origin,
+                        BLOCK_FULL,
+                        blocks,
+                        &ones_pattern(BLOCK_FULL, [BLOCK_FULL - 1]),
                     );
                     push_seg(
                         &mut kec_input_ref,
@@ -272,6 +281,13 @@ impl MlKemCtrlSchedule {
                         BLOCK_HASH_CT,
                         blocks,
                         &ones_pattern(BLOCK_HASH_CT, [0, BLOCK_HASH_CT - 1]),
+                    );
+                    push_seg(
+                        &mut kec_is_output,
+                        origin,
+                        BLOCK_HASH_CT,
+                        blocks,
+                        &ones_pattern(BLOCK_HASH_CT, [BLOCK_HASH_CT - 1]),
                     );
                     push_seg(
                         &mut kec_input_ref,
@@ -333,6 +349,7 @@ impl MlKemCtrlSchedule {
         MlKemCtrlShapes {
             io: segments_shape(io),
             keccak: segments_shape(keccak),
+            kec_is_output: segments_shape(kec_is_output),
             kec_input_ref: segments_shape(kec_input_ref),
             kec_bind_lo: segments_shape(kec_bind_lo),
             basemul: segments_shape(basemul),

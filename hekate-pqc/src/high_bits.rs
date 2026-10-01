@@ -349,11 +349,8 @@ impl HighBitsChiplet {
                 ServiceSlot::Value(b"kappa_hb_idx"),
                 ServiceSlot::Value(b"kappa_hb_h"),
                 ServiceSlot::Value(b"kappa_hb_w1"),
+                ServiceSlot::EmitRank,
             ],
-            clock_waiver: Some(
-                "see pqc/high_bits.rs: bus_idx is positional, both endpoints force \
-                 one row per (idx) value by AIR rather than by a clock slot",
-            ),
         }
     }
 
@@ -372,7 +369,6 @@ impl HighBitsChiplet {
                     ly.bus_h_bit,
                     ly.bus_w1_prime,
                 ],
-                &[],
                 ly.s_active,
             )
             .expect("service slots match the responder columns")
@@ -964,6 +960,7 @@ mod tests {
     use super::*;
     use hekate_core::trace::Trace;
     use hekate_math::{Bit, Block128};
+    use hekate_program::permutation::EMIT_RANK_LABEL;
 
     type F = Block128;
 
@@ -1147,13 +1144,14 @@ mod tests {
         let chiplet = HighBitsChiplet::new(Q, DIVISOR, 1024, 1024);
         let spec = chiplet.linking_spec();
 
-        assert_eq!(spec.sources.len(), 6);
+        assert_eq!(spec.sources.len(), 7);
         assert_eq!(spec.sources[0].1, b"kappa_hb_r");
         assert_eq!(spec.sources[1].1, b"kappa_hb_r1");
         assert_eq!(spec.sources[2].1, b"kappa_hb_r0");
         assert_eq!(spec.sources[3].1, b"kappa_hb_idx");
         assert_eq!(spec.sources[4].1, b"kappa_hb_h");
         assert_eq!(spec.sources[5].1, b"kappa_hb_w1");
+        assert_eq!(spec.sources[6].1, EMIT_RANK_LABEL);
     }
 
     #[test]

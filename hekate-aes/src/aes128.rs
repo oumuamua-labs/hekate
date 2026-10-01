@@ -26,7 +26,7 @@ use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, Servic
 use hekate_program::{Air, FixedColumn, FixedShape, fix};
 
 use super::sbox_rom;
-use super::{AES_BYTE_LABELS, AES_DIRECTION_LABEL, ROT_MAP};
+use super::{AES_BYTE_LABELS, ROT_MAP};
 
 #[rustfmt::skip]
 pub const AES_KEY_LABELS: [&[u8]; 16] = [
@@ -60,8 +60,6 @@ define_columns! {
         P_K0_SUB: [B8; 4],
         P_K0_INV: [B8; 4],
         P_K0_Z: [Bit; 4],
-        P_REQUEST_IDX_LINK: B32,
-        P_REQUEST_IDX_KEY: B32,
     }
 }
 
@@ -108,16 +106,6 @@ define_columns! {
         K0_SUB: [B8; 4],
         K0_INV_BITS: [Bit; 32],
         K0_Z: [Bit; 4],
-
-        // Partner CPU row index for the
-        // aes128_link bus (S_IN_OUT-gated:
-        // input row + output row per block).
-        REQUEST_IDX_LINK: B32,
-
-        // Partner CPU row index for the
-        // aes128_key_in bus (S_INPUT-gated:
-        // input row only).
-        REQUEST_IDX_KEY: B32,
     }
 }
 
@@ -149,28 +137,26 @@ impl AesRound128Air {
         Self { num_blocks }
     }
 
-    /// Both endpoints derive from this schema: 16 state
-    /// bytes, the request-index clock, direction.
+    /// Both endpoints derive from this schema:
+    /// 16 state bytes, then the emit rank.
     pub fn link_service() -> Service {
-        let mut slots = Vec::with_capacity(18);
+        let mut slots = Vec::with_capacity(17);
 
         for label in AES_BYTE_LABELS {
             slots.push(ServiceSlot::Value(label));
         }
 
-        slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
-        slots.push(ServiceSlot::Value(AES_DIRECTION_LABEL));
+        slots.push(ServiceSlot::EmitRank);
 
         Service {
             bus_id: Self::LINK_BUS_ID,
             kind: BusKind::Permutation,
             slots,
-            clock_waiver: None,
         }
     }
 
     /// Both endpoints derive from this schema:
-    /// 16 key bytes and the request-index clock.
+    /// 16 key bytes, then the emit rank.
     pub fn key_service() -> Service {
         let mut slots = Vec::with_capacity(17);
 
@@ -178,26 +164,20 @@ impl AesRound128Air {
             slots.push(ServiceSlot::Value(label));
         }
 
-        slots.push(ServiceSlot::RequestIdx { num_bytes: 4 });
+        slots.push(ServiceSlot::EmitRank);
 
         Service {
             bus_id: Self::KEY_BUS_ID,
             kind: BusKind::Permutation,
             slots,
-            clock_waiver: None,
         }
     }
 
     pub fn link_spec() -> PermutationCheckSpec {
-        let mut values: Vec<usize> = (0..16).map(|i| Aes128Columns::STATE_IN + i).collect();
-        values.push(Aes128Columns::S_INPUT);
+        let values: Vec<usize> = (0..16).map(|i| Aes128Columns::STATE_IN + i).collect();
 
         Self::link_service()
-            .respond(
-                &values,
-                &[Aes128Columns::REQUEST_IDX_LINK],
-                Aes128Columns::S_IN_OUT,
-            )
+            .respond(&values, Aes128Columns::S_IN_OUT)
             .expect("service slots match the responder columns")
     }
 
@@ -205,11 +185,7 @@ impl AesRound128Air {
         let values: Vec<usize> = (0..16).map(|i| Aes128Columns::K0 + i).collect();
 
         Self::key_service()
-            .respond(
-                &values,
-                &[Aes128Columns::REQUEST_IDX_KEY],
-                Aes128Columns::S_INPUT,
-            )
+            .respond(&values, Aes128Columns::S_INPUT)
             .expect("service slots match the responder columns")
     }
 
@@ -302,7 +278,6 @@ impl<F: TowerField> Air<F> for AesRound128Air {
                     .pass_through(4, ColumnType::B8) // K0_SUB
                     .expand_bits(4, ColumnType::B8) // K0_INV -> K0_INV_BITS
                     .control_bits(4) // K0_Z
-                    .pass_through(2, ColumnType::B32) // REQUEST_IDX_LINK, REQUEST_IDX_KEY
                     .build()
                     .expect("AesRound128Air expander"),
             )
@@ -520,7 +495,7 @@ where
         &self,
         calls: &[super::trace::Aes128Call],
     ) -> Result<Vec<ColumnTrace>, Error> {
-        let aes_trace = super::trace::generate_aes_trace(calls, None, self.num_rows)?;
+        let aes_trace = super::trace::generate_aes_trace(calls, self.num_rows)?;
 
         let mut sbox_rounds = Vec::new();
         let s_active = aes_trace.columns[PhysAes128Columns::P_S_ACTIVE]
@@ -551,11 +526,7 @@ where
                     .0;
             }
 
-            sbox_rounds.push(sbox_rom::SboxRound {
-                inputs,
-                outputs,
-                request_idx: row as u32,
-            });
+            sbox_rounds.push(sbox_rom::SboxRound { inputs, outputs });
         }
 
         let sbox_trace = sbox_rom::generate_sbox_rom_trace(&sbox_rounds, self.sbox_rom_rows)?;
@@ -568,13 +539,13 @@ where
 mod tests {
     use super::*;
     use hekate_math::Block128;
-    use hekate_program::permutation::REQUEST_IDX_LABEL;
+    use hekate_program::permutation::EMIT_RANK_LABEL;
 
     type F = Block128;
 
     #[test]
     fn virtual_column_count() {
-        assert_eq!(Aes128Columns::NUM_COLUMNS, 167);
+        assert_eq!(Aes128Columns::NUM_COLUMNS, 165);
         assert_eq!(Aes128Columns::STATE_IN, 0);
         assert_eq!(Aes128Columns::SBOX_OUT, 16);
         assert_eq!(Aes128Columns::ROUND_KEY, 32);
@@ -591,8 +562,6 @@ mod tests {
         assert_eq!(Aes128Columns::K0_SUB, 125);
         assert_eq!(Aes128Columns::K0_INV_BITS, 129);
         assert_eq!(Aes128Columns::K0_Z, 161);
-        assert_eq!(Aes128Columns::REQUEST_IDX_LINK, 165);
-        assert_eq!(Aes128Columns::REQUEST_IDX_KEY, 166);
     }
 
     #[test]
@@ -600,7 +569,7 @@ mod tests {
         let layout = PhysAes128Columns::build_layout();
 
         assert_eq!(layout.len(), PhysAes128Columns::NUM_COLUMNS);
-        assert_eq!(PhysAes128Columns::NUM_COLUMNS, 96);
+        assert_eq!(PhysAes128Columns::NUM_COLUMNS, 94);
 
         assert_eq!(PhysAes128Columns::P_STATE_IN, 0);
         assert_eq!(PhysAes128Columns::P_ROUND_IDX, 48);
@@ -612,8 +581,6 @@ mod tests {
         assert_eq!(PhysAes128Columns::P_K0_SUB, 82);
         assert_eq!(PhysAes128Columns::P_K0_INV, 86);
         assert_eq!(PhysAes128Columns::P_K0_Z, 90);
-        assert_eq!(PhysAes128Columns::P_REQUEST_IDX_LINK, 94);
-        assert_eq!(PhysAes128Columns::P_REQUEST_IDX_KEY, 95);
     }
 
     #[test]
@@ -658,20 +625,16 @@ mod tests {
     fn link_spec_structure() {
         let spec = AesRound128Air::link_spec();
 
-        assert_eq!(spec.num_sources(), 18);
+        assert_eq!(spec.num_sources(), 17);
         assert_eq!(spec.selector, Some(Aes128Columns::S_IN_OUT));
-        assert_eq!(spec.sources[16].1, REQUEST_IDX_LABEL);
-        assert_eq!(spec.sources[17].1, AES_DIRECTION_LABEL);
+        assert_eq!(spec.sources[16].1, EMIT_RANK_LABEL);
     }
 
     #[test]
     fn link_endpoints_agree() {
         let chiplet = AesRound128Air::link_spec();
 
-        let cpu_values: Vec<usize> = (0..16)
-            .map(|i| CpuAes128Columns::DATA + i)
-            .chain([CpuAes128Columns::KEY_SELECTOR])
-            .collect();
+        let cpu_values: Vec<usize> = (0..16).map(|i| CpuAes128Columns::DATA + i).collect();
 
         let cpu = AesRound128Air::link_service()
             .request(&cpu_values, CpuAes128Columns::SELECTOR)
@@ -693,7 +656,7 @@ mod tests {
 
         assert_eq!(bus_id, sbox_rom::SboxRomChiplet::BUS_ID);
         assert_eq!(spec.num_sources(), 33);
-        assert_eq!(spec.sources[32].1, REQUEST_IDX_LABEL);
+        assert_eq!(spec.sources[32].1, EMIT_RANK_LABEL);
         assert_eq!(spec.selector, Some(Aes128Columns::S_ACTIVE));
         assert!(spec.clock_waiver.is_none());
     }
@@ -704,7 +667,7 @@ mod tests {
 
         assert_eq!(spec.num_sources(), 17);
         assert_eq!(spec.selector, Some(Aes128Columns::S_INPUT));
-        assert_eq!(spec.sources[16].1, REQUEST_IDX_LABEL);
+        assert_eq!(spec.sources[16].1, EMIT_RANK_LABEL);
     }
 
     #[test]

@@ -31,7 +31,7 @@ use hekate_program::{Air, FixedColumn};
 
 const ARITH_OPERANDS: usize = 4;
 const ARITH_SELECTORS: usize = 7;
-const ARITH_BUS_TAIL_B32: usize = 2;
+const ARITH_BUS_TAIL_B32: usize = 1;
 const ARITH_NUM_PHYSICAL: usize = ARITH_OPERANDS + ARITH_BUS_TAIL_B32 + ARITH_SELECTORS;
 
 #[derive(Clone, Debug)]
@@ -48,7 +48,6 @@ pub struct IntArithmeticLayout {
     pub val_res: usize,
     pub carry_packed: usize,
     pub opcode: usize,
-    pub request_idx: usize,
 
     pub s_output: usize,
     pub s_add: usize,
@@ -79,9 +78,8 @@ impl IntArithmeticLayout {
         let val_res = val_a + 2;
         let carry_packed = val_a + 3;
         let opcode = val_a + 4;
-        let request_idx = val_a + 5;
 
-        let s_output = request_idx + 1;
+        let s_output = opcode + 1;
         let s_add = s_output + 1;
         let s_sub = s_output + 2;
         let s_and = s_output + 3;
@@ -100,7 +98,6 @@ impl IntArithmeticLayout {
             val_res,
             carry_packed,
             opcode,
-            request_idx,
             s_output,
             s_add,
             s_sub,
@@ -245,7 +242,7 @@ impl IntArithmeticChiplet {
     }
 
     /// Both endpoints derive from this schema:
-    /// the operand triple, the opcode, the clock.
+    /// the operand triple, the opcode, then the emit rank.
     pub fn service() -> Service {
         Service {
             bus_id: Self::BUS_ID,
@@ -255,9 +252,8 @@ impl IntArithmeticChiplet {
                 ServiceSlot::Value(b"kappa_val_b"),
                 ServiceSlot::Value(b"kappa_val_res"),
                 ServiceSlot::Value(b"kappa_opcode"),
-                ServiceSlot::RequestIdx { num_bytes: 4 },
+                ServiceSlot::EmitRank,
             ],
-            clock_waiver: None,
         }
     }
 
@@ -265,11 +261,7 @@ impl IntArithmeticChiplet {
         let ly = &self.layout;
 
         Self::service()
-            .respond(
-                &[ly.val_a, ly.val_b, ly.val_res, ly.opcode],
-                &[ly.request_idx],
-                ly.s_output,
-            )
+            .respond(&[ly.val_a, ly.val_b, ly.val_res, ly.opcode], ly.s_output)
             .expect("service slots match the responder columns")
     }
 
@@ -351,7 +343,7 @@ impl<F: TowerField> Air<F> for IntArithmeticChiplet {
     }
 
     /// Operand columns (val_a, val_b, val_res, opcode) are CPU-host owned.
-    /// Chiplet pins only internal state: carry_packed, request_idx.
+    /// Chiplet pins only internal state: carry_packed.
     fn constraint_ast(&self) -> ConstraintAst<F> {
         let ly = &self.layout;
         let cs = ConstraintSystem::<F>::new();
@@ -438,11 +430,6 @@ impl<F: TowerField> Air<F> for IntArithmeticChiplet {
             cs.assert_zero_when(s_lt, bit);
         }
 
-        let request_idx = cs.col(ly.request_idx);
-        let not_active = one + s_out;
-
-        cs.assert_zero_when(not_active, request_idx);
-
         let carry_unused = one + s_add + s_sub + s_lt;
         cs.assert_zero_when(carry_unused, carry_packed);
 
@@ -460,14 +447,13 @@ const PHY_VAL_B: usize = 1;
 const PHY_VAL_RES: usize = 2;
 const PHY_CARRY: usize = 3;
 const PHY_OPCODE: usize = 4;
-const PHY_REQUEST_IDX: usize = 5;
-const PHY_S_OUTPUT: usize = 6;
-const PHY_S_ADD: usize = 7;
-const PHY_S_SUB: usize = 8;
-const PHY_S_AND: usize = 9;
-const PHY_S_XOR: usize = 10;
-const PHY_S_NOT: usize = 11;
-const PHY_S_LT: usize = 12;
+const PHY_S_OUTPUT: usize = 5;
+const PHY_S_ADD: usize = 6;
+const PHY_S_SUB: usize = 7;
+const PHY_S_AND: usize = 8;
+const PHY_S_XOR: usize = 9;
+const PHY_S_NOT: usize = 10;
+const PHY_S_LT: usize = 11;
 
 #[derive(Clone, Copy, Debug)]
 pub enum IntArithmeticOp {
@@ -475,17 +461,11 @@ pub enum IntArithmeticOp {
         op: ArithmeticOpcode,
         a: u32,
         b: u32,
-
-        /// Partner-side emit row index.
-        request_idx: u32,
     },
     U64 {
         op: ArithmeticOpcode,
         a: u64,
         b: u64,
-
-        /// Partner-side emit row index.
-        request_idx: u32,
     },
 }
 
@@ -515,13 +495,8 @@ pub fn generate_arithmetic_trace(
     let mut tb = TraceBuilder::new(&phy, num_vars)?;
 
     for (i, call) in ops.iter().enumerate() {
-        let (opcode, a, b, request_idx) = match *call {
-            IntArithmeticOp::U32 {
-                op,
-                a,
-                b,
-                request_idx,
-            } => {
+        let (opcode, a, b) = match *call {
+            IntArithmeticOp::U32 { op, a, b } => {
                 if bw != 32 {
                     return Err(errors::Error::Protocol {
                         protocol: "arithmetic",
@@ -529,14 +504,9 @@ pub fn generate_arithmetic_trace(
                     });
                 }
 
-                (op, a as u64, b as u64, request_idx)
+                (op, a as u64, b as u64)
             }
-            IntArithmeticOp::U64 {
-                op,
-                a,
-                b,
-                request_idx,
-            } => {
+            IntArithmeticOp::U64 { op, a, b } => {
                 if bw != 64 {
                     return Err(errors::Error::Protocol {
                         protocol: "arithmetic",
@@ -544,7 +514,7 @@ pub fn generate_arithmetic_trace(
                     });
                 }
 
-                (op, a, b, request_idx)
+                (op, a, b)
             }
         };
 
@@ -556,7 +526,6 @@ pub fn generate_arithmetic_trace(
         write_packed_operand(&mut tb, PHY_CARRY, i, bw, carry_word)?;
 
         tb.set_b32(PHY_OPCODE, i, Block32::from(opcode as u8 as u32))?;
-        tb.set_b32(PHY_REQUEST_IDX, i, Block32::from(request_idx))?;
         tb.set_bit(PHY_S_OUTPUT, i, Bit::ONE)?;
 
         let sel_col = match opcode {
@@ -677,7 +646,6 @@ mod tests {
             op: ArithmeticOpcode::ADD,
             a,
             b,
-            request_idx: 0,
         }
     }
 
@@ -686,7 +654,6 @@ mod tests {
             op: ArithmeticOpcode::SUB,
             a,
             b,
-            request_idx: 0,
         }
     }
 
@@ -695,7 +662,6 @@ mod tests {
             op: ArithmeticOpcode::AND,
             a,
             b,
-            request_idx: 0,
         }
     }
 
@@ -704,7 +670,6 @@ mod tests {
             op: ArithmeticOpcode::XOR,
             a,
             b,
-            request_idx: 0,
         }
     }
 
@@ -713,7 +678,6 @@ mod tests {
             op: ArithmeticOpcode::NOT,
             a,
             b: 0,
-            request_idx: 0,
         }
     }
 
@@ -722,7 +686,6 @@ mod tests {
             op: ArithmeticOpcode::LT,
             a,
             b,
-            request_idx: 0,
         }
     }
 
@@ -777,18 +740,17 @@ mod tests {
         assert_eq!(ly.val_res, 130);
         assert_eq!(ly.carry_packed, 131);
         assert_eq!(ly.opcode, 132);
-        assert_eq!(ly.request_idx, 133);
 
-        assert_eq!(ly.s_output, 134);
-        assert_eq!(ly.s_add, 135);
-        assert_eq!(ly.s_sub, 136);
-        assert_eq!(ly.s_and, 137);
-        assert_eq!(ly.s_xor, 138);
-        assert_eq!(ly.s_not, 139);
-        assert_eq!(ly.s_lt, 140);
+        assert_eq!(ly.s_output, 133);
+        assert_eq!(ly.s_add, 134);
+        assert_eq!(ly.s_sub, 135);
+        assert_eq!(ly.s_and, 136);
+        assert_eq!(ly.s_xor, 137);
+        assert_eq!(ly.s_not, 138);
+        assert_eq!(ly.s_lt, 139);
 
-        assert_eq!(ly.num_virtual_columns, 141);
-        assert_eq!(ly.num_physical_columns, 13);
+        assert_eq!(ly.num_virtual_columns, 140);
+        assert_eq!(ly.num_physical_columns, 12);
     }
 
     #[test]
@@ -805,38 +767,36 @@ mod tests {
         assert_eq!(ly.val_res, 258);
         assert_eq!(ly.carry_packed, 259);
         assert_eq!(ly.opcode, 260);
-        assert_eq!(ly.request_idx, 261);
 
-        assert_eq!(ly.s_output, 262);
-        assert_eq!(ly.s_lt, 268);
+        assert_eq!(ly.s_output, 261);
+        assert_eq!(ly.s_lt, 267);
 
-        assert_eq!(ly.num_virtual_columns, 269);
-        assert_eq!(ly.num_physical_columns, 13);
+        assert_eq!(ly.num_virtual_columns, 268);
+        assert_eq!(ly.num_physical_columns, 12);
     }
 
     #[test]
-    fn physical_layout_32_is_31_bytes_per_row() {
+    fn physical_layout_32_is_27_bytes_per_row() {
         let ly = IntArithmeticLayout::compute(32);
         let phy = ly.build_physical_layout();
 
-        assert_eq!(phy.len(), 13);
-        assert_eq!(physical_row_bytes(&phy), 31);
+        assert_eq!(phy.len(), 12);
+        assert_eq!(physical_row_bytes(&phy), 27);
     }
 
     #[test]
-    fn physical_layout_64_is_47_bytes_per_row() {
+    fn physical_layout_64_is_43_bytes_per_row() {
         let ly = IntArithmeticLayout::compute(64);
         let phy = ly.build_physical_layout();
 
-        assert_eq!(phy.len(), 13);
-        assert_eq!(physical_row_bytes(&phy), 47);
+        assert_eq!(phy.len(), 12);
+        assert_eq!(physical_row_bytes(&phy), 43);
     }
 
     #[test]
     fn physical_column_types_32() {
         let phy = IntArithmeticLayout::compute(32).build_physical_layout();
         let expected = [
-            ColumnType::B32,
             ColumnType::B32,
             ColumnType::B32,
             ColumnType::B32,
@@ -862,7 +822,6 @@ mod tests {
             ColumnType::B64,
             ColumnType::B64,
             ColumnType::B32,
-            ColumnType::B32,
             ColumnType::Bit,
             ColumnType::Bit,
             ColumnType::Bit,
@@ -879,9 +838,9 @@ mod tests {
         let ly = IntArithmeticLayout::compute(32);
         let expander = ly.build_expander().expect("expander 32");
 
-        assert_eq!(expander.num_virtual_columns(), 141);
-        assert_eq!(expander.num_physical_columns(), 13);
-        assert_eq!(expander.physical_row_bytes(), 31);
+        assert_eq!(expander.num_virtual_columns(), 140);
+        assert_eq!(expander.num_physical_columns(), 12);
+        assert_eq!(expander.physical_row_bytes(), 27);
         assert_eq!(
             expander.virtual_layout(),
             ly.build_virtual_layout().as_slice()
@@ -893,9 +852,9 @@ mod tests {
         let ly = IntArithmeticLayout::compute(64);
         let expander = ly.build_expander().expect("expander 64");
 
-        assert_eq!(expander.num_virtual_columns(), 269);
-        assert_eq!(expander.num_physical_columns(), 13);
-        assert_eq!(expander.physical_row_bytes(), 47);
+        assert_eq!(expander.num_virtual_columns(), 268);
+        assert_eq!(expander.num_physical_columns(), 12);
+        assert_eq!(expander.physical_row_bytes(), 43);
         assert_eq!(
             expander.virtual_layout(),
             ly.build_virtual_layout().as_slice()
@@ -930,11 +889,11 @@ mod tests {
     #[test]
     fn new_accepts_valid_shapes() {
         let chip32 = IntArithmeticChiplet::new(32, 16, 16).unwrap();
-        assert_eq!(chip32.num_columns(), 141);
+        assert_eq!(chip32.num_columns(), 140);
         assert_eq!(chip32.num_rows(), 16);
 
         let chip64 = IntArithmeticChiplet::new(64, 8, 8).unwrap();
-        assert_eq!(chip64.num_columns(), 269);
+        assert_eq!(chip64.num_columns(), 268);
         assert_eq!(chip64.num_rows(), 8);
     }
 
@@ -1008,19 +967,16 @@ mod tests {
                 op: ArithmeticOpcode::ADD,
                 a: 10,
                 b: 20,
-                request_idx: 0,
             },
             IntArithmeticOp::U64 {
                 op: ArithmeticOpcode::ADD,
                 a: u64::MAX,
                 b: 1,
-                request_idx: 1,
             },
             IntArithmeticOp::U64 {
                 op: ArithmeticOpcode::ADD,
                 a: u64::MAX,
                 b: u64::MAX,
-                request_idx: 2,
             },
         ];
 
@@ -1038,7 +994,6 @@ mod tests {
             op: ArithmeticOpcode::SUB,
             a: 0,
             b: 1,
-            request_idx: 0,
         }];
 
         let trace = generate_arithmetic_trace(&ops, &ly, 2).unwrap();
@@ -1061,7 +1016,6 @@ mod tests {
             op: ArithmeticOpcode::ADD,
             a: 1,
             b: 2,
-            request_idx: 0,
         }];
 
         assert!(generate_arithmetic_trace(&ops, &ly, 2).is_err());
@@ -1125,19 +1079,16 @@ mod tests {
                 op: ArithmeticOpcode::ADD,
                 a: 0xDEADBEEF,
                 b: 0xCAFEBABE,
-                request_idx: 0,
             },
             IntArithmeticOp::U64 {
                 op: ArithmeticOpcode::SUB,
                 a: 100,
                 b: 200,
-                request_idx: 1,
             },
             IntArithmeticOp::U64 {
                 op: ArithmeticOpcode::LT,
                 a: u64::MAX - 1,
                 b: u64::MAX,
-                request_idx: 2,
             },
         ];
 

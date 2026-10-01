@@ -65,6 +65,7 @@ pub(crate) struct MlDsaCtrlSchedule {
 pub(crate) struct MlDsaCtrlShapes<F> {
     pub(crate) io: FixedShape<F>,
     pub(crate) keccak: FixedShape<F>,
+    pub(crate) kec_is_output: FixedShape<F>,
     pub(crate) ntt: FixedShape<F>,
     pub(crate) w_bind: FixedShape<F>,
     pub(crate) ram: FixedShape<F>,
@@ -195,6 +196,7 @@ impl MlDsaCtrlSchedule {
     pub(crate) fn fixed_shapes<F: TowerField>(&self) -> MlDsaCtrlShapes<F> {
         let mut io = Vec::new();
         let mut keccak = Vec::new();
+        let mut kec_is_output = Vec::new();
         let mut ntt = Vec::new();
         let mut w_bind = Vec::new();
         let mut ram: Vec<CadenceSegment<F>> = Vec::new();
@@ -214,6 +216,7 @@ impl MlDsaCtrlSchedule {
                 }
                 Run::Keccak { calls } => {
                     push_seg(&mut keccak, origin, 1, 2 * calls, &[F::ONE]);
+                    push_seg(&mut kec_is_output, origin, 2, calls, &[F::ZERO, F::ONE]);
                     solid.flush(&mut ram);
                 }
                 Run::NttRam { rows } => {
@@ -255,6 +258,7 @@ impl MlDsaCtrlSchedule {
         MlDsaCtrlShapes {
             io: segments_shape(io),
             keccak: segments_shape(keccak),
+            kec_is_output: segments_shape(kec_is_output),
             ntt: segments_shape(ntt),
             w_bind: segments_shape(w_bind),
             ram: segments_shape(ram),

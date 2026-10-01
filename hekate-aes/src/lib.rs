@@ -51,7 +51,7 @@ pub fn host_selector_shape<F: TowerField>(stride: usize, count: usize) -> FixedS
     }
 }
 
-/// Host emit direction:
+/// Host key emit schedule:
 /// `KEY_SELECTOR` fires only on each
 /// block's input row at offset 0.
 pub fn host_key_selector_shape<F: TowerField>(stride: usize, count: usize) -> FixedShape<F> {
@@ -95,9 +95,6 @@ const MC: [[u8; 4]; 4] = [
 /// index j (0..4) to the source byte
 /// offset in the key's last word.
 const ROT_MAP: [usize; 4] = [13, 14, 15, 12];
-
-/// Separates a block's two emit rows in the bus key.
-pub const AES_DIRECTION_LABEL: &[u8] = b"aes_is_input";
 
 pub const AES_BYTE_LABELS: [&[u8]; 16] = [
     b"aes_byte_0",

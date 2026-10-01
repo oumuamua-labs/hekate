@@ -26,16 +26,11 @@ const ROUNDS: usize = 24;
 const CPU_ROWS: usize = 32;
 const KECCAK_ROWS: usize = 64;
 
-/// CPU row the honest tail names;
-/// no CPU row emits there.
-const DANGLING_IDX: u32 = 7;
-
 struct Row {
     state: [u64; 25],
     round_word: u32,
     s_round: bool,
     s_in_out: bool,
-    request_idx: u32,
 }
 
 fn build_program() -> CircuitProgram<F> {
@@ -43,11 +38,9 @@ fn build_program() -> CircuitProgram<F> {
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let call_values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &call_values, selector)
@@ -56,10 +49,6 @@ fn build_program() -> CircuitProgram<F> {
     cx.fix(
         selector,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, 1),
-    );
-    cx.fix(
-        is_output,
-        KeccakChiplet::host_direction_shape(KeccakChiplet::BLOCK_ROWS, 1),
     );
 
     cx.attach(ChipletDef::from_air(&KeccakChiplet::new(KECCAK_ROWS, 1)).unwrap());
@@ -94,11 +83,6 @@ fn cpu_trace(input: [u64; 25], output: [u64; 25]) -> ColumnTrace {
     tb.set_bit(CpuKeccakColumns::SELECTOR, ROUNDS, Bit::ONE)
         .unwrap();
 
-    for row in 1..=ROUNDS {
-        tb.set_bit(CpuKeccakColumns::IS_OUTPUT, row, Bit::ONE)
-            .unwrap();
-    }
-
     tb.build()
 }
 
@@ -115,12 +99,6 @@ fn write_rows(rows: &[Row]) -> ColumnTrace {
 
         tb.set_b32(PhysKeccakColumns::P_ROUND, i, Block32::from(row.round_word))
             .unwrap();
-        tb.set_b32(
-            PhysKeccakColumns::P_REQUEST_IDX,
-            i,
-            Block32::from(row.request_idx),
-        )
-        .unwrap();
         tb.set_bit(
             PhysKeccakColumns::P_S_ROUND,
             i,
@@ -133,16 +111,6 @@ fn write_rows(rows: &[Row]) -> ColumnTrace {
             if row.s_in_out { Bit::ONE } else { Bit::ZERO },
         )
         .unwrap();
-        tb.set_bit(
-            PhysKeccakColumns::P_IS_OUTPUT,
-            i,
-            if row.s_in_out && !row.s_round {
-                Bit::ONE
-            } else {
-                Bit::ZERO
-            },
-        )
-        .unwrap();
     }
 
     tb.build()
@@ -150,7 +118,7 @@ fn write_rows(rows: &[Row]) -> ColumnTrace {
 
 /// A 24-round block. `announce_input` false makes the
 /// head a bare round row, only the tail reaches the bus.
-fn block(input: [u64; 25], announce_input: bool, in_idx: u32, out_idx: u32, out: &mut Vec<Row>) {
+fn block(input: [u64; 25], announce_input: bool, out: &mut Vec<Row>) {
     let mut state = input;
 
     for (round, rc) in KeccakChiplet::ROUND_CONSTANTS.iter().enumerate() {
@@ -159,11 +127,6 @@ fn block(input: [u64; 25], announce_input: bool, in_idx: u32, out_idx: u32, out:
             round_word: 1u32 << round,
             s_round: true,
             s_in_out: announce_input && round == 0,
-            request_idx: if announce_input && round == 0 {
-                in_idx
-            } else {
-                0
-            },
         });
 
         state = KeccakWitness::keccak_f_round(state, *rc);
@@ -174,13 +137,12 @@ fn block(input: [u64; 25], announce_input: bool, in_idx: u32, out_idx: u32, out:
         round_word: 0,
         s_round: false,
         s_in_out: true,
-        request_idx: out_idx,
     });
 }
 
 /// Two rows:
 /// a lone round-23 row plus its output row.
-fn stub(seed: [u64; 25], out_idx: u32, out: &mut Vec<Row>) -> [u64; 25] {
+fn stub(seed: [u64; 25], out: &mut Vec<Row>) -> [u64; 25] {
     let rc = KeccakChiplet::ROUND_CONSTANTS[23];
     let image = KeccakWitness::keccak_f_round(seed, rc);
 
@@ -189,7 +151,6 @@ fn stub(seed: [u64; 25], out_idx: u32, out: &mut Vec<Row>) -> [u64; 25] {
         round_word: 1u32 << 23,
         s_round: true,
         s_in_out: false,
-        request_idx: 0,
     });
 
     out.push(Row {
@@ -197,7 +158,6 @@ fn stub(seed: [u64; 25], out_idx: u32, out: &mut Vec<Row>) -> [u64; 25] {
         round_word: 0,
         s_round: false,
         s_in_out: true,
-        request_idx: out_idx,
     });
 
     image
@@ -246,7 +206,7 @@ fn announced_block_verifies() {
     let input = test_input();
     let mut rows = Vec::new();
 
-    block(input, true, 0, ROUNDS as u32, &mut rows);
+    block(input, true, &mut rows);
 
     assert!(
         run(input, keccak_f(input), write_rows(&rows)),
@@ -254,16 +214,16 @@ fn announced_block_verifies() {
     );
 }
 
-/// Emits `(honest, 7)` twice. The second block sits
-/// past the declared cadence, on rows pinned idle.
+/// Emits the honest output twice. The second block
+/// sits past the declared cadence, on rows pinned idle.
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn unannounced_block_rejected() {
     let input = test_input();
     let mut rows = Vec::new();
 
-    block(input, true, 0, DANGLING_IDX, &mut rows);
-    block(input, false, 0, DANGLING_IDX, &mut rows);
+    block(input, true, &mut rows);
+    block(input, false, &mut rows);
 
     assert!(!run(input, keccak_f(input), write_rows(&rows)));
 }
@@ -278,10 +238,10 @@ fn phantom_output_rejected() {
 
     let mut rows = Vec::new();
 
-    block(input, true, 0, DANGLING_IDX, &mut rows);
-    block(input, false, 0, DANGLING_IDX, &mut rows);
+    block(input, true, &mut rows);
+    block(input, false, &mut rows);
 
-    let forged = stub([0x11u64; 25], ROUNDS as u32, &mut rows);
+    let forged = stub([0x11u64; 25], &mut rows);
 
     assert_ne!(forged, honest);
     assert!(rows.len() <= KECCAK_ROWS);

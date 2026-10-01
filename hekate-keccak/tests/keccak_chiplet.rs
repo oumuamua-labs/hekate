@@ -53,11 +53,9 @@ fn build_program(cpu_rows: usize, keccak_rows: usize, num_blocks: usize) -> Circ
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
     let selector = cpu.at(CpuKeccakColumns::SELECTOR);
-    let is_output = cpu.at(CpuKeccakColumns::IS_OUTPUT);
 
     let call_values: Vec<Col> = (0..25)
         .map(|lane| cpu.at(CpuKeccakColumns::LANES + lane))
-        .chain([is_output])
         .collect();
 
     cx.call(&KeccakChiplet::service(), &call_values, selector)
@@ -66,10 +64,6 @@ fn build_program(cpu_rows: usize, keccak_rows: usize, num_blocks: usize) -> Circ
     cx.fix(
         selector,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
-    );
-    cx.fix(
-        is_output,
-        KeccakChiplet::host_direction_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
     );
 
     cx.attach(ChipletDef::from_air(&KeccakChiplet::new(keccak_rows, num_blocks)).unwrap());
@@ -100,11 +94,6 @@ fn build_cpu_trace(calls: &[([u64; 25], [u64; 25])], cpu_rows: usize) -> ColumnT
             .unwrap();
         tb.set_bit(CpuKeccakColumns::SELECTOR, out_row, Bit::ONE)
             .unwrap();
-
-        for row in in_row + 1..=out_row {
-            tb.set_bit(CpuKeccakColumns::IS_OUTPUT, row, Bit::ONE)
-                .unwrap();
-        }
     }
 
     tb.build()
@@ -115,7 +104,8 @@ fn build_chiplet_trace(inputs: &[[u64; 25]], keccak_rows: usize) -> ColumnTrace 
         .iter()
         .map(|s| core::array::from_fn(|i| Block64(s[i])))
         .collect();
-    generate_keccak_trace(&blocks, None, keccak_rows).unwrap()
+
+    generate_keccak_trace(&blocks, keccak_rows).unwrap()
 }
 
 // =================================================================
@@ -286,7 +276,7 @@ fn keccak_e2e() {
 
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
-fn keccak_e2e_multi_call_default_pairs() {
+fn keccak_e2e_multi_call() {
     const ROWS: usize = 64;
 
     let in_a = test_input_state();

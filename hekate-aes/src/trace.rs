@@ -14,7 +14,7 @@
 use alloc::vec::Vec;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
-use hekate_math::{Bit, Block8, Block16, Block32, TowerField};
+use hekate_math::{Bit, Block8, Block16, TowerField};
 
 use super::aes128::PhysAes128Columns as P128;
 use super::aes256::PhysAes256Columns as P256;
@@ -55,13 +55,12 @@ struct RowData<const K: usize> {
     k0_sub: [u8; 4],
     k0_inv: [u8; 4],
     k0_z: [bool; 4],
-    request_idx_link: u32,
-    request_idx_key: u32,
 }
 
+/// Traces the AES round table: block `k` encrypts
+/// `calls[k]` and answers the host's `k`-th call.
 pub fn generate_aes_trace<const K: usize, const R: usize>(
     calls: &[AesCall<K, R>],
-    request_idx_triples: Option<&[(u32, u32, u32)]>,
     num_rows: usize,
 ) -> Result<ColumnTrace, Error> {
     if !num_rows.is_power_of_two() {
@@ -79,22 +78,6 @@ pub fn generate_aes_trace<const K: usize, const R: usize>(
         });
     }
 
-    let default_triples: Vec<(u32, u32, u32)> = match request_idx_triples {
-        Some(_) => Vec::new(),
-        None => (0..calls.len() as u32)
-            .map(|k| (2 * k, 2 * k + 1, 2 * k))
-            .collect(),
-    };
-
-    let triples: &[(u32, u32, u32)] = request_idx_triples.unwrap_or(&default_triples);
-
-    if triples.len() != calls.len() {
-        return Err(Error::Protocol {
-            protocol: "aes_trace",
-            message: "request_idx_triples length must match calls length",
-        });
-    }
-
     if P128::P_STATE_IN != P256::P_STATE_IN
         || P128::P_SBOX_OUT != P256::P_SBOX_OUT
         || P128::P_ROUND_KEY != P256::P_ROUND_KEY
@@ -109,9 +92,7 @@ pub fn generate_aes_trace<const K: usize, const R: usize>(
 
     let mut rows = Vec::with_capacity(needed);
 
-    for (k, call) in calls.iter().enumerate() {
-        let (link_in_idx, link_out_idx, key_idx) = triples[k];
-
+    for call in calls {
         let mut prev_rk = call.round_keys[0];
         let mut state = call.plaintext;
 
@@ -182,8 +163,6 @@ pub fn generate_aes_trace<const K: usize, const R: usize>(
                 } else {
                     [false; 4]
                 },
-                request_idx_link: if is_input { link_in_idx } else { 0 },
-                request_idx_key: if is_input { key_idx } else { 0 },
             });
 
             if K == 32 {
@@ -222,8 +201,6 @@ pub fn generate_aes_trace<const K: usize, const R: usize>(
             k0_sub: [0u8; 4],
             k0_inv: [0u8; 4],
             k0_z: [false; 4],
-            request_idx_link: 0,
-            request_idx_key: 0,
         });
 
         // Output row
@@ -245,8 +222,6 @@ pub fn generate_aes_trace<const K: usize, const R: usize>(
             k0_sub: [0u8; 4],
             k0_inv: [0u8; 4],
             k0_z: [false; 4],
-            request_idx_link: link_out_idx,
-            request_idx_key: 0,
         });
     }
 
@@ -329,22 +304,6 @@ fn write_128_row<const K: usize>(
         }
     }
 
-    if row.request_idx_link != 0 {
-        tb.set_b32(
-            P128::P_REQUEST_IDX_LINK,
-            i,
-            Block32::from(row.request_idx_link),
-        )?;
-    }
-
-    if row.request_idx_key != 0 {
-        tb.set_b32(
-            P128::P_REQUEST_IDX_KEY,
-            i,
-            Block32::from(row.request_idx_key),
-        )?;
-    }
-
     Ok(())
 }
 
@@ -396,22 +355,6 @@ fn write_256_row<const K: usize>(
             let z = if row.ks_z[j] { Bit::ONE } else { Bit::ZERO };
             tb.set_bit(P256::P_KS_Z + j, i, z)?;
         }
-    }
-
-    if row.request_idx_link != 0 {
-        tb.set_b32(
-            P256::P_REQUEST_IDX_LINK,
-            i,
-            Block32::from(row.request_idx_link),
-        )?;
-    }
-
-    if row.request_idx_key != 0 {
-        tb.set_b32(
-            P256::P_REQUEST_IDX_KEY,
-            i,
-            Block32::from(row.request_idx_key),
-        )?;
     }
 
     Ok(())
@@ -690,7 +633,7 @@ mod tests {
     #[test]
     fn single_block_ciphertext() {
         let call = fips_call();
-        let trace = generate_aes_trace(&[call], None, 16).unwrap();
+        let trace = generate_aes_trace(&[call], 16).unwrap();
 
         let state_in_cols: Vec<_> = (0..16)
             .map(|c| trace.columns[P128::P_STATE_IN + c].as_b8_slice().unwrap())
@@ -708,7 +651,7 @@ mod tests {
     #[test]
     fn selector_pattern() {
         let call = fips_call();
-        let trace = generate_aes_trace(&[call], None, 16).unwrap();
+        let trace = generate_aes_trace(&[call], 16).unwrap();
 
         let s_round = trace.columns[P128::P_S_ROUND].as_bit_slice().unwrap();
         let s_final = trace.columns[P128::P_S_FINAL].as_bit_slice().unwrap();
@@ -742,13 +685,13 @@ mod tests {
     #[test]
     fn trace_overflow() {
         let call = fips_call();
-        assert!(generate_aes_trace(&[call], None, 8).is_err());
+        assert!(generate_aes_trace(&[call], 8).is_err());
     }
 
     #[test]
     fn two_blocks() {
         let calls = [fips_call(), fips_call()];
-        let trace = generate_aes_trace(&calls, None, 32).unwrap();
+        let trace = generate_aes_trace(&calls, 32).unwrap();
         assert_eq!(trace.num_rows().unwrap(), 32);
 
         // Both blocks produce
@@ -760,7 +703,7 @@ mod tests {
     #[test]
     fn sbox_out_matches_sub_bytes() {
         let call = fips_call();
-        let trace = generate_aes_trace(&[call], None, 16).unwrap();
+        let trace = generate_aes_trace(&[call], 16).unwrap();
 
         for row in 0..10 {
             for j in 0..16 {
@@ -779,7 +722,7 @@ mod tests {
     #[test]
     fn key_schedule_witness_fips197() {
         let call = fips_call();
-        let trace = generate_aes_trace(&[call], None, 16).unwrap();
+        let trace = generate_aes_trace(&[call], 16).unwrap();
 
         let k0_col: Vec<_> = (0..16)
             .map(|j| trace.columns[P128::P_K0 + j].as_b8_slice().unwrap())
@@ -815,7 +758,7 @@ mod tests {
         let num_blocks = 4;
 
         let calls: [Aes128Call; 4] = core::array::from_fn(|_| fips_call());
-        let trace = generate_aes_trace(&calls, None, num_rows).unwrap();
+        let trace = generate_aes_trace(&calls, num_rows).unwrap();
 
         assert_pins_match(
             &crate::aes128::AesRound128Air::new(num_blocks),
@@ -836,7 +779,7 @@ mod tests {
             round_keys: expand_key_256(&key),
         });
 
-        let trace = generate_aes_trace(&calls, None, num_rows).unwrap();
+        let trace = generate_aes_trace(&calls, num_rows).unwrap();
 
         assert_pins_match(
             &crate::aes256::AesRound256Air::new(num_blocks),

@@ -11,9 +11,7 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{
-    BusKind, ChallengeLabel, PermutationCheckSpec, REQUEST_IDX_LABEL, Source,
-};
+use hekate_program::permutation::{BusKind, ChallengeLabel, PermutationCheckSpec, Source};
 use hekate_program::{
     Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness, define_columns,
 };
@@ -380,7 +378,7 @@ impl Air<F> for PairedAir {
             PermutationCheckSpec::new_paired(
                 vec![
                     (Source::Column(0), b"audit_paired_v" as ChallengeLabel),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(4), b"clk" as ChallengeLabel),
                 ],
                 1,
                 2,
@@ -514,7 +512,7 @@ impl Air<F> for PinnedChipletA {
                         Source::Column(EvilChipletCols::KEY),
                         b"key" as ChallengeLabel,
                     ),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(4), b"clk" as ChallengeLabel),
                 ],
                 EvilChipletCols::S_SEND_A,
                 EvilChipletCols::S_RECV_A,
@@ -573,7 +571,7 @@ impl Program<F> for MaliciousHost {
                         Source::Column(EvilChipletCols::KEY),
                         b"key" as ChallengeLabel,
                     ),
-                    (Source::RowIndexLeBytes(4), REQUEST_IDX_LABEL),
+                    (Source::RowIndexLeBytes(4), b"clk" as ChallengeLabel),
                 ],
                 EvilChipletCols::S_SEND_B,
                 EvilChipletCols::S_RECV_B,

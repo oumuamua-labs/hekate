@@ -19,10 +19,10 @@ NTT, basemul, high-bits, norm-check, and twiddle-ROM chiplets.
 
 ```
 Proving on Apple M3 Max (zero-knowledge):
-  ML-KEM-768  : 629 ms, 464 MiB peak, 3,483 KiB proof, 33.7 ms verify
-  ML-DSA-44   : 883 ms, 477 MiB peak, 4,184 KiB proof, 44.8 ms verify
-  ML-DSA-65   : 946 ms, 512 MiB peak, 4,193 KiB proof, 51.1 ms verify
-  ML-DSA-87   : 1.34 s, 811 MiB peak, 5,484 KiB proof, 48.1 ms verify
+  ML-KEM-768  : 659 ms, 484 MiB peak, 3,481 KiB proof, 33.1 ms verify
+  ML-DSA-44   : 886 ms, 489 MiB peak, 4,172 KiB proof, 43.2 ms verify
+  ML-DSA-65   : 927 ms, 477 MiB peak, 4,184 KiB proof, 45.5 ms verify
+  ML-DSA-87   : 1.36 s, 811 MiB peak, 5,464 KiB proof, 53.8 ms verify
 ```
 
 Conditions and the base-protocol column are in the
