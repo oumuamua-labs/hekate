@@ -33,7 +33,7 @@ const AES_ROWS: usize = 32;
 /// witness selectors and no schedule pins.
 #[derive(Clone)]
 struct UnpinnedHost {
-    aes: Aes128Chiplet<F>,
+    aes: Aes128Chiplet,
 }
 
 impl UnpinnedHost {
@@ -91,7 +91,14 @@ impl Program<F> for UnpinnedHost {
     }
 
     fn chiplet_defs(&self) -> errors::Result<Vec<hekate_program::chiplet::ChipletDef<F>>> {
-        self.aes.composite().flatten_defs()
+        let exempt = Aes128Chiplet::EXTERNAL_BUS_IDS.map(String::from);
+
+        let mut defs = self.aes.defs()?;
+        for def in &mut defs {
+            def.prefix_bus_ids("aes128", &exempt);
+        }
+
+        Ok(defs)
     }
 }
 
@@ -114,7 +121,7 @@ fn response_only_cpu_trace() -> ColumnTrace {
     tb.build()
 }
 
-fn unbound_ciphertext_witness(aes: &Aes128Chiplet<F>) -> (ColumnTrace, Vec<ColumnTrace>) {
+fn unbound_ciphertext_witness(aes: &Aes128Chiplet) -> (ColumnTrace, Vec<ColumnTrace>) {
     let call = fips_call_128();
     let traces = aes.generate_traces(&[call.clone(), call]).unwrap();
 

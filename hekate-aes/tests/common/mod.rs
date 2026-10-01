@@ -118,13 +118,13 @@ pub fn whitened_256() -> [u8; 16] {
 #[derive(Clone)]
 pub struct Aes128Program {
     pub program: CircuitProgram<F>,
-    pub aes: Aes128Chiplet<F>,
+    pub aes: Aes128Chiplet,
 }
 
 #[derive(Clone)]
 pub struct Aes256Program {
     pub program: CircuitProgram<F>,
-    pub aes: Aes256Chiplet<F>,
+    pub aes: Aes256Chiplet,
 }
 
 pub fn make_program_128(aes_rows: usize, num_blocks: usize) -> Aes128Program {
@@ -151,9 +151,12 @@ pub fn make_program_128(aes_rows: usize, num_blocks: usize) -> Aes128Program {
     cx.fix(selector, host_selector_shape(2, num_blocks));
     cx.fix(key_selector, host_key_selector_shape(2, num_blocks));
 
-    for def in aes.composite().flatten_defs().unwrap() {
-        cx.attach(def);
-    }
+    cx.attach_namespaced(
+        "aes128",
+        aes.defs().unwrap(),
+        &Aes128Chiplet::EXTERNAL_BUS_IDS,
+    )
+    .unwrap();
 
     Aes128Program {
         program: cx.compile().unwrap(),
@@ -185,9 +188,12 @@ pub fn make_program_256(aes_rows: usize, num_blocks: usize) -> Aes256Program {
     cx.fix(selector, host_selector_shape(2, num_blocks));
     cx.fix(key_selector, host_key_selector_shape(2, num_blocks));
 
-    for def in aes.composite().flatten_defs().unwrap() {
-        cx.attach(def);
-    }
+    cx.attach_namespaced(
+        "aes256",
+        aes.defs().unwrap(),
+        &Aes256Chiplet::EXTERNAL_BUS_IDS,
+    )
+    .unwrap();
 
     Aes256Program {
         program: cx.compile().unwrap(),
