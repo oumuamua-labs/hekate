@@ -20,6 +20,7 @@ use hekate_sha2::{
 };
 use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
@@ -31,7 +32,7 @@ const CPU_CHAIN: usize = CPU_CARRY + 1;
 struct Statement {
     program: CircuitProgram<F>,
     block: CpuSha256Block,
-    calls: Vec<Sha256Call>,
+    calls: Zeroizing<Vec<Sha256Call>>,
     digest: [u32; STATE_WORDS],
 }
 
@@ -103,10 +104,10 @@ fn build(message: &[u8], chiplet: &Sha256Chiplet<F>) -> errors::Result<Statement
 
     cx.mount(chiplet.def()?);
 
-    let mut calls = Vec::with_capacity(num_blocks);
+    let mut calls = Zeroizing::new(Vec::with_capacity(num_blocks));
     let mut h = IV;
 
-    for block in &blocks {
+    for block in blocks.iter() {
         let call = Sha256Call {
             h_in: h,
             block: *block,
@@ -131,7 +132,7 @@ fn combined_trace(st: &Statement, chiplet: &Sha256Chiplet<F>) -> errors::Result<
     let rows_per_block = chiplet.layout().rows_per_block();
     let last_block = st.calls.len() - 1;
 
-    let mut tb = TraceBuilder::new(&cpu_layout(), num_vars)?;
+    let mut tb = TraceBuilder::new_secret(&cpu_layout(), num_vars)?;
 
     for (b, call) in st.calls.iter().enumerate() {
         let first_row = b * rows_per_block;
@@ -188,8 +189,8 @@ fn main() {
         ..Config::default()
     };
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+    let mut blinding_seed = Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
     let chiplet = Sha256Chiplet::<F>::new(num_rows, num_blocks, rounds_per_row).unwrap();
 
@@ -204,7 +205,7 @@ fn main() {
     );
 
     let (st, trace) = common::phase("Trace Generation", || {
-        let mut message = vec![0u8; message_len];
+        let mut message = Zeroizing::new(vec![0u8; message_len]);
         OsRng.try_fill_bytes(&mut message).unwrap();
 
         let st = build(&message, &chiplet).expect("program build");
@@ -235,7 +236,7 @@ fn main() {
             &instance,
             &witness,
             &config,
-            blinding_seed,
+            *blinding_seed,
             None,
         )
         .expect("Prover failed")

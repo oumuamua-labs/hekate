@@ -7,6 +7,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use zeroize::Zeroizing;
 
 pub mod cpu;
 pub mod sha256;
@@ -123,17 +124,17 @@ pub fn compress(h_in: &[u32; STATE_WORDS], block: &[u32; BLOCK_WORDS]) -> [u32; 
 }
 
 /// FIPS 180-4 §5.1.1, big-endian words.
-pub fn pad_message(msg: &[u8]) -> Vec<[u32; BLOCK_WORDS]> {
+pub fn pad_message(msg: &[u8]) -> Zeroizing<Vec<[u32; BLOCK_WORDS]>> {
     let bit_len = (msg.len() as u64) * 8;
     let padded_len = (msg.len() + 1 + 8).div_ceil(64) * 64;
 
-    let mut bytes = Vec::with_capacity(padded_len);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(padded_len));
     bytes.extend_from_slice(msg);
     bytes.push(0x80);
     bytes.resize(padded_len - 8, 0);
     bytes.extend_from_slice(&bit_len.to_be_bytes());
 
-    bytes
+    let blocks = bytes
         .as_chunks::<64>()
         .0
         .iter()
@@ -145,7 +146,9 @@ pub fn pad_message(msg: &[u8]) -> Vec<[u32; BLOCK_WORDS]> {
 
             words
         })
-        .collect()
+        .collect();
+
+    Zeroizing::new(blocks)
 }
 
 pub fn sha256_words(msg: &[u8]) -> [u32; STATE_WORDS] {

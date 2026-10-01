@@ -19,6 +19,7 @@ use hekate_sdk::preflight::preflight;
 use hekate_sha2::pad_message;
 use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
@@ -83,10 +84,10 @@ fn main() {
         ..Config::default()
     };
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+    let mut blinding_seed = Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
-    let message: Vec<u8> = (0..200u8).collect();
+    let message: Zeroizing<Vec<u8>> = Zeroizing::new((0..200u8).collect());
     let num_blocks = pad_message(&message).len();
     let rounds_per_row = rounds_per_row();
 
@@ -136,7 +137,7 @@ fn main() {
             &instance,
             &witness,
             &config,
-            blinding_seed,
+            *blinding_seed,
             None,
         )
         .expect("Prover failed")

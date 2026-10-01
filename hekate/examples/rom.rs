@@ -20,6 +20,7 @@ use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
@@ -75,7 +76,7 @@ fn generate_combined_trace(
     num_rows: usize,
 ) -> errors::Result<ColumnTrace> {
     let num_vars = num_rows.trailing_zeros() as usize;
-    let mut tb = TraceBuilder::new(&CpuFetchColumns::build_layout(), num_vars)?;
+    let mut tb = TraceBuilder::new_secret(&CpuFetchColumns::build_layout(), num_vars)?;
 
     for (i, instr) in instructions.iter().enumerate() {
         let pc_bytes = instr.pc_bytes();
@@ -119,8 +120,8 @@ fn main() {
         ..Config::default()
     };
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+    let mut blinding_seed = Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
     println!(
         "Rows: 2^{} ({} million)",
@@ -144,7 +145,7 @@ fn main() {
             &instance,
             &witness,
             &config,
-            blinding_seed,
+            *blinding_seed,
             None,
         )
         .expect("Prover failed")

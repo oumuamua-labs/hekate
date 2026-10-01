@@ -44,6 +44,8 @@ use hekate_program::permutation::{BusKind, ChallengeLabel, Service, ServiceSlot}
 use hekate_program::{Air, FixedShape};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::atoms::exp_form::{
     ExpBasis, constrain_exp_chain2, constrain_fourth_powers, constrain_squarings,
@@ -305,6 +307,7 @@ impl Layout {
 
 /// One modmul `x · y = q · N + r` with the bookkeeping the AIR
 /// mirrors: normalised digits and per-side carries.
+#[derive(Zeroize)]
 struct Modmul {
     x: [u32; LIMBS32],
     y: [u32; LIMBS32],
@@ -341,7 +344,7 @@ impl Modmul {
         column_sums(&q, n, &mut sums);
         normalise(&sums, &r, &mut digits_b, &mut carries_b);
 
-        if digits_b != digits {
+        if !bool::from(digits_b[..].ct_eq(&digits[..])) {
             return Err(errors::Error::Protocol {
                 protocol: "modexp_chiplet",
                 message: "q · N + r does not reproduce x · y",
@@ -362,6 +365,7 @@ impl Modmul {
 
 /// Per-row scratch, reused across rows; `co`, `cto` and
 /// `rc_next` of the previous row seed the next row's carry-ins.
+#[derive(Zeroize, ZeroizeOnDrop)]
 struct RowValues {
     xs: u64,
     q: u64,
@@ -423,6 +427,7 @@ impl RowValues {
 
 /// All [`NUM_MODMULS`] blocks, the dead squarings past [`FINAL_BLOCK`]
 /// included: their tails close block 0's pipelined columns.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Modexp {
     n: [u32; LIMBS32],
     s: [u32; LIMBS32],
@@ -826,7 +831,7 @@ fn generate_trace(
     layout: &Layout,
     modexp: &Modexp,
 ) -> errors::Result<ColumnTrace> {
-    let mut tb = TraceBuilder::new(&layout.physical, NUM_VARS)?;
+    let mut tb = TraceBuilder::new_secret(&layout.physical, NUM_VARS)?;
     let mut values = RowValues::zeroed();
     let mut u_state = [[Flat::from_raw(F::ONE); LIMBS32]; 2];
     let mut ut_state = [[Flat::from_raw(F::ONE); LIMBS32]; 2];

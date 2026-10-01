@@ -24,6 +24,7 @@ use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
 use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
 use hekate_verifier::HekateVerifier;
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
@@ -58,7 +59,7 @@ impl Draw {
         }
     }
 
-    fn squeeze(self, seed: &[u8]) -> Vec<u8> {
+    fn squeeze(self, seed: &[u8]) -> Zeroizing<Vec<u8>> {
         let msg = |suffix: &[u8]| [seed, suffix].concat();
 
         match self {

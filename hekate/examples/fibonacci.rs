@@ -21,6 +21,7 @@ use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
@@ -134,8 +135,8 @@ fn main() {
         ..Config::default()
     };
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+    let mut blinding_seed = Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
     println!(
         "Trace: 2^{} rows ({} Fibonacci steps, single AIR)",
@@ -161,7 +162,7 @@ fn main() {
             &instance,
             &witness,
             &config,
-            blinding_seed,
+            *blinding_seed,
             None,
         )
         .expect("Prover failed")

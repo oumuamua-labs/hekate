@@ -294,7 +294,7 @@ binary you can run with `cargo run --release --example <name>`.
 - [ML-KEM receiver](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_receiver.rs) (FIPS 203
   KeyGen chained into Decaps; 512 / 768 / 1024 levels)
 - [AES-128 / AES-256 block proving](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs) (FIPS 197)
-- [Keccak inline kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak_inline.rs) (CPU AIR
+- [Keccak kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak.rs) (CPU AIR
   with embedded f1600 permutation)
 - [32-bit integer arithmetic](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/arith.rs) (add / sub /
   and / xor / not / lt via `IntArithmeticChiplet`)
@@ -341,7 +341,7 @@ Keccak runs 1,310 permutations at 2^15 and 41,943 at 2^20. SHA-256 runs
 40 blocks at 2 rounds per row and 131,072 blocks at 4 rounds per row.
 
 ```bash
-HEKATE_NUM_VARS=20 just example keccak_inline public
+HEKATE_NUM_VARS=20 just example keccak public
 HEKATE_NUM_VARS=21 HEKATE_ROUNDS_PER_ROW=4 just example sha256 public
 ```
 

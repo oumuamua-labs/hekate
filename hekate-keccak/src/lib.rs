@@ -21,6 +21,7 @@ use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, ServiceSlot};
 use hekate_program::{Air, FixedColumn, FixedShape, fix};
 use once_cell::race::OnceBox;
+use zeroize::{Zeroize, Zeroizing};
 
 // FIPS 202 §6.1-6.2:
 // suffix bits folded into pad10*1.
@@ -475,14 +476,15 @@ impl KeccakWitness {
                 for z in 0..64 {
                     let bit_val = (lane_val >> z) & 1;
                     let bit_col = KeccakChiplet::get_bit_col(x, y, z);
-                    trace[bit_col][row] = if bit_val == 1 { F::ONE } else { F::ZERO };
+
+                    trace[bit_col][row] = F::from(bit_val as u128);
                 }
             }
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Zeroize)]
 struct RowData {
     state: [u64; 25],
     round: u32,
@@ -502,7 +504,7 @@ pub fn generate_keccak_trace(
     calls: &[[Block64; 25]],
     num_rows: usize,
 ) -> hekate_core::errors::Result<ColumnTrace> {
-    let mut rows = Vec::with_capacity(num_rows);
+    let mut rows = Zeroizing::new(Vec::with_capacity(num_rows));
 
     for call in calls {
         if rows.len() + KeccakChiplet::BLOCK_ROWS > num_rows {
@@ -540,7 +542,7 @@ pub fn generate_keccak_trace(
     // TraceBuilder zero-fills padding
     let num_vars = num_rows.trailing_zeros() as usize;
 
-    let mut tb = TraceBuilder::new(KeccakChiplet::physical_layout(), num_vars)?;
+    let mut tb = TraceBuilder::new_secret(KeccakChiplet::physical_layout(), num_vars)?;
 
     for (i, row) in rows.iter().enumerate() {
         for lane in 0..25 {
@@ -585,6 +587,13 @@ pub struct KeccakSpongeNative {
     permutation_calls: Vec<KeccakCall>,
 }
 
+impl Drop for KeccakSpongeNative {
+    fn drop(&mut self) {
+        self.state.zeroize();
+        self.permutation_calls.zeroize();
+    }
+}
+
 impl Default for KeccakSpongeNative {
     fn default() -> Self {
         Self::new()
@@ -619,7 +628,7 @@ impl KeccakSpongeNative {
         let input = self.state;
         keccak_f(&mut self.state);
 
-        self.permutation_calls.push((input, self.state));
+        self.record(input);
     }
 
     /// Applies FIPS 202 pad10*1 carrying `domain_sep`.
@@ -630,7 +639,7 @@ impl KeccakSpongeNative {
             offset += rate_bytes;
         }
 
-        let mut last = vec![0u8; rate_bytes];
+        let mut last = Zeroizing::new(vec![0u8; rate_bytes]);
         let remaining = msg.len() - offset;
 
         last[..remaining].copy_from_slice(&msg[offset..]);
@@ -640,8 +649,8 @@ impl KeccakSpongeNative {
         self.absorb_block(&last, rate_bytes);
     }
 
-    pub fn squeeze(&mut self, out_len: usize, rate_bytes: usize) -> Vec<u8> {
-        let mut output = Vec::with_capacity(out_len);
+    pub fn squeeze(&mut self, out_len: usize, rate_bytes: usize) -> Zeroizing<Vec<u8>> {
+        let mut output = Zeroizing::new(Vec::with_capacity(out_len));
         let rate_lanes = rate_bytes / 8;
 
         loop {
@@ -661,7 +670,7 @@ impl KeccakSpongeNative {
             let input = self.state;
             keccak_f(&mut self.state);
 
-            self.permutation_calls.push((input, self.state));
+            self.record(input);
         }
 
         output.truncate(out_len);
@@ -669,29 +678,41 @@ impl KeccakSpongeNative {
         output
     }
 
-    pub fn into_calls(self) -> Vec<KeccakCall> {
-        self.permutation_calls
+    pub fn into_calls(mut self) -> Zeroizing<Vec<KeccakCall>> {
+        Zeroizing::new(core::mem::take(&mut self.permutation_calls))
     }
 
     pub fn generate_trace(self, num_rows: usize) -> hekate_core::errors::Result<ColumnTrace> {
-        let calls: Vec<[Block64; 25]> = self
-            .into_calls()
-            .iter()
-            .map(|(input, _)| {
-                let mut block = [Block64::ZERO; 25];
-                for (i, &lane) in input.iter().enumerate() {
-                    block[i] = Block64::from(lane);
-                }
-
-                block
-            })
-            .collect();
+        let recorded = self.into_calls();
+        let calls: Zeroizing<Vec<[Block64; 25]>> = Zeroizing::new(
+            recorded
+                .iter()
+                .map(|(input, _)| input.map(Block64::from))
+                .collect(),
+        );
 
         generate_keccak_trace(&calls, num_rows)
     }
+
+    /// Appends the call `(input, self.state)`,
+    /// wiping the outgrown buffer on each growth.
+    fn record(&mut self, input: [u64; 25]) {
+        let calls = &mut self.permutation_calls;
+
+        if calls.len() == calls.capacity() {
+            let mut grown = Vec::with_capacity((2 * calls.capacity()).max(4));
+            grown.extend_from_slice(calls);
+
+            calls.zeroize();
+
+            *calls = grown;
+        }
+
+        calls.push((input, self.state));
+    }
 }
 
-pub fn sha3_256(msg: &[u8]) -> ([u8; 32], Vec<KeccakCall>) {
+pub fn sha3_256(msg: &[u8]) -> ([u8; 32], Zeroizing<Vec<KeccakCall>>) {
     let mut sponge = KeccakSpongeNative::new();
     sponge.absorb(msg, SHA3_256_RATE, SHA3_DOMAIN_SEP);
 
@@ -703,7 +724,7 @@ pub fn sha3_256(msg: &[u8]) -> ([u8; 32], Vec<KeccakCall>) {
     (hash, sponge.into_calls())
 }
 
-pub fn sha3_512(msg: &[u8]) -> ([u8; 64], Vec<KeccakCall>) {
+pub fn sha3_512(msg: &[u8]) -> ([u8; 64], Zeroizing<Vec<KeccakCall>>) {
     let mut sponge = KeccakSpongeNative::new();
     sponge.absorb(msg, SHA3_512_RATE, SHA3_DOMAIN_SEP);
 
@@ -715,7 +736,7 @@ pub fn sha3_512(msg: &[u8]) -> ([u8; 64], Vec<KeccakCall>) {
     (hash, sponge.into_calls())
 }
 
-pub fn shake128(msg: &[u8], out_len: usize) -> (Vec<u8>, Vec<KeccakCall>) {
+pub fn shake128(msg: &[u8], out_len: usize) -> (Zeroizing<Vec<u8>>, Zeroizing<Vec<KeccakCall>>) {
     let mut sponge = KeccakSpongeNative::new();
     sponge.absorb(msg, SHAKE128_RATE, SHAKE_DOMAIN_SEP);
 
@@ -724,7 +745,7 @@ pub fn shake128(msg: &[u8], out_len: usize) -> (Vec<u8>, Vec<KeccakCall>) {
     (out, sponge.into_calls())
 }
 
-pub fn shake256(msg: &[u8], out_len: usize) -> (Vec<u8>, Vec<KeccakCall>) {
+pub fn shake256(msg: &[u8], out_len: usize) -> (Zeroizing<Vec<u8>>, Zeroizing<Vec<KeccakCall>>) {
     let mut sponge = KeccakSpongeNative::new();
     sponge.absorb(msg, SHAKE256_RATE, SHAKE_DOMAIN_SEP);
 
@@ -923,6 +944,28 @@ mod tests {
         let lane00 = trace.columns[0].as_b64_slice().unwrap();
 
         assert_eq!(lane00[0].to_tower(), Block64::from(expected));
+    }
+
+    #[test]
+    fn sponge_growth_keeps_every_call() {
+        let mut sponge = KeccakSpongeNative::new();
+        sponge.absorb(&[0u8; 9 * 136], 136, 0x06);
+
+        let calls = sponge.into_calls();
+
+        assert_eq!(calls.len(), 10);
+        assert_eq!(calls[0].0, [0u64; 25]);
+
+        for (k, &(input, output)) in calls.iter().enumerate() {
+            let mut expected = input;
+            keccak::Keccak::new().with_f1600(|f| f(&mut expected));
+
+            assert_eq!(output, expected, "call {k}");
+        }
+
+        for (k, pair) in calls.windows(2).take(8).enumerate() {
+            assert_eq!(pair[1].0, pair[0].1, "chain {k}");
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::errors::{self, Error};
+use subtle::{Choice, ConditionallySelectable};
 
 pub const LIMB_BITS: usize = 32;
 pub const PAIR_BITS: usize = 64;
@@ -61,9 +62,10 @@ pub fn divrem(t: &[u32], n: &[u32], q: &mut [u32], acc: &mut [u32]) -> errors::R
             carry = out;
         }
 
-        let take = geq_mask(acc, n);
-        sub_masked(acc, n, take);
+        let ge = geq(acc, n);
+        sub_masked(acc, n, ge);
 
+        let take = ge.unwrap_u8() as u32;
         let fits = u32::from(bit < limbs * LIMB_BITS);
 
         overflow |= take & (fits ^ 1);
@@ -105,9 +107,9 @@ pub fn is_less(a: &[u32], b: &[u32]) -> bool {
     borrow == 1
 }
 
-/// All ones when `r >= n`, zero otherwise: `r - n`
-/// borrows out of the top limb exactly when `r < n`.
-fn geq_mask(r: &[u32], n: &[u32]) -> u32 {
+/// Whether `r >= n`: `r - n` borrows out
+/// of the top limb exactly when `r < n`.
+fn geq(r: &[u32], n: &[u32]) -> Choice {
     let limbs = n.len();
 
     let mut borrow = 0u64;
@@ -120,17 +122,16 @@ fn geq_mask(r: &[u32], n: &[u32]) -> u32 {
     }
 
     let top = u64::from(r[limbs]).wrapping_sub(borrow);
-    let negative = (top >> 63) as u32;
 
-    negative.wrapping_sub(1)
+    !Choice::from((top >> 63) as u8)
 }
 
-fn sub_masked(r: &mut [u32], n: &[u32], mask: u32) {
+fn sub_masked(r: &mut [u32], n: &[u32], take: Choice) {
     let limbs = n.len();
 
     let mut borrow = 0u32;
     for k in 0..limbs {
-        let (d, b1) = r[k].overflowing_sub(n[k] & mask);
+        let (d, b1) = r[k].overflowing_sub(u32::conditional_select(&0, &n[k], take));
         let (d, b2) = d.overflowing_sub(borrow);
 
         r[k] = d;

@@ -22,6 +22,8 @@ use hekate_program::{Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
+use zeroize::Zeroizing;
+
 type F = Block128;
 type H = DefaultHasher;
 
@@ -153,8 +155,8 @@ fn prove_and_verify<P: Program<F>>(
         ..Config::default()
     };
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+    let mut blinding_seed = Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
     let instance = ProgramInstance::new(cpu_rows, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
@@ -166,7 +168,7 @@ fn prove_and_verify<P: Program<F>>(
             &instance,
             &witness,
             &config,
-            blinding_seed,
+            *blinding_seed,
             None,
         )
         .expect("Prover failed")
@@ -210,9 +212,9 @@ fn print_layout(key_hex: &str, rows_per_block: usize, sbox_rounds_per_block: usi
     );
 }
 
-fn generate_plaintexts() -> Vec<[u8; 16]> {
-    let mut plaintexts = vec![[0u8; 16]; NUM_BLOCKS];
-    for pt in &mut plaintexts {
+fn generate_plaintexts() -> Zeroizing<Vec<[u8; 16]>> {
+    let mut plaintexts = Zeroizing::new(vec![[0u8; 16]; NUM_BLOCKS]);
+    for pt in plaintexts.iter_mut() {
         OsRng.try_fill_bytes(pt).unwrap();
     }
 
@@ -245,7 +247,7 @@ fn run_aes128() {
 
     // Phase 1:
     // Setup
-    let round_keys = expand_key(&FIPS128_KEY);
+    let round_keys = Zeroizing::new(expand_key(&FIPS128_KEY));
     let chiplet_rows = (NUM_BLOCKS * ROWS_PER_BLOCK).next_power_of_two();
     let cpu_rows = (NUM_BLOCKS * CPU_IO_PER_BLOCK).next_power_of_two();
     let sbox_rom_rows = (NUM_BLOCKS * SBOX_ROUNDS).next_power_of_two();
@@ -266,7 +268,7 @@ fn run_aes128() {
             .map(|pt| Aes128Call {
                 key: FIPS128_KEY,
                 plaintext: *pt,
-                round_keys,
+                round_keys: *round_keys,
             })
             .collect();
 
@@ -303,7 +305,7 @@ fn build_cpu128_trace(
     let num_vars = num_rows.trailing_zeros() as usize;
 
     let mut row = 0;
-    let mut tb = TraceBuilder::new(&CpuAes128Columns::build_layout(), num_vars).unwrap();
+    let mut tb = TraceBuilder::new_secret(&CpuAes128Columns::build_layout(), num_vars).unwrap();
 
     for (call, ct) in calls.iter().zip(ciphertexts) {
         // Input row:
@@ -349,7 +351,7 @@ fn run_aes256() {
 
     // Phase 1:
     // Setup
-    let round_keys = expand_key_256(&FIPS256_KEY);
+    let round_keys = Zeroizing::new(expand_key_256(&FIPS256_KEY));
     let chiplet_rows = (NUM_BLOCKS * ROWS_PER_BLOCK).next_power_of_two();
     let cpu_rows = (NUM_BLOCKS * CPU_IO_PER_BLOCK).next_power_of_two();
     let sbox_rom_rows = (NUM_BLOCKS * SBOX_ROUNDS).next_power_of_two();
@@ -370,7 +372,7 @@ fn run_aes256() {
             .map(|pt| Aes256Call {
                 key: FIPS256_KEY,
                 plaintext: *pt,
-                round_keys,
+                round_keys: *round_keys,
             })
             .collect();
 
@@ -407,7 +409,7 @@ fn build_cpu256_trace(
     let num_vars = num_rows.trailing_zeros() as usize;
 
     let mut row = 0;
-    let mut tb = TraceBuilder::new(&CpuAes256Columns::build_layout(), num_vars).unwrap();
+    let mut tb = TraceBuilder::new_secret(&CpuAes256Columns::build_layout(), num_vars).unwrap();
 
     for (call, ct) in calls.iter().zip(ciphertexts) {
         for j in 0..16 {

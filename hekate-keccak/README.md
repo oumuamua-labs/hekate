@@ -34,8 +34,70 @@ USE AT YOUR OWN RISK!
 
 ## Examples
 
-- [Keccak isolated chiplet (standalone AIR)](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak.rs)
-- [Keccak inline kernel (CPU AIR with embedded permutation)](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak_inline.rs)
+- [Keccak kernel (CPU AIR with embedded permutation)](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak.rs)
+
+### Usage
+
+The Keccak-f[1600] calls of one SHA3-256 hash, with the chiplet mounted in the host table:
+
+```rust
+use hekate_core::config::Config;
+use hekate_core::errors;
+use hekate_keccak::{KeccakCall, KeccakChiplet, sha3_256};
+use hekate_math::Block128;
+use hekate_program::chiplet::ChipletDef;
+use hekate_program::circuit::{Circuit, CircuitProgram, Col};
+use hekate_program::define_columns;
+use zeroize::Zeroizing;
+
+type F = Block128;
+
+define_columns! {
+    HostColumns {
+        LANES: [B64; 25],
+        SELECTOR: Bit,
+    }
+}
+
+fn sha3(message: &[u8]) -> errors::Result<(CircuitProgram<F>, Zeroizing<Vec<KeccakCall>>)> {
+    let (_, calls) = sha3_256(message);
+
+    let blocks = calls.len();
+    let rows = (blocks * KeccakChiplet::BLOCK_ROWS)
+        .next_power_of_two()
+        .max(Config::default().min_table_rows());
+
+    let mut cx = Circuit::<F>::new("Host", rows)?;
+
+    let host = cx.schema(&HostColumns::build_layout());
+
+    let sel = host.at(HostColumns::SELECTOR);
+    let lanes: Vec<Col> = (0..25).map(|i| host.at(HostColumns::LANES + i)).collect();
+
+    cx.call(&KeccakChiplet::service(), &lanes, sel)?;
+
+    cx.fix(
+        sel,
+        KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, blocks),
+    );
+
+    cx.mount(ChipletDef::from_air(&KeccakChiplet::new(rows, blocks))?);
+
+    // Public: the digest, the first 4 lanes of the last output
+    let last_output = blocks * KeccakChiplet::BLOCK_ROWS - 1;
+
+    for &lane in &lanes[..4] {
+        cx.publish(lane, last_output);
+    }
+
+    Ok((cx.compile()?, calls))
+}
+```
+
+The host trace holds call `k`'s input lanes on row `25k` and its output lanes on row `25k + 24`, `SELECTOR` set
+on both, and the columns `generate_keccak_trace` builds from the call inputs are appended to the same trace. The
+chiplet proves each output is Keccak-f[1600] of its input. Binding the digest to a message is the host's job: each
+call's input is the previous output with the next block XORed into its rate lanes.
 
 ## Benchmarks
 

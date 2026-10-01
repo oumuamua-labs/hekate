@@ -492,7 +492,7 @@ pub fn generate_arithmetic_trace(
     let num_vars = num_rows.trailing_zeros() as usize;
     let phy = layout.build_physical_layout();
 
-    let mut tb = TraceBuilder::new(&phy, num_vars)?;
+    let mut tb = TraceBuilder::new_secret(&phy, num_vars)?;
 
     for (i, call) in ops.iter().enumerate() {
         let (opcode, a, b) = match *call {

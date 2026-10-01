@@ -19,6 +19,7 @@ use hekate_math::{Bit, Block128, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
 use hekate_sha2::{CpuSha256Block, IV, STATE_WORDS, Sha256Call, Sha256Chiplet, pad_message};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::pkcs1::{DIGEST_LIMBS, digest_word_of_limb, padding_limbs};
 
@@ -161,10 +162,10 @@ impl Pkcs1Statement {
 
         let modexp = Modexp::new(modulus, signature)?;
 
-        let mut calls = Vec::with_capacity(self.num_blocks);
+        let mut calls = Zeroizing::new(Vec::with_capacity(self.num_blocks));
         let mut h = IV;
 
-        for block in &blocks {
+        for block in blocks.iter() {
             let call = Sha256Call {
                 h_in: h,
                 block: *block,
@@ -175,9 +176,12 @@ impl Pkcs1Statement {
             calls.push(call);
         }
 
+        h.zeroize();
+
         let verify_row = self.num_blocks - 1;
 
-        let mut tb = TraceBuilder::new(&cpu_layout(), self.cpu_rows.trailing_zeros() as usize)?;
+        let mut tb =
+            TraceBuilder::new_secret(&cpu_layout(), self.cpu_rows.trailing_zeros() as usize)?;
 
         for (b, call) in calls.iter().enumerate() {
             self.sha_block.write(&mut tb, b, call)?;

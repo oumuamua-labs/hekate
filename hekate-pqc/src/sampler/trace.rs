@@ -80,7 +80,7 @@ struct BallWitness {
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct StepWitness {
     seed: [u64; SEED_LANES],
-    calls: Vec<KeccakCall>,
+    calls: Zeroizing<Vec<KeccakCall>>,
     uses: Vec<bool>,
     coeffs: [u32; N],
     taken: usize,
@@ -388,12 +388,11 @@ fn sample(
         message[8 * step.seed_lanes()..].reverse();
     }
 
-    let (bytes, calls) = match step.kind {
+    let (mut bytes, calls) = match step.kind {
         Kind::Rej(_) => shake128(&message, step.squeeze_bytes()),
         Kind::Cbd(_) | Kind::Ball(_) => shake256(&message, step.squeeze_bytes()),
     };
 
-    let mut bytes = Zeroizing::new(bytes);
     let mut skews = Vec::new();
 
     let flipped = |c: usize| {

@@ -36,7 +36,6 @@ const FORGED_FIB: u32 = 0xDEAD_BEEF;
 
 // ===============================================
 // Keccak hosts
-// (keccak_inline and keccak, at probe height)
 // ===============================================
 
 fn inline_host(num_blocks: usize) -> CircuitProgram<F> {

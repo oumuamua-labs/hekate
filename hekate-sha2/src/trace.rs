@@ -5,6 +5,7 @@
 use hekate_core::errors::{self, Error};
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_math::{Bit, Block32, TowerField};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::sha256::{ADDS_PER_ROUND, ROUND_ADDS, SCHEDULE_ADDS, Sha256Layout};
 use crate::{
@@ -15,7 +16,7 @@ use crate::{
 const SCHEDULE_LEN: usize = ROUNDS + BLOCK_WORDS;
 
 /// One compression request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Zeroize)]
 pub struct Sha256Call {
     pub h_in: [u32; STATE_WORDS],
     pub block: [u32; BLOCK_WORDS],
@@ -80,7 +81,7 @@ pub fn generate_sha256_trace(
 
     let num_vars = num_rows.trailing_zeros() as usize;
 
-    let mut tb = TraceBuilder::new(layout.columns(), num_vars)?;
+    let mut tb = TraceBuilder::new_secret(layout.columns(), num_vars)?;
     for (b, call) in calls.iter().enumerate() {
         write_block(&mut tb, layout, b * rows_per_block, call)?;
     }
@@ -96,21 +97,21 @@ fn write_block(
 ) -> errors::Result<()> {
     let r = layout.rounds_per_row;
     let rows_per_block = layout.rows_per_block();
-    let state_out = call.state_out();
+    let state_out = Zeroizing::new(call.state_out());
 
-    let mut schedule = [0u32; SCHEDULE_LEN];
+    let mut schedule = Zeroizing::new([0u32; SCHEDULE_LEN]);
     schedule[..BLOCK_WORDS].copy_from_slice(&call.block);
 
-    let mut state = call.h_in;
+    let mut state = Zeroizing::new(call.h_in);
     for j in 0..rows_per_block {
         let mut w = RowWriter {
             tb,
             row: first_row + j,
         };
 
-        w.words(layout.state, &state)?;
+        w.words(layout.state, &state[..])?;
         w.words(layout.window, &schedule[j * r..j * r + BLOCK_WORDS])?;
-        w.words(layout.state_out, &state_out)?;
+        w.words(layout.state_out, &state_out[..])?;
 
         for i in 0..r {
             let t = j * r + i;
@@ -200,9 +201,8 @@ mod tests {
         let msg = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         let mut h = IV;
 
-        for block in pad_message(msg) {
+        for &block in pad_message(msg).iter() {
             let call = Sha256Call { h_in: h, block };
-
             h = call.h_out();
         }
 

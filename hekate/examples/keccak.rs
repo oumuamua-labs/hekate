@@ -5,12 +5,13 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
 use hekate_core::config::Config;
 use hekate_core::errors;
-use hekate_core::trace::{ColumnTrace, TraceBuilder};
+use hekate_core::trace::TraceBuilder;
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakColumns, generate_keccak_trace};
 use hekate_math::{Bit, Block64};
 use hekate_program::chiplet::ChipletDef;
@@ -19,6 +20,7 @@ use hekate_program::{ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
+use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
@@ -27,18 +29,16 @@ type H = DefaultHasher;
 // 1. KECCAK PROGRAM DEFINITION
 // =================================================================
 //
-// CPU-only main trace. Keccak runs as an independent
-// chiplet with its own trace, commitment, and ZeroCheck.
-// The kernel activates automatically through ChipletDef.
+// Mounted trace: CPU columns + Keccak columns in one
+// trace, in `CpuKeccakColumns` order, the circuit
+// handles match the trace generator's schema. The
+// digest is the first 4 lanes of the final state,
+// read where the cadence forces the last output emit.
 
-/// CPU columns in `CpuKeccakColumns` order;
-/// the circuit handles match the trace generator's schema.
-/// The digest is the first 4 lanes of the final state,
-/// read where the cadence forces the last output emit.
 fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     let num_blocks = num_rows / KeccakChiplet::BLOCK_ROWS;
 
-    let mut cx = Circuit::<F>::new("KeccakIsolated", num_rows)?;
+    let mut cx = Circuit::<F>::new("KeccakInline", num_rows)?;
 
     let cpu = cx.schema(&CpuKeccakColumns::build_layout());
 
@@ -55,7 +55,7 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, num_blocks),
     );
 
-    cx.attach(ChipletDef::from_air(&KeccakChiplet::new(
+    cx.mount(ChipletDef::from_air(&KeccakChiplet::new(
         num_rows, num_blocks,
     ))?);
 
@@ -71,13 +71,13 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
 // 2. TRACE GENERATION
 // =================================================================
 
-/// Sponge computation:
-/// absorb message, produce (input, output)
-/// state pairs per permutation.
-fn sponge_calls(message: &[u8]) -> Vec<([Block64; 25], [Block64; 25])> {
+/// Sponge:
+/// absorb message, produce (input, output) pairs per permutation.
+fn sponge_calls(message: &[u8]) -> Zeroizing<Vec<([Block64; 25], [Block64; 25])>> {
     let rate_bytes = 136;
 
-    let mut padded = message.to_vec();
+    let mut padded = Zeroizing::new(Vec::with_capacity(message.len() + 2 * rate_bytes));
+    padded.extend_from_slice(message);
     padded.push(0x01);
 
     while (padded.len() % rate_bytes) != (rate_bytes - 1) {
@@ -86,7 +86,7 @@ fn sponge_calls(message: &[u8]) -> Vec<([Block64; 25], [Block64; 25])> {
 
     padded.push(0x80);
 
-    let mut calls = Vec::new();
+    let mut calls = Zeroizing::new(Vec::with_capacity(padded.len() / rate_bytes));
     let mut state = [0u64; 25];
 
     for block in padded.chunks_exact(rate_bytes) {
@@ -96,7 +96,6 @@ fn sponge_calls(message: &[u8]) -> Vec<([Block64; 25], [Block64; 25])> {
             state[i] ^= u64::from_le_bytes(bytes);
         }
 
-        // Record the input state for the chiplet
         let mut input = [Block64::ZERO; 25];
         for i in 0..25 {
             input[i] = Block64::from(state[i]);
@@ -115,53 +114,63 @@ fn sponge_calls(message: &[u8]) -> Vec<([Block64; 25], [Block64; 25])> {
     calls
 }
 
-/// Generate CPU-side main trace.
-/// Writes lanes + selector at I/O rows.
-fn generate_cpu_trace(calls: &[([Block64; 25], [Block64; 25])], num_rows: usize) -> ColumnTrace {
+/// Build combined trace:
+/// CPU columns + Keccak columns.
+fn generate_combined_trace(
+    calls: &[([Block64; 25], [Block64; 25])],
+    inputs: &[[Block64; 25]],
+    num_rows: usize,
+) -> errors::Result<ColumnTrace> {
     let num_vars = num_rows.trailing_zeros() as usize;
+
+    // CPU trace (26 physical columns)
     let layout = CpuKeccakColumns::build_layout();
 
-    let mut tb = TraceBuilder::new(&layout, num_vars).unwrap();
+    let mut tb = TraceBuilder::new_secret(&layout, num_vars)?;
     let mut row = 0;
 
     for (input, output) in calls {
         assert!(row + 25 <= num_rows, "CPU trace overflow");
 
-        // Input row:
-        // write pre-permutation state
+        // Input row
         for (i, &val) in input.iter().enumerate() {
-            tb.set_b64(i, row, val).unwrap();
+            tb.set_b64(i, row, val)?;
         }
 
-        tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)
-            .unwrap();
+        tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)?;
 
-        // 24 rounds (no CPU activity)
         row += 24;
 
-        // Output row:
-        // write post-permutation state
+        // Output row
         for (i, &val) in output.iter().enumerate() {
-            tb.set_b64(i, row, val).unwrap();
+            tb.set_b64(i, row, val)?;
         }
 
-        tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)
-            .unwrap();
+        tb.set_bit(CpuKeccakColumns::SELECTOR, row, Bit::ONE)?;
 
         row += 1;
     }
 
-    tb.build()
+    let mut trace = tb.build();
+
+    let keccak_trace = generate_keccak_trace(inputs, num_rows)?;
+
+    for col in keccak_trace.into_columns() {
+        trace.add_column(col)?;
+    }
+
+    Ok(trace)
 }
 
 // =================================================================
 // 3. MAIN
 // =================================================================
+
 fn main() {
     common::init("Keccak-f[1600]");
 
     // Setup parameters
-    let num_vars = common::num_vars(15);
+    let num_vars = common::num_vars(20);
     let num_rows = 1 << num_vars;
 
     let config = Config {
@@ -169,8 +178,8 @@ fn main() {
         ..Config::default()
     };
 
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
+    let mut blinding_seed = Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
     println!(
         "Rows: 2^{} ({} permutations)",
@@ -178,26 +187,31 @@ fn main() {
         num_rows / KeccakChiplet::BLOCK_ROWS
     );
     println!(
-        "Total Columns: {} CPU + {} Keccak chiplet",
+        "Physical: {} CPU + {} Keccak = {} columns",
         CpuKeccakColumns::NUM_COLUMNS,
-        KeccakColumns::NUM_COLUMNS
+        KeccakChiplet::physical_layout().len(),
+        CpuKeccakColumns::NUM_COLUMNS + KeccakChiplet::physical_layout().len()
+    );
+    println!(
+        "Virtual: {} CPU + {} Keccak = {} columns",
+        CpuKeccakColumns::NUM_COLUMNS,
+        KeccakColumns::NUM_COLUMNS,
+        CpuKeccakColumns::NUM_COLUMNS + KeccakColumns::NUM_COLUMNS
     );
 
-    let (cpu_trace, keccak_trace, air, digest) = common::phase("Trace Generation", || {
+    let (trace, air, digest) = common::phase("Trace Generation", || {
         let max_blocks = num_rows / KeccakChiplet::BLOCK_ROWS;
         let message_len = max_blocks * 136 - 136;
 
         println!("   Max Blocks: {}", max_blocks);
-        println!(
-            "   Message Len: {} bytes (leaving 1 block for padding)",
-            message_len
-        );
+        println!("   Message Len: {} bytes", message_len);
 
-        let mut message = vec![0u8; message_len];
+        let mut message = Zeroizing::new(vec![0u8; message_len]);
         OsRng.try_fill_bytes(&mut message).unwrap();
 
         let calls = sponge_calls(&message);
-        let inputs: Vec<[Block64; 25]> = calls.iter().map(|(inp, _)| *inp).collect();
+        let inputs: Zeroizing<Vec<[Block64; 25]>> =
+            Zeroizing::new(calls.iter().map(|(inp, _)| *inp).collect());
 
         let final_state = calls.last().expect("at least one block").1;
         let digest: [Block64; 4] = [
@@ -207,12 +221,10 @@ fn main() {
             final_state[3],
         ];
 
-        let cpu = generate_cpu_trace(&calls, num_rows);
-        let keccak = generate_keccak_trace(&inputs, num_rows).unwrap();
-
+        let trace = generate_combined_trace(&calls, &inputs, num_rows).unwrap();
         let air = build_program(num_rows).unwrap();
 
-        (cpu, keccak, air, digest)
+        (trace, air, digest)
     });
 
     print!("Keccak-256 digest (via `keccak` crate's f1600): 0x");
@@ -226,7 +238,7 @@ fn main() {
     let public_inputs: Vec<F> = digest.iter().map(|&lane| F::from(lane)).collect();
 
     let instance = ProgramInstance::new(num_rows, public_inputs);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![keccak_trace]);
+    let witness = ProgramWitness::new(trace);
 
     let proof = common::phase("Proving", || {
         prove(
@@ -235,7 +247,7 @@ fn main() {
             &instance,
             &witness,
             &config,
-            blinding_seed,
+            *blinding_seed,
             None,
         )
         .expect("Prover failed")

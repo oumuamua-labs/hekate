@@ -36,6 +36,8 @@ hekate-math = { workspace = true }
 hekate-program = { workspace = true }
 once_cell = { workspace = true }
 rayon = { workspace = true, optional = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 hekate-crypto = { workspace = true, features = ["std", "blake3"] }

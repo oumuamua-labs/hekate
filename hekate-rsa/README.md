@@ -27,6 +27,53 @@ Apple M3 Max, ZK, best of three runs (hekate/examples/rsa_pkcs1.rs):
 
 - [RSA-2048 PKCS#1 v1.5 + SHA-256 end to end](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/rsa_pkcs1.rs)
 
+### Usage
+
+A PKCS#1 v1.5 statement for one RSA-2048 signature over `message`:
+
+```rust
+use hekate_core::config::Config;
+use hekate_core::errors;
+use hekate_core::trace::ColumnTrace;
+use hekate_math::Block128;
+use hekate_program::{ProgramInstance, ProgramWitness};
+use hekate_rsa::Pkcs1Statement;
+use hekate_sha2::{ROUNDS, pad_message};
+
+type F = Block128;
+
+fn pkcs1(
+    message: &[u8],
+    modulus: &[u32; 64],
+    signature: &[u32; 64],
+) -> errors::Result<(
+    Pkcs1Statement,
+    ProgramInstance<F>,
+    ProgramWitness<F, ColumnTrace>,
+)> {
+    let blocks = pad_message(message).len();
+    let rounds_per_row = 2;
+    let floor = Config::default().min_table_rows();
+
+    let statement = Pkcs1Statement::new(
+        blocks,
+        rounds_per_row,
+        (blocks * ROUNDS / rounds_per_row)
+            .next_power_of_two()
+            .max(floor),
+        blocks.next_power_of_two().max(floor),
+    )?;
+
+    let instance = statement.instance(modulus);
+    let witness = statement.witness(message, modulus, signature)?;
+
+    Ok((statement, instance, witness))
+}
+```
+
+`modulus` and `signature` are 64 little-endian 32-bit limbs, and `instance` publishes the modulus. The prover
+takes `statement.program()`, `instance` and `witness`; the verifier takes the program and `instance`.
+
 ---
 
 ## ⚠️ Security Warning

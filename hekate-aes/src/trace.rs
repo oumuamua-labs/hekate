@@ -15,6 +15,8 @@ use alloc::vec::Vec;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_math::{Bit, Block8, Block16, TowerField};
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::aes128::PhysAes128Columns as P128;
 use super::aes256::PhysAes256Columns as P256;
@@ -27,7 +29,7 @@ pub type Aes256Call = AesCall<32, 15>;
 /// K=16,R=11 for AES-128.
 /// K=32,R=15 for AES-256.
 /// R = number of round keys = rows per block.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct AesCall<const K: usize, const R: usize> {
     pub key: [u8; K],
     pub plaintext: [u8; 16],
@@ -37,6 +39,7 @@ pub struct AesCall<const K: usize, const R: usize> {
 // Superset of AES-128 and AES-256
 // row fields. Each level populates its own;
 // the rest stays zeroed.
+#[derive(Zeroize)]
 struct RowData<const K: usize> {
     state_in: [u8; 16],
     sbox_out: [u8; 16],
@@ -90,7 +93,7 @@ pub fn generate_aes_trace<const K: usize, const R: usize>(
 
     let num_full_rounds = R - 2;
 
-    let mut rows = Vec::with_capacity(needed);
+    let mut rows = Zeroizing::new(Vec::with_capacity(needed));
 
     for call in calls {
         let mut prev_rk = call.round_keys[0];
@@ -233,7 +236,7 @@ pub fn generate_aes_trace<const K: usize, const R: usize>(
 
     let num_vars = num_rows.trailing_zeros() as usize;
 
-    let mut tb = TraceBuilder::new(&layout, num_vars)?;
+    let mut tb = TraceBuilder::new_secret(&layout, num_vars)?;
 
     for (i, row) in rows.iter().enumerate() {
         tb.set_b8_array(P128::P_STATE_IN, i, &row.state_in.map(Block8))?;
@@ -289,8 +292,7 @@ fn write_128_row<const K: usize>(
         tb.set_b8_array(P128::P_K0_INV, i, &row.k0_inv.map(Block8))?;
 
         for j in 0..4 {
-            let z = if row.k0_z[j] { Bit::ONE } else { Bit::ZERO };
-            tb.set_bit(P128::P_K0_Z + j, i, z)?;
+            tb.set_bit(P128::P_K0_Z + j, i, Bit::from(row.k0_z[j] as u8))?;
         }
     }
 
@@ -299,8 +301,7 @@ fn write_128_row<const K: usize>(
         tb.set_b8_array(P128::P_KS_INV, i, &row.ks_inv.map(Block8))?;
 
         for j in 0..4 {
-            let z = if row.ks_z[j] { Bit::ONE } else { Bit::ZERO };
-            tb.set_bit(P128::P_KS_Z + j, i, z)?;
+            tb.set_bit(P128::P_KS_Z + j, i, Bit::from(row.ks_z[j] as u8))?;
         }
     }
 
@@ -352,8 +353,7 @@ fn write_256_row<const K: usize>(
         tb.set_b8_array(P256::P_KS_INV, i, &row.ks_inv.map(Block8))?;
 
         for j in 0..4 {
-            let z = if row.ks_z[j] { Bit::ONE } else { Bit::ZERO };
-            tb.set_bit(P256::P_KS_Z + j, i, z)?;
+            tb.set_bit(P256::P_KS_Z + j, i, Bit::from(row.ks_z[j] as u8))?;
         }
     }
 
@@ -547,7 +547,7 @@ fn sbox_witness_bytes(input: [u8; 4]) -> ([u8; 4], [u8; 4], [bool; 4]) {
     for j in 0..4 {
         inv[j] = gf256_inv(input[j]);
         sub[j] = aes_affine(inv[j]);
-        z[j] = input[j] == 0;
+        z[j] = bool::from(input[j].ct_eq(&0));
     }
 
     (sub, inv, z)

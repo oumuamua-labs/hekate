@@ -259,8 +259,8 @@ fn reference(signed: &Signed) -> MlDsaOutput {
     let (mu, _) = shake256(&[tr.as_slice(), &signed.message].concat(), 64);
 
     MlDsaOutput {
-        tr: tr.try_into().unwrap(),
-        mu: mu.try_into().unwrap(),
+        tr: tr.as_slice().try_into().unwrap(),
+        mu: mu.as_slice().try_into().unwrap(),
     }
 }
 
