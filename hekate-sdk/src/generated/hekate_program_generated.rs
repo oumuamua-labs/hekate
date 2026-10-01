@@ -416,19 +416,20 @@ pub mod hekate {
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
-        pub const ENUM_MAX_SOURCE_KIND: i8 = 5;
+        pub const ENUM_MAX_SOURCE_KIND: i8 = 6;
         #[deprecated(
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
         #[allow(non_camel_case_types)]
-        pub const ENUM_VALUES_SOURCE_KIND: [SourceKind; 6] = [
+        pub const ENUM_VALUES_SOURCE_KIND: [SourceKind; 7] = [
             SourceKind::Column,
             SourceKind::Columns,
             SourceKind::RowIndexLeBytes,
             SourceKind::RowIndexByte,
             SourceKind::Constant,
             SourceKind::PhaseColumn,
+            SourceKind::EmitRank,
         ];
 
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -442,9 +443,10 @@ pub mod hekate {
             pub const RowIndexByte: Self = Self(3);
             pub const Constant: Self = Self(4);
             pub const PhaseColumn: Self = Self(5);
+            pub const EmitRank: Self = Self(6);
 
             pub const ENUM_MIN: i8 = 0;
-            pub const ENUM_MAX: i8 = 5;
+            pub const ENUM_MAX: i8 = 6;
             pub const ENUM_VALUES: &'static [Self] = &[
                 Self::Column,
                 Self::Columns,
@@ -452,6 +454,7 @@ pub mod hekate {
                 Self::RowIndexByte,
                 Self::Constant,
                 Self::PhaseColumn,
+                Self::EmitRank,
             ];
             /// Returns the variant's name or "" if unknown.
             pub fn variant_name(self) -> Option<&'static str> {
@@ -462,6 +465,7 @@ pub mod hekate {
                     Self::RowIndexByte => Some("RowIndexByte"),
                     Self::Constant => Some("Constant"),
                     Self::PhaseColumn => Some("PhaseColumn"),
+                    Self::EmitRank => Some("EmitRank"),
                     _ => None,
                 }
             }
@@ -517,6 +521,94 @@ pub mod hekate {
         }
 
         impl ::flatbuffers::SimpleToVerifyInSlice for SourceKind {}
+        #[deprecated(
+            since = "2.0.0",
+            note = "Use associated constants instead. This will no longer be generated in 2021."
+        )]
+        pub const ENUM_MIN_EMIT_SIDE: i8 = 0;
+        #[deprecated(
+            since = "2.0.0",
+            note = "Use associated constants instead. This will no longer be generated in 2021."
+        )]
+        pub const ENUM_MAX_EMIT_SIDE: i8 = 1;
+        #[deprecated(
+            since = "2.0.0",
+            note = "Use associated constants instead. This will no longer be generated in 2021."
+        )]
+        #[allow(non_camel_case_types)]
+        pub const ENUM_VALUES_EMIT_SIDE: [EmitSide; 2] = [EmitSide::Request, EmitSide::Response];
+
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        #[repr(transparent)]
+        pub struct EmitSide(pub i8);
+        #[allow(non_upper_case_globals)]
+        impl EmitSide {
+            pub const Request: Self = Self(0);
+            pub const Response: Self = Self(1);
+
+            pub const ENUM_MIN: i8 = 0;
+            pub const ENUM_MAX: i8 = 1;
+            pub const ENUM_VALUES: &'static [Self] = &[Self::Request, Self::Response];
+            /// Returns the variant's name or "" if unknown.
+            pub fn variant_name(self) -> Option<&'static str> {
+                match self {
+                    Self::Request => Some("Request"),
+                    Self::Response => Some("Response"),
+                    _ => None,
+                }
+            }
+        }
+        impl ::core::fmt::Debug for EmitSide {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+                if let Some(name) = self.variant_name() {
+                    f.write_str(name)
+                } else {
+                    f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+                }
+            }
+        }
+        impl<'a> ::flatbuffers::Follow<'a> for EmitSide {
+            type Inner = Self;
+            #[inline]
+            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+                let b = unsafe { ::flatbuffers::read_scalar_at::<i8>(buf, loc) };
+                Self(b)
+            }
+        }
+
+        impl ::flatbuffers::Push for EmitSide {
+            type Output = EmitSide;
+            #[inline]
+            unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+                unsafe { ::flatbuffers::emplace_scalar::<i8>(dst, self.0) };
+            }
+        }
+
+        impl ::flatbuffers::EndianScalar for EmitSide {
+            type Scalar = i8;
+            #[inline]
+            fn to_little_endian(self) -> i8 {
+                self.0.to_le()
+            }
+            #[inline]
+            #[allow(clippy::wrong_self_convention)]
+            fn from_little_endian(v: i8) -> Self {
+                let b = i8::from_le(v);
+                Self(b)
+            }
+        }
+
+        impl<'a> ::flatbuffers::Verifiable for EmitSide {
+            #[inline]
+            fn run_verifier(
+                v: &mut ::flatbuffers::Verifier,
+                pos: usize,
+            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+                i8::run_verifier(v, pos)
+            }
+        }
+
+        impl ::flatbuffers::SimpleToVerifyInSlice for EmitSide {}
         #[deprecated(
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -1573,6 +1665,7 @@ pub mod hekate {
             pub const VT_COLUMN_INDICES: ::flatbuffers::VOffsetT = 8;
             pub const VT_BYTE_INDEX: ::flatbuffers::VOffsetT = 10;
             pub const VT_CONSTANT_VALUE: ::flatbuffers::VOffsetT = 12;
+            pub const VT_SIDE: ::flatbuffers::VOffsetT = 14;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1597,6 +1690,7 @@ pub mod hekate {
                     builder.add_column_indices(x);
                 }
                 builder.add_column_index(args.column_index);
+                builder.add_side(args.side);
                 builder.add_kind(args.kind);
                 builder.finish()
             }
@@ -1654,6 +1748,17 @@ pub mod hekate {
                 // which contains a valid value in this slot
                 unsafe { self._tab.get::<Block128>(Source::VT_CONSTANT_VALUE, None) }
             }
+            #[inline]
+            pub fn side(&self) -> EmitSide {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<EmitSide>(Source::VT_SIDE, Some(EmitSide::Request))
+                        .unwrap()
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for Source<'_> {
@@ -1672,6 +1777,7 @@ pub mod hekate {
                     )?
                     .visit_field::<u32>("byte_index", Self::VT_BYTE_INDEX, false)?
                     .visit_field::<Block128>("constant_value", Self::VT_CONSTANT_VALUE, false)?
+                    .visit_field::<EmitSide>("side", Self::VT_SIDE, false)?
                     .finish();
                 Ok(())
             }
@@ -1682,6 +1788,7 @@ pub mod hekate {
             pub column_indices: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
             pub byte_index: u32,
             pub constant_value: Option<&'a Block128>,
+            pub side: EmitSide,
         }
         impl<'a> Default for SourceArgs<'a> {
             #[inline]
@@ -1692,6 +1799,7 @@ pub mod hekate {
                     column_indices: None,
                     byte_index: 0,
                     constant_value: None,
+                    side: EmitSide::Request,
                 }
             }
         }
@@ -1732,6 +1840,11 @@ pub mod hekate {
                     .push_slot_always::<&Block128>(Source::VT_CONSTANT_VALUE, constant_value);
             }
             #[inline]
+            pub fn add_side(&mut self, side: EmitSide) {
+                self.fbb_
+                    .push_slot::<EmitSide>(Source::VT_SIDE, side, EmitSide::Request);
+            }
+            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> SourceBuilder<'a, 'b, A> {
@@ -1756,6 +1869,7 @@ pub mod hekate {
                 ds.field("column_indices", &self.column_indices());
                 ds.field("byte_index", &self.byte_index());
                 ds.field("constant_value", &self.constant_value());
+                ds.field("side", &self.side());
                 ds.finish()
             }
         }

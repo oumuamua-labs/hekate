@@ -10,12 +10,22 @@ use hekate_math::{Flat, HardwareField, TowerField};
 
 use crate::FixedColumn;
 
+mod rank;
+
+pub use rank::{
+    OMEGA, OMEGA_ORDER, RankClock, RankTable, TableHeight, rank_clocks, validate_ordered_buses,
+    validate_ordered_emits,
+};
+
 /// Slot identity;
 /// position fixes the `β` power, never the label.
 pub type ChallengeLabel = &'static [u8];
 
 /// Clock slot of a stateless-service bus, on both endpoints.
 pub const REQUEST_IDX_LABEL: ChallengeLabel = b"kappa_request_idx";
+
+/// Clock slot of an ordered service bus, on both endpoints.
+pub const EMIT_RANK_LABEL: ChallengeLabel = b"kappa_emit_rank";
 
 /// One label per byte of a byte-split
 /// clock, in little-endian order.
@@ -40,6 +50,14 @@ pub enum BusKind {
     #[default]
     Permutation,
     Lookup,
+}
+
+/// The half of an ordered bus an endpoint belongs to;
+/// the `t`-th request pairs with the `t`-th response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Side {
+    Request,
+    Response,
 }
 
 /// Byte source for the LogUp
@@ -70,6 +88,10 @@ pub enum Source {
     /// a requester's row-index clock;
     /// must be an overlay `fixed_columns()` pin.
     PhaseColumn(usize),
+
+    /// `ω^(base + t)` on the endpoint's `t`-th emit,
+    /// computed by the verifier from the pinned selector.
+    EmitRank(Side),
 }
 
 /// One endpoint of a LogUp bus.
@@ -194,9 +216,12 @@ impl PermutationCheckSpec {
     /// Only structural guarantor of per-row uniqueness;
     /// label-only stitching is forgeable.
     pub fn has_real_clock_source(&self) -> bool {
-        self.sources
-            .iter()
-            .any(|(src, _)| matches!(src, Source::RowIndexLeBytes(_) | Source::RowIndexByte(_)))
+        self.sources.iter().any(|(src, _)| {
+            matches!(
+                src,
+                Source::RowIndexLeBytes(_) | Source::RowIndexByte(_) | Source::EmitRank(_)
+            )
+        })
     }
 
     pub fn has_request_idx_column(&self) -> bool {
@@ -215,7 +240,8 @@ impl PermutationCheckSpec {
                 Source::Column(_)
                 | Source::Columns(_)
                 | Source::Const(_)
-                | Source::PhaseColumn(_) => true,
+                | Source::PhaseColumn(_)
+                | Source::EmitRank(_) => true,
             };
 
             if !width_ok {
@@ -267,8 +293,8 @@ impl PermutationCheckSpec {
             (BusKind::Permutation, false, None) => Err(errors::Error::Protocol {
                 protocol: "logup_bus",
                 message: "permutation bus lacks per-row clock stitching; give the \
-                          Service a RequestIdx or RequestIdxBytes slot, or a \
-                          clock_waiver citing the AIR constraint that forces \
+                          Service an EmitRank, RequestIdx or RequestIdxBytes slot, \
+                          or a clock_waiver citing the AIR constraint that forces \
                           per-row uniqueness",
             }),
             _ => Ok(()),
@@ -294,6 +320,10 @@ pub enum ServiceSlot {
     /// The same clock split one slot per byte, for
     /// a responder whose AIR reads the bytes separately.
     RequestIdxBytes { num_bytes: usize },
+
+    /// Ordered-bus clock: the verifier supplies `ω^(base + t)`
+    /// on both endpoints, with no committed column on either side.
+    EmitRank,
 }
 
 /// Bus key schema declared once by the serving
@@ -330,8 +360,8 @@ impl Service {
             .sum()
     }
 
-    /// Requester endpoint: `values` bind the `Value` slots in
-    /// order; a clock slot folds the requester's own row index.
+    /// Requester endpoint: `values` bind the `Value` slots in order;
+    /// a row-index clock slot folds the requester's own row index.
     pub fn request(
         &self,
         values: &[usize],
@@ -378,7 +408,9 @@ impl Service {
             .filter(|s| {
                 matches!(
                     s,
-                    ServiceSlot::RequestIdx { .. } | ServiceSlot::RequestIdxBytes { .. }
+                    ServiceSlot::RequestIdx { .. }
+                        | ServiceSlot::RequestIdxBytes { .. }
+                        | ServiceSlot::EmitRank
                 )
             })
             .count();
@@ -409,7 +441,7 @@ impl Service {
                     return Err(errors::Error::Protocol {
                         protocol: "service",
                         message: "a phased clock needs a byte-split clock slot; \
-                                  a whole-word, waived or lookup schema has \
+                                  a whole-word, rank, waived or lookup schema has \
                                   no top byte to replace",
                     });
                 }
@@ -504,6 +536,14 @@ impl Service {
                         sources.push((source, *label));
                     }
                 }
+                ServiceSlot::EmitRank => {
+                    let side = match respond_idx {
+                        None => Side::Request,
+                        Some(_) => Side::Response,
+                    };
+
+                    sources.push((Source::EmitRank(side), EMIT_RANK_LABEL));
+                }
             }
         }
 
@@ -595,9 +635,8 @@ pub fn validate_fixed_selectors<F>(
 
 /// Every multi-endpoint `Permutation` `bus_id`
 /// must have at least one endpoint owning a real
-/// `RowIndexLeBytes`/`RowIndexByte` clock;
-/// otherwise label-only stitching admits
-/// char-2 parity collapse.
+/// `RowIndexLeBytes`/`RowIndexByte`/`EmitRank` clock;
+/// otherwise label-only stitching admits char-2 parity collapse.
 pub fn validate_bus_set<'a, I>(endpoints: I) -> errors::Result<()>
 where
     I: IntoIterator<Item = (&'a str, &'a PermutationCheckSpec)>,
@@ -646,9 +685,9 @@ where
             return Err(errors::Error::Protocol {
                 protocol: "logup_bus",
                 message: "permutation bus_id has no endpoint owning a real \
-                          Source::RowIndexLeBytes/RowIndexByte clock and not all \
-                          endpoints declare a clock_waiver; label-only stitching \
-                          is forgeable and admits char-2 parity collapse",
+                          Source::RowIndexLeBytes/RowIndexByte/EmitRank clock and \
+                          not all endpoints declare a clock_waiver; label-only \
+                          stitching is forgeable and admits char-2 parity collapse",
             });
         }
     }
@@ -680,8 +719,8 @@ where
     F: TowerField + HardwareField + From<u128>,
 {
     let total_bits = (num_bytes.min(8) * 8).min(r_final.len());
-    let mut acc = Flat::from_raw(F::ZERO);
 
+    let mut acc = Flat::from_raw(F::ZERO);
     for (i, r) in r_final.iter().enumerate().take(total_bits) {
         acc += F::from(1u128 << i).to_hardware() * *r;
     }
@@ -701,8 +740,8 @@ where
     }
 
     let end = (bit_start + 8).min(r_final.len());
-    let mut acc = Flat::from_raw(F::ZERO);
 
+    let mut acc = Flat::from_raw(F::ZERO);
     for (j, i) in (bit_start..end).enumerate() {
         acc += F::from(1u128 << j).to_hardware() * r_final[i];
     }
@@ -746,6 +785,15 @@ mod tests {
                 ServiceSlot::RequestIdxBytes { num_bytes: 4 },
                 ServiceSlot::Value(b"k_dir"),
             ],
+            clock_waiver: None,
+        }
+    }
+
+    fn ordered_service() -> Service {
+        Service {
+            bus_id: "svc",
+            kind: BusKind::Permutation,
+            slots: vec![ServiceSlot::Value(b"k_a"), ServiceSlot::EmitRank],
             clock_waiver: None,
         }
     }
@@ -1035,5 +1083,38 @@ mod tests {
         substituted[1].shape = FixedShape::LastRow;
 
         assert!(validate_fixed_selectors(&specs, &substituted).is_err());
+    }
+
+    #[test]
+    fn emit_rank_slot_takes_no_clock_column() {
+        let svc = ordered_service();
+
+        assert_eq!(svc.clock_columns(), 0);
+
+        let req = svc.request(&[10], 12).unwrap();
+        let resp = svc.respond(&[20], &[], 23).unwrap();
+
+        assert_eq!(
+            req.sources,
+            vec![
+                (Source::Column(10), b"k_a" as ChallengeLabel),
+                (Source::EmitRank(Side::Request), EMIT_RANK_LABEL),
+            ]
+        );
+        assert_eq!(
+            resp.sources,
+            vec![
+                (Source::Column(20), b"k_a" as ChallengeLabel),
+                (Source::EmitRank(Side::Response), EMIT_RANK_LABEL),
+            ]
+        );
+
+        req.validate_clock_stitching("svc").unwrap();
+        resp.validate_clock_stitching("svc").unwrap();
+
+        validate_bus_set(vec![("svc", &req), ("svc", &resp)]).unwrap();
+
+        assert!(svc.respond(&[20], &[22], 23).is_err());
+        assert!(svc.request_phased(&[10], 60, 12).is_err());
     }
 }

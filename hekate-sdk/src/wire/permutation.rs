@@ -7,7 +7,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::{Error, Result};
-use hekate_program::permutation::{BusKind, ChallengeLabel, PermutationCheckSpec, Source};
+use hekate_program::permutation::{BusKind, ChallengeLabel, PermutationCheckSpec, Side, Source};
 
 use crate::generated::program as fb;
 
@@ -74,6 +74,17 @@ pub fn serialize_source<'a>(
             &fb::SourceArgs {
                 kind: fb::SourceKind::PhaseColumn,
                 column_index: *idx as u32,
+                ..Default::default()
+            },
+        ),
+        Source::EmitRank(side) => fb::Source::create(
+            fbb,
+            &fb::SourceArgs {
+                kind: fb::SourceKind::EmitRank,
+                side: match side {
+                    Side::Request => fb::EmitSide::Request,
+                    Side::Response => fb::EmitSide::Response,
+                },
                 ..Default::default()
             },
         ),
@@ -248,6 +259,14 @@ fn deserialize_source(entry: &fb::SourceEntry<'_>) -> Result<Source> {
         }
         fb::SourceKind::RowIndexByte => Ok(Source::RowIndexByte(fb_source.byte_index() as usize)),
         fb::SourceKind::PhaseColumn => Ok(Source::PhaseColumn(fb_source.column_index() as usize)),
+        fb::SourceKind::EmitRank => match fb_source.side() {
+            fb::EmitSide::Request => Ok(Source::EmitRank(Side::Request)),
+            fb::EmitSide::Response => Ok(Source::EmitRank(Side::Response)),
+            _ => Err(Error::Protocol {
+                protocol: "wire",
+                message: "unknown EmitSide",
+            }),
+        },
         fb::SourceKind::Constant => {
             let block = fb_source.constant_value().ok_or(Error::Protocol {
                 protocol: "wire",

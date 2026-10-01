@@ -41,7 +41,8 @@ use hekate_program::outer::{
     table_record,
 };
 use hekate_program::permutation::{
-    self, BusKind, eval_row_idx_byte_mle, eval_row_idx_le_mle, validate_fixed_selectors,
+    self, BusKind, RankClock, RankTable, TableHeight, eval_row_idx_byte_mle, eval_row_idx_le_mle,
+    rank_clocks, validate_fixed_selectors,
 };
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, digest, validate_fixed_columns};
 use tracing::{debug, info, instrument, warn};
@@ -78,6 +79,7 @@ struct TableView<'a, F: TowerField, A> {
     plan: &'a RingSwitchPlan,
     ast: &'a ConstraintAst<F>,
     shape: &'a TableShape,
+    clocks: &'a [Option<RankClock>],
 }
 
 /// One table's proof parts.
@@ -264,6 +266,24 @@ where
             });
         }
 
+        let mut rank_tables = Vec::with_capacity(1 + chiplet_tables.len());
+
+        rank_tables.push(RankTable {
+            specs: &main_perm,
+            fixed: &main_fixed,
+            height: TableHeight::Main(num_vars),
+        });
+
+        for table in &chiplet_tables {
+            rank_tables.push(RankTable {
+                specs: &table.def.permutation_checks,
+                fixed: table.def.pins(),
+                height: TableHeight::Chiplet(Some(table.shape.num_vars)),
+            });
+        }
+
+        let clocks = rank_clocks(&rank_tables)?;
+
         // =========================================================
         // PHASE 1: TRACE COMMITMENT & FIAT-SHAMIR BINDING
         // =========================================================
@@ -341,6 +361,7 @@ where
         // =========================================================
         Self::verify_chiplet_fused(
             &chiplet_tables,
+            &clocks[1..],
             proof,
             transcript,
             config,
@@ -358,6 +379,7 @@ where
             plan: &main_plan,
             ast: &main_ast,
             shape: &main_shape,
+            clocks: &clocks[0],
         };
 
         let main_proof = TableProof {
@@ -463,6 +485,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn verify_chiplet_fused(
         chiplet_tables: &[ChipletTable<'_, F>],
+        chiplet_clocks: &[Vec<Option<RankClock>>],
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
@@ -522,6 +545,7 @@ where
                 plan: &table.plan,
                 ast: &table.ast,
                 shape: &table.shape,
+                clocks: &chiplet_clocks[c_idx],
             };
 
             let table_proof = TableProof {
@@ -604,6 +628,7 @@ where
             plan: ring_plan,
             ast,
             shape,
+            clocks,
         } = *view;
         let TableProof {
             commitment,
@@ -679,6 +704,7 @@ where
             r_zerocheck: &masked.r_zerocheck,
             r_final: &r_final,
             lookup_bus_points: logup.lookup_bus_points,
+            clocks,
             claimed_sums_masked: &logup_aux.claimed_sums,
             h_evals_masked: &logup_aux.h_evals,
             val_final_masked: masked.val_final,
@@ -757,6 +783,7 @@ where
             instance,
             ast,
             shape,
+            clocks,
             ..
         } = *view;
         let TableProof {
@@ -1069,6 +1096,10 @@ where
                         }
                         permutation::Source::RowIndexByte(n) => {
                             source_evals.push(eval_row_idx_byte_mle::<F>(*n, &r_final));
+                        }
+                        permutation::Source::EmitRank(_) => {
+                            let clock = RankClock::for_spec(clocks, spec_idx)?;
+                            source_evals.push(clock.evaluate(&r_final)?);
                         }
                     }
                 }

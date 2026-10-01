@@ -5,7 +5,7 @@
 use crate::chiplet::ChipletDef;
 use crate::constraint::{BoundaryTarget, ConstraintAst, ConstraintExpr, ExprId};
 use crate::expander::ExpansionEntry;
-use crate::permutation::{BusKind, PermutationCheckSpec, Source};
+use crate::permutation::{BusKind, PermutationCheckSpec, Side, Source};
 use crate::{Air, FixedColumn, FixedShape, InlineKernelHint, Program};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -398,6 +398,13 @@ fn absorb_source(h: &mut Absorb, source: &Source) {
         Source::PhaseColumn(idx) => {
             h.update(&[5]);
             h.update(&(*idx as u64).to_le_bytes());
+        }
+        Source::EmitRank(side) => {
+            h.update(&[6]);
+            h.update(&[match side {
+                Side::Request => 0,
+                Side::Response => 1,
+            }]);
         }
     }
 }
