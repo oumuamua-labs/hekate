@@ -18,6 +18,7 @@ use hekate_math::{Flat, HardwareField, PackableField, TowerField};
 
 use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use crate::expander::VirtualExpander;
+use crate::outer::TableStatics;
 use crate::permutation::{
     PermutationCheckSpec, RankTable, TableHeight, validate_fixed_selectors, validate_ordered_buses,
 };
@@ -102,6 +103,15 @@ impl<F: TowerField> ChipletDef<F> {
 
     pub fn pins(&self) -> &[FixedColumn<F>] {
         &self.fixed_columns
+    }
+
+    pub fn statics(&self) -> TableStatics<'_, F> {
+        TableStatics {
+            ast: &self.constraint_ast,
+            specs: &self.permutation_checks,
+            fixed: &self.fixed_columns,
+            boundary: &self.boundary_constraints,
+        }
     }
 
     pub fn inline_defs(&self) -> &[ChipletDef<F>] {

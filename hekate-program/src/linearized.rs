@@ -10,11 +10,56 @@
 use crate::predicate::{AffineRow, Unknown, WireRole};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::marker::PhantomData;
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
 
 pub const BITS: usize = 128;
 
+pub const CHAIN_ROWS: usize = 2 * (BITS - 1);
+
 const DUAL_KERNEL: [u8; 8] = [0x29, 0xb0, 0x58, 0x05, 0xa6, 0x53, 0xa4, 0x52];
+
+/// F₂-linear map tabulated per byte of its argument's
+/// raw bits; `new` reads `image` on basis vectors only.
+/// `apply` indexes the tables by its argument: variable-time.
+pub(crate) struct LinearMap<I, O> {
+    tables: Vec<[Flat<O>; 256]>,
+    input: PhantomData<I>,
+}
+
+impl<I, O> LinearMap<I, O>
+where
+    I: HardwareField + Into<Block128>,
+    O: HardwareField,
+{
+    pub(crate) fn new(image: impl Fn(Flat<I>) -> Flat<O>) -> Self {
+        let mut tables = vec![[Flat::from_raw(O::ZERO); 256]; BITS / 8];
+        for (w, table) in tables.iter_mut().enumerate() {
+            let images: [Flat<O>; 8] =
+                core::array::from_fn(|k| image(Flat::from_raw(I::from(1u128 << (8 * w + k)))));
+
+            for v in 1usize..256 {
+                table[v] = table[v & (v - 1)] + images[v.trailing_zeros() as usize];
+            }
+        }
+
+        Self {
+            tables,
+            input: PhantomData,
+        }
+    }
+
+    pub(crate) fn apply(&self, x: Flat<I>) -> Flat<O> {
+        let raw: Block128 = x.into_raw().into();
+
+        let mut acc = Flat::from_raw(O::ZERO);
+        for (table, byte) in self.tables.iter().zip(raw.0.to_le_bytes()) {
+            acc += table[byte as usize];
+        }
+
+        acc
+    }
+}
 
 /// `Δ = Σ_c a_c φ(h_c)` over the pad entries `(pad, a_c)`
 /// as the chain `X_127 = T'_127`, `X_j = T'_j + X_{j+1}²`,
@@ -24,10 +69,6 @@ pub struct RingGadget<F> {
     pub ring: Vec<(u32, Flat<F>)>,
     pub mu: Vec<Flat<F>>,
     pub first_wire: u32,
-
-    /// Statement row of `Lhs_1`; the chain
-    /// occupies `2 · (BITS - 1)` rows from there.
-    pub first_row: usize,
 }
 
 impl<F: HardwareField> RingGadget<F> {
@@ -36,7 +77,6 @@ impl<F: HardwareField> RingGadget<F> {
             ring,
             mu,
             first_wire,
-            first_row: 0,
         }
     }
 
@@ -44,9 +84,10 @@ impl<F: HardwareField> RingGadget<F> {
         self.first_wire + j as u32 - 1
     }
 
-    /// Statement row of `Lhs_j`; `Rhs_j` follows it.
+    /// Row of `Lhs_j` among the gadget's
+    /// [`CHAIN_ROWS`]; `Rhs_j` follows it.
     pub fn row_of(&self, j: usize) -> usize {
-        self.first_row + 2 * (j - 1)
+        2 * (j - 1)
     }
 
     /// `f(j, tie_j)` for `j = 127` down to `1`,
@@ -70,13 +111,43 @@ impl<F: HardwareField> RingGadget<F> {
         }
     }
 
+    /// `f(pad, w_c)` per pad entry, with
+    /// `w_c = Σ_j scales[row_of(j)] · tie_j[c]`
+    /// folded into one F₂-linear map of `a_c`.
+    pub fn for_each_tie_weight(&self, scales: &[Flat<F>], mut f: impl FnMut(u32, Flat<F>))
+    where
+        F: Into<Block128>,
+    {
+        let mut lambda = [Flat::from_raw(F::ZERO); BITS];
+        for (i, l) in lambda.iter_mut().enumerate().skip(1) {
+            let j = BITS - i;
+            *l = scales[self.row_of(j)] * frobenius(self.mu[j], i);
+        }
+
+        let map = LinearMap::new(|x: Flat<F>| {
+            let mut power = x;
+            let mut acc = Flat::from_raw(F::ZERO);
+
+            for &l in &lambda[1..] {
+                power = power * power;
+                acc += l * power;
+            }
+
+            acc
+        });
+
+        for &(pad, a) in &self.ring {
+            f(pad, map.apply(a));
+        }
+    }
+
     /// Wire terms of the chain rows, in [`row_of`] order:
     /// `Lhs_j + Product_{j+1}` and `Rhs_j + Lhs_j`.
     pub fn wire_rows(&self) -> Vec<AffineRow<F>> {
         let one = Flat::from_raw(F::ONE);
         let zero = Flat::from_raw(F::ZERO);
 
-        let mut rows = Vec::with_capacity(2 * (BITS - 1));
+        let mut rows = Vec::with_capacity(CHAIN_ROWS);
         for j in 1..BITS {
             let mut unknowns = vec![(
                 Unknown::Wire {
@@ -394,6 +465,42 @@ mod tests {
                     "wire {target} role {role} perturbation went undetected"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tie_weights_equal_scaled_tie_rows() {
+        let mut state = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210u128;
+        for len in [1u32, 9, 40] {
+            let r_mix: Vec<Block128> = (0..7).map(|_| next(&mut state)).collect();
+            let mu = linearized_coeffs(&eq_tensor_b(&r_mix));
+
+            let ring: Vec<(u32, Flat<Block128>)> = (0..len)
+                .map(|c| (3 * c + 1, next(&mut state).to_hardware()))
+                .collect();
+
+            let gadget = RingGadget::new(ring, mu, 0);
+
+            let scales: Vec<Flat<Block128>> = (0..CHAIN_ROWS)
+                .map(|_| next(&mut state).to_hardware())
+                .collect();
+
+            let mut expected: Vec<(u32, Flat<Block128>)> = gadget
+                .ring
+                .iter()
+                .map(|&(pad, _)| (pad, Flat::from_raw(Block128::ZERO)))
+                .collect();
+
+            gadget.for_each_tie_row(|j, tie| {
+                for ((_, w), &t) in expected.iter_mut().zip(tie) {
+                    *w += scales[gadget.row_of(j)] * t;
+                }
+            });
+
+            let mut folded = Vec::new();
+            gadget.for_each_tie_weight(&scales, |pad, w| folded.push((pad, w)));
+
+            assert_eq!(folded, expected);
         }
     }
 }

@@ -21,6 +21,18 @@ pub enum Unknown {
     Wire { mul: u32, role: WireRole },
 }
 
+impl Unknown {
+    pub fn shifted(self, mul_offset: u32) -> Self {
+        match self {
+            Unknown::Pad(_) => self,
+            Unknown::Wire { mul, role } => Unknown::Wire {
+                mul: mul + mul_offset,
+                role,
+            },
+        }
+    }
+}
+
 /// `half` is `V + K`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClaimLayout {
