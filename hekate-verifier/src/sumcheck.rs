@@ -64,6 +64,7 @@ pub fn verify<F: HardwareField, H: Hasher>(
         return Ok(Some((Vec::new(), proof.claimed_evaluation.to_hardware())));
     }
 
+    let mut full_poly = UnivariatePoly::new(Vec::with_capacity(degree + 1));
     let mut challenges = Vec::with_capacity(num_vars);
     let mut current_claim = initial_claim;
 
@@ -87,13 +88,13 @@ pub fn verify<F: HardwareField, H: Hasher>(
         let p_1 = poly.evals[0].to_hardware();
         let p_0 = current_claim - p_1;
 
-        let mut full_evals = Vec::with_capacity(degree + 1);
-        full_evals.push(p_0.to_tower());
-        full_evals.extend_from_slice(&poly.evals);
+        full_poly.evals.clear();
+        full_poly.evals.push(p_0.to_tower());
+        full_poly.evals.extend_from_slice(&poly.evals);
 
         // Replay Transcript interaction
         // with full polynomial.
-        transcript.append_field_list(b"round_poly", &full_evals);
+        transcript.append_field_list(b"round_poly", &full_poly.evals);
 
         // Generate Challenge
         let r_tower: F = transcript.challenge_field(b"challenge_r")?;
@@ -102,7 +103,6 @@ pub fn verify<F: HardwareField, H: Hasher>(
 
         // Update Claim:
         // expected_next = g_i(r)
-        let full_poly = UnivariatePoly::new(full_evals);
         current_claim = full_poly.evaluate_hw(r_hw);
     }
 
