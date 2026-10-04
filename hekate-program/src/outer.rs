@@ -1530,6 +1530,16 @@ fn weigh_records<F: TowerField + HardwareField + Into<Block128>>(
     records: &[TableRecord<'_, F>],
     scales: &[Flat<F>],
 ) -> errors::Result<LinearBatch<F>> {
+    let buses = bus_endpoints(records);
+    let tables: usize = records.iter().map(TableRecord::affine_rows).sum();
+
+    if scales.len() != tables + buses.len() {
+        return Err(errors::Error::Protocol {
+            protocol: "outer",
+            message: "scale count does not match the statement rows",
+        });
+    }
+
     let mut acc = Accumulator::new(layout);
     let mut sweep = Sweep::new();
 
@@ -1551,7 +1561,7 @@ fn weigh_records<F: TowerField + HardwareField + Into<Block128>>(
         mul_offset += record.shape.mul_wires() as u32;
     }
 
-    for (endpoints, &scale) in bus_endpoints(records).values().zip(&scales[first..]) {
+    for (endpoints, &scale) in buses.values().zip(&scales[first..]) {
         acc.row(&bus_sum_row(endpoints), scale, &[], 0);
     }
 
@@ -2522,6 +2532,29 @@ mod tests {
             match linear_weights(&layout, &statement, &records, &tensor) {
                 Err(errors::Error::Protocol { message: got, .. }) => assert_eq!(got, message),
                 _ => panic!("{message}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mismatched_scale_count_is_rejected() {
+        let asts = [rich_ast(), linear_ast(), empty_ast()];
+        let (records, statement, layout) = weighted_statement(&asts);
+
+        let rows = statement_rows(&records, &statement).unwrap();
+        let scales: Vec<Flat<F>> = (0..=rows as u128).map(|i| mix(6000 + i)).collect();
+
+        assert!(weigh_records(&layout, &records, &scales[..rows]).is_ok());
+
+        for len in [0, rows - 1, rows + 1] {
+            match weigh_records(&layout, &records, &scales[..len]) {
+                Err(errors::Error::Protocol { message, .. }) => {
+                    assert_eq!(
+                        message, "scale count does not match the statement rows",
+                        "{len}"
+                    )
+                }
+                _ => panic!("{len}"),
             }
         }
     }
