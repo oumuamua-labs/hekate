@@ -4,7 +4,7 @@
 
 use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
-use hekate_program::{CadenceSegment, FixedShape, fix, validate_fixed_columns};
+use hekate_program::{CadenceSegment, FixedShape, ShapeEvaluator, fix, validate_fixed_columns};
 
 type F = Block128;
 
@@ -36,6 +36,85 @@ fn brute_force(values: &[F], r: &[Flat<F>]) -> Flat<F> {
     }
 
     acc
+}
+
+fn mixed_values(len: usize) -> Vec<F> {
+    (0..len)
+        .map(|j| match j % 3 {
+            0 => F::ONE,
+            1 => F::ZERO,
+            _ => F::from((j as u128) * 7 + 2),
+        })
+        .collect()
+}
+
+fn shapes_at(num_vars: usize) -> Vec<FixedShape<F>> {
+    let n = 1usize << num_vars;
+
+    let mut shapes = vec![
+        FixedShape::FirstRow,
+        FixedShape::LastRow,
+        FixedShape::Custom((0..num_vars).map(|k| k % 2 == 0).collect()),
+        FixedShape::Periodic {
+            period: n.min(8),
+            values: mixed_values(n.min(8)),
+        },
+        FixedShape::Sparse(vec![
+            (0, F::ONE),
+            (n - 1, F::from(9u128)),
+            (n / 2, F::ZERO),
+            (n + 3, F::from(5u128)),
+        ]),
+        FixedShape::Cadence {
+            stride: 0,
+            count: 3,
+            origin: 0,
+            values: Vec::new(),
+        },
+        FixedShape::Cadence {
+            stride: 4,
+            count: 2,
+            origin: 1,
+            values: mixed_values(3),
+        },
+        FixedShape::Segments(vec![
+            CadenceSegment {
+                stride: 1,
+                count: n / 4,
+                origin: 1,
+                values: vec![F::from(3u128)],
+            },
+            CadenceSegment {
+                stride: 3,
+                count: n / 8,
+                origin: n / 2,
+                values: mixed_values(3),
+            },
+        ]),
+    ];
+
+    if num_vars <= 12 {
+        shapes.push(FixedShape::Dense(mixed_values(n)));
+    }
+
+    for stride in [1usize, 2, 3, 25, 256, 896, 1152] {
+        for (origin, count) in [
+            (0, 0),
+            (0, n / stride),
+            (3, n / 2 / stride),
+            (n / 4, n.div_ceil(stride)),
+            (n, 1),
+        ] {
+            shapes.push(FixedShape::Cadence {
+                stride,
+                count,
+                origin,
+                values: mixed_values(stride),
+            });
+        }
+    }
+
+    shapes
 }
 
 #[test]
@@ -201,6 +280,28 @@ fn validator_rejects_duplicate_sparse_row() {
     )];
 
     assert!(validate_fixed_columns(&fixed, &layout, Some(4)).is_err());
+}
+
+#[test]
+fn validator_rejects_duplicate_sparse_row_out_of_order() {
+    let layout = [ColumnType::B32];
+    let fixed = vec![fix(
+        0,
+        FixedShape::Sparse(vec![(9, F::ONE), (2, F::from(4u128)), (9, F::ZERO)]),
+    )];
+
+    assert!(validate_fixed_columns(&fixed, &layout, Some(4)).is_err());
+}
+
+#[test]
+fn validator_accepts_unsorted_distinct_sparse_rows() {
+    let layout = [ColumnType::B32];
+    let fixed = vec![fix(
+        0,
+        FixedShape::Sparse(vec![(9, F::ONE), (2, F::from(4u128)), (15, F::ZERO)]),
+    )];
+
+    validate_fixed_columns(&fixed, &layout, Some(4)).expect("distinct rows in any order pass");
 }
 
 #[test]
@@ -454,6 +555,25 @@ fn segments_evaluate_is_sum_of_cadence_blocks() {
     let sum = as_cadence(&a).evaluate(&r) + as_cadence(&b).evaluate(&r);
 
     assert_eq!(FixedShape::Segments(vec![a, b]).evaluate(&r), sum);
+}
+
+#[test]
+fn shape_evaluator_matches_evaluate() {
+    for num_vars in [0usize, 1, 5, 12, 33] {
+        let r = challenges(num_vars);
+        let shapes = shapes_at(num_vars);
+
+        let mut evaluator = ShapeEvaluator::new(&r);
+        for _ in 0..2 {
+            for (i, shape) in shapes.iter().enumerate() {
+                assert_eq!(
+                    evaluator.evaluate(shape),
+                    shape.evaluate(&r),
+                    "num_vars {num_vars} shape {i}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
