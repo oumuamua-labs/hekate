@@ -14,7 +14,13 @@ use hekate_math::{
     Bit, Block8, Block16, Block32, Block64, Block128, Flat, HardwareField, TowerField,
 };
 
+use crate::linearized::{BITS, LinearMap};
+
 pub const RING_BLIND_BITS: usize = 128;
+
+/// Claim count from which [`ring_target`] switches
+/// to byte tables indexed by the claims: variable-time.
+const RING_TABLE_MIN_CLAIMS: usize = 300;
 
 /// Serializable expansion step descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -990,53 +996,13 @@ pub fn ring_target<F>(
 where
     F: HardwareField + Into<Block128>,
 {
-    let claim_halves = if shifted_claims { 2 } else { 1 };
-    let half = claims.len() / claim_halves;
     let eq_mix = eq_tensor_b(r_mix);
-    let eta: Block128 = eta_tower.into();
 
-    let mut eta_pows = Vec::with_capacity(plan.num_units + 1);
-    let mut e = Block128::ONE;
-
-    for _ in 0..=plan.num_units {
-        eta_pows.push(e);
-        e *= eta;
-    }
-
-    let eta_shift = eta_pows[plan.num_units];
-
-    let base = [(0usize, Block128::ONE)];
-    let base_and_shift = [(0usize, Block128::ONE), (half, eta_shift)];
-    let offsets: &[(usize, Block128)] = if shifted_claims {
-        &base_and_shift
+    if claims.len() < RING_TABLE_MIN_CLAIMS {
+        ring_target_transposed(plan, claims, eta_tower, &eq_mix, shifted_claims)
     } else {
-        &base
-    };
-
-    let mut target = Block128::ZERO;
-    for &(offset, shift_mul) in offsets {
-        let half_claims = &claims[offset..offset + half];
-
-        let mut ci = 0usize;
-        for (unit_idx, &(is_ring, num_claims)) in plan.units.iter().enumerate() {
-            let weight = eta_pows[unit_idx] * shift_mul;
-            if is_ring {
-                let bits: Vec<Block128> = half_claims[ci..ci + num_claims]
-                    .iter()
-                    .map(|f| f.to_tower().into())
-                    .collect();
-
-                target += weight * ring_batch_b(&bits, &eq_mix);
-            } else {
-                let c: Block128 = half_claims[ci].to_tower().into();
-                target += weight * c;
-            }
-
-            ci += num_claims;
-        }
+        ring_target_tabulated(plan, claims, eta_tower, &eq_mix, shifted_claims)
     }
-
-    target
 }
 
 /// Per-claim weight `a_c` such that
@@ -1083,6 +1049,149 @@ where
     }
 
     weights
+}
+
+/// [`ring_target`] computed in the tower basis by
+/// transposing each ring unit's claim bits into `ŝ_u`.
+fn ring_target_transposed<F>(
+    plan: &RingSwitchPlan,
+    claims: &[Flat<F>],
+    eta_tower: F,
+    eq_mix: &[Block128],
+    shifted_claims: bool,
+) -> Block128
+where
+    F: HardwareField + Into<Block128>,
+{
+    let claim_halves = if shifted_claims { 2 } else { 1 };
+    let half = claims.len() / claim_halves;
+    let eta: Block128 = eta_tower.into();
+
+    let mut eta_pows = Vec::with_capacity(plan.num_units + 1);
+    let mut e = Block128::ONE;
+
+    for _ in 0..=plan.num_units {
+        eta_pows.push(e);
+        e *= eta;
+    }
+
+    let eta_shift = eta_pows[plan.num_units];
+
+    let base = [(0usize, Block128::ONE)];
+    let base_and_shift = [(0usize, Block128::ONE), (half, eta_shift)];
+    let offsets: &[(usize, Block128)] = if shifted_claims {
+        &base_and_shift
+    } else {
+        &base
+    };
+
+    let mut target = Block128::ZERO;
+    for &(offset, shift_mul) in offsets {
+        let half_claims = &claims[offset..offset + half];
+
+        let mut ci = 0usize;
+        for (unit_idx, &(is_ring, num_claims)) in plan.units.iter().enumerate() {
+            let weight = eta_pows[unit_idx] * shift_mul;
+            if is_ring {
+                let bits: Vec<Block128> = half_claims[ci..ci + num_claims]
+                    .iter()
+                    .map(|f| f.to_tower().into())
+                    .collect();
+
+                target += weight * ring_batch_b(&bits, eq_mix);
+            } else {
+                let c: Block128 = half_claims[ci].to_tower().into();
+                target += weight * c;
+            }
+
+            ci += num_claims;
+        }
+    }
+
+    target
+}
+
+/// [`ring_target`] computed in the flat basis, each
+/// ring unit as `Σ_v 2^v · φ_{r''}(c_v)` with `φ_{r''}`
+/// read from byte tables on the claims' raw bits.
+fn ring_target_tabulated<F>(
+    plan: &RingSwitchPlan,
+    claims: &[Flat<F>],
+    eta_tower: F,
+    eq_mix: &[Block128],
+    shifted_claims: bool,
+) -> Block128
+where
+    F: HardwareField + Into<Block128>,
+{
+    let zero = Flat::from_raw(Block128::ZERO);
+    let one = Flat::from_raw(Block128::ONE);
+
+    let eq_flat: Vec<Flat<Block128>> = eq_mix.iter().map(|m| m.to_hardware()).collect();
+
+    let phi = LinearMap::new(|x: Flat<F>| {
+        let tower: Block128 = x.to_tower().into();
+
+        let mut acc = zero;
+        for (u, &m) in eq_flat.iter().enumerate() {
+            if (tower.0 >> u) & 1 == 1 {
+                acc += m;
+            }
+        }
+
+        acc
+    });
+
+    let basis: Vec<Flat<Block128>> = (0..BITS)
+        .map(|v| Block128(1u128 << v).to_hardware())
+        .collect();
+
+    let eta = Into::<Block128>::into(eta_tower).to_hardware();
+
+    let mut eta_pows = Vec::with_capacity(plan.num_units + 1);
+    let mut e = one;
+
+    for _ in 0..=plan.num_units {
+        eta_pows.push(e);
+        e *= eta;
+    }
+
+    let claim_halves = if shifted_claims { 2 } else { 1 };
+    let half = claims.len() / claim_halves;
+
+    let base = [(0usize, one)];
+    let base_and_shift = [(0usize, one), (half, eta_pows[plan.num_units])];
+
+    let offsets: &[(usize, Flat<Block128>)] = if shifted_claims {
+        &base_and_shift
+    } else {
+        &base
+    };
+
+    let mut target = zero;
+    for &(offset, shift_mul) in offsets {
+        let half_claims = &claims[offset..offset + half];
+
+        let mut ci = 0usize;
+        for (unit_idx, &(is_ring, num_claims)) in plan.units.iter().enumerate() {
+            let unit_claims = &half_claims[ci..ci + num_claims];
+            let value = if is_ring {
+                let mut acc = zero;
+                for (&c, &b) in unit_claims.iter().zip(&basis) {
+                    acc += b * phi.apply(c);
+                }
+
+                acc
+            } else {
+                Into::<Block128>::into(unit_claims[0].to_tower()).to_hardware()
+            };
+
+            target += eta_pows[unit_idx] * shift_mul * value;
+            ci += num_claims;
+        }
+    }
+
+    target.to_tower()
 }
 
 #[cfg(test)]
@@ -1530,5 +1639,57 @@ mod tests {
         }
 
         assert!(stepped_down > 0, "the adaptive walk never fired");
+    }
+
+    #[test]
+    fn tabulated_ring_target_equals_transposed() {
+        let layout = [
+            ColumnType::B8,
+            ColumnType::B16,
+            ColumnType::B32,
+            ColumnType::B64,
+            ColumnType::B64,
+            ColumnType::Bit,
+        ];
+
+        let expander = VirtualExpander::new()
+            .expand_bits(1, ColumnType::B8)
+            .expand_bits(1, ColumnType::B16)
+            .expand_bits(1, ColumnType::B32)
+            .expand_bits(1, ColumnType::B64)
+            .pass_through(1, ColumnType::B64)
+            .control_bits(1)
+            .build()
+            .unwrap();
+
+        let entries = expander.expansion_entries();
+
+        let mut state = 0x2545_f491_4f6c_dd1d_9e37_79b9_7f4a_7c15u128;
+
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+
+            Block128(state)
+        };
+
+        for (num_blind, num_h, shifted) in [(0, 0, false), (2, 1, true), (1, 3, false)] {
+            let plan = RingSwitchPlan::new(&layout, Some(&entries), num_blind, num_h).unwrap();
+
+            let halves = if shifted { 2 } else { 1 };
+            let claims: Vec<Flat<Block128>> = (0..halves * plan.total_claims())
+                .map(|_| next().to_hardware())
+                .collect();
+
+            let eta = next();
+            let r_mix: Vec<Block128> = (0..7).map(|_| next()).collect();
+            let eq_mix = eq_tensor_b(&r_mix);
+
+            assert_eq!(
+                ring_target_tabulated(&plan, &claims, eta, &eq_mix, shifted),
+                ring_target_transposed(&plan, &claims, eta, &eq_mix, shifted)
+            );
+        }
     }
 }
