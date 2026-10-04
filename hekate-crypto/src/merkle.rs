@@ -595,10 +595,10 @@ fn hash_layer<H: Hasher>(
     children: &[MaybeUninit<[u8; 32]>],
     parents: &mut [MaybeUninit<[u8; 32]>],
 ) {
-    for (parent, pair) in parents.iter_mut().zip(children.chunks_exact(2)) {
+    for (parent, [lo, hi]) in parents.iter_mut().zip(children.as_chunks::<2>().0) {
         // SAFETY: a layer is hashed only after the one below
         // it is written, the leaves by `build_layers`' caller.
-        let (left, right) = unsafe { (pair[0].assume_init_ref(), pair[1].assume_init_ref()) };
+        let (left, right) = unsafe { (lo.assume_init_ref(), hi.assume_init_ref()) };
 
         parent.write(hash_node::<H>(left, right));
     }
@@ -616,7 +616,7 @@ fn hash_node<H: Hasher>(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 
 /// Copies cell `i` of `cells` to `dst[i * stride + offset..]`.
 fn scatter<const CELL: usize>(cells: &[u8], dst: &mut [u8], stride: usize, offset: usize) {
-    for (i, cell) in cells.chunks_exact(CELL).enumerate() {
+    for (i, cell) in cells.as_chunks::<CELL>().0.iter().enumerate() {
         let at = i * stride + offset;
         dst[at..at + CELL].copy_from_slice(cell);
     }
