@@ -146,31 +146,41 @@ impl<H: Hasher> Transcript<H> {
         });
     }
 
+    /// [`append_field`](Self::append_field) on each element
+    /// in turn, the labelled bytes batched through one buffer.
+    pub fn append_field_each<F: TowerField>(&mut self, label: &'static [u8], elements: &[F]) {
+        self.hasher.update_fields(label, elements.iter().copied());
+
+        #[cfg(feature = "transcript-trace")]
+        for element in elements {
+            self.trace.push(TranscriptOp::AppendField {
+                label,
+                digest: payload_digest::<H>(&element.to_bytes()),
+            });
+        }
+    }
+
     /// Append a list of field elements
     /// (e.g. a polynomial's round coefficients).
-    /// Length-prefixed and serialized via
+    /// Length-prefixed and serialized as
     /// `TowerField::to_bytes()` for canonical,
     /// padding-free, endian-agnostic hashing.
     pub fn append_field_list<F: TowerField>(&mut self, label: &'static [u8], elements: &[F]) {
         self.hasher.update(label);
 
         self.hasher.update(&(elements.len() as u64).to_le_bytes());
-
-        #[cfg(feature = "transcript-trace")]
-        let mut digest_h = H::new();
-        for element in elements {
-            let bytes = element.to_bytes();
-            self.hasher.update(&bytes);
-
-            #[cfg(feature = "transcript-trace")]
-            digest_h.update(&bytes);
-        }
+        self.hasher.update_fields(&[], elements.iter().copied());
 
         #[cfg(feature = "transcript-trace")]
         self.trace.push(TranscriptOp::AppendFieldList {
             label,
             count: elements.len() as u64,
-            digest: digest_h.finalize(),
+            digest: {
+                let mut digest_h = H::new();
+                digest_h.update_fields(&[], elements.iter().copied());
+
+                digest_h.finalize()
+            },
         });
     }
 

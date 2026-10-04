@@ -38,4 +38,8 @@ impl Hasher for Blake3Hasher {
 
         res.into()
     }
+
+    fn digest(data: &[u8]) -> [u8; 32] {
+        blake3::hash(data).into()
+    }
 }
