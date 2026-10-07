@@ -7,6 +7,7 @@ use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::Block128;
+use hekate_core::errors::Error;
 use hekate_math::{Bit, Block32, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
@@ -470,6 +471,32 @@ impl Program<F> for MultiBusProgram {
     }
 }
 
+#[derive(Clone)]
+struct BusFreeProgram;
+
+impl Air<F> for BusFreeProgram {
+    fn name(&self) -> String {
+        "audit_bus_free_main".to_string()
+    }
+
+    fn num_columns(&self) -> usize {
+        1
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        &[ColumnType::Bit]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+        cs.assert_boolean(cs.col(0));
+
+        cs.build()
+    }
+}
+
+impl Program<F> for BusFreeProgram {}
+
 fn multibus_trace(num_vars: usize) -> ColumnTrace {
     let mut tb = TraceBuilder::new(&[ColumnType::B32, ColumnType::Bit], num_vars).unwrap();
     let num_rows = tb.num_rows();
@@ -527,19 +554,55 @@ fn multibus_proof() -> (
     (air, instance, config, proof)
 }
 
+fn bus_free_proof() -> (
+    BusFreeProgram,
+    ProgramInstance<F>,
+    Config,
+    hekate_core::proofs::InnerProof<F>,
+) {
+    let num_vars = 4;
+
+    let air = BusFreeProgram;
+    let trace = TraceBuilder::new(&[ColumnType::Bit], num_vars)
+        .unwrap()
+        .build();
+
+    let instance = ProgramInstance::new(1 << num_vars, vec![]);
+    let witness = ProgramWitness::new(trace);
+    let config = cfg();
+
+    let proof = prove(
+        b"AuditP0", &air, &instance, &witness, &config, [0x5A; 32], None,
+    )
+    .expect("bus-free baseline prove");
+
+    assert!(
+        !verify_rejects(&air, &instance, &config, &proof),
+        "bus-free baseline must verify"
+    );
+
+    (air, instance, config, proof)
+}
+
+fn verify_result(
+    air: &impl Program<F>,
+    instance: &ProgramInstance<F>,
+    config: &Config,
+    proof: &hekate_core::proofs::InnerProof<F>,
+) -> hekate_core::errors::Result<bool> {
+    let mut vt = Transcript::<H>::new(b"AuditP0");
+    let pinned_id = program_id(air).unwrap();
+
+    HekateVerifier::<F, H>::verify(&pinned_id, air, instance, proof, &mut vt, config)
+}
+
 fn verify_rejects(
     air: &impl Program<F>,
     instance: &ProgramInstance<F>,
     config: &Config,
     proof: &hekate_core::proofs::InnerProof<F>,
 ) -> bool {
-    let mut vt = Transcript::<H>::new(b"AuditP0");
-    let pinned_id = program_id(air).unwrap();
-
-    match HekateVerifier::<F, H>::verify(&pinned_id, air, instance, proof, &mut vt, config) {
-        Ok(true) => false,
-        Ok(false) | Err(_) => true,
-    }
+    !matches!(verify_result(air, instance, config, proof), Ok(true))
 }
 
 // =====================================================
@@ -588,30 +651,45 @@ fn h_eval_corruption_after_sumcheck_rejected() {
 fn h_opening_omitted_on_bused_table_rejected() {
     let (air, instance, config, mut proof) = multibus_proof();
 
-    assert!(proof.chiplet_logup_aux[0].h_commitment.is_some());
-    assert!(proof.chiplet_eval_proofs[0].h_ldt_proof.is_some());
+    assert!(proof.h_root.is_some());
+    assert!(proof.eval_proof.h_ldt_proof.is_some());
 
-    // Keep h_commitment, the transcript stays synced
-    proof.chiplet_eval_proofs[0].h_ldt_proof = None;
+    // Keep h_root, the transcript stays synced
+    proof.eval_proof.h_ldt_proof = None;
+
+    let result = verify_result(&air, &instance, &config, &proof);
 
     assert!(
-        verify_rejects(&air, &instance, &config, &proof),
-        "SECURITY FAILURE: bused table with no h opening accepted"
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "evaluator_verifier",
+                message: "h opening present iff the plan carries h columns",
+            })
+        ),
+        "{result:?}"
     );
 }
 
 #[test]
-fn h_commitment_omitted_on_bused_table_rejected() {
+fn h_root_omitted_on_bused_proof_rejected() {
     let (air, instance, config, mut proof) = multibus_proof();
 
-    let aux = &mut proof.chiplet_logup_aux[0];
-    assert!(aux.h_commitment.is_some());
+    assert!(proof.h_root.is_some());
 
-    aux.h_commitment = None;
+    proof.h_root = None;
+
+    let result = verify_result(&air, &instance, &config, &proof);
 
     assert!(
-        verify_rejects(&air, &instance, &config, &proof),
-        "SECURITY FAILURE: bused table with no h commitment accepted"
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "verifier",
+                message: "h_root presence must match bus presence",
+            })
+        ),
+        "{result:?}"
     );
 }
 
@@ -817,27 +895,48 @@ fn zero_bus_main_injected_claimed_sum_rejected() {
 }
 
 // =====================================================
-// h binding present on a bus-free table
+// h binding present on a bus-free proof
 // (presence check, opposite arm)
 // =====================================================
 
 #[test]
-fn h_opening_on_bus_free_table_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+fn h_binding_on_bus_free_proof_rejected() {
+    let (air, instance, config, proof) = bus_free_proof();
+    let (_, _, _, bused) = multibus_proof();
 
-    assert!(proof.main_logup_aux.h_commitment.is_none());
+    assert!(proof.h_root.is_none());
     assert!(proof.eval_proof.h_ldt_proof.is_none());
 
-    let borrowed = proof.chiplet_eval_proofs[0]
-        .h_ldt_proof
-        .clone()
-        .expect("a bused chiplet carries an h opening");
+    let mut with_root = proof.clone();
+    with_root.h_root = bused.h_root;
 
-    proof.eval_proof.h_ldt_proof = Some(borrowed);
+    let result = verify_result(&air, &instance, &config, &with_root);
 
     assert!(
-        verify_rejects(&air, &instance, &config, &proof),
-        "SECURITY FAILURE: bus-free table with an h opening accepted"
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "verifier",
+                message: "h_root presence must match bus presence",
+            })
+        ),
+        "{result:?}"
+    );
+
+    let mut with_opening = proof;
+    with_opening.eval_proof.h_ldt_proof = bused.eval_proof.h_ldt_proof;
+
+    let result = verify_result(&air, &instance, &config, &with_opening);
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "evaluator_verifier",
+                message: "h opening present iff the plan carries h columns",
+            })
+        ),
+        "{result:?}"
     );
 }
 
@@ -849,10 +948,11 @@ fn h_opening_on_bus_free_table_rejected() {
 fn h_opening_batch_path_tamper_rejected() {
     let (air, instance, config, mut proof) = multibus_proof();
 
-    let opening = proof.chiplet_eval_proofs[0]
+    let opening = proof
+        .eval_proof
         .h_ldt_proof
         .as_mut()
-        .expect("a bused chiplet carries an h opening");
+        .expect("bused proof carries an h opening");
 
     assert!(!opening.batch_path.is_empty());
 
@@ -865,11 +965,95 @@ fn h_opening_batch_path_tamper_rejected() {
 fn trace_opening_batch_path_tamper_rejected() {
     let (air, instance, config, mut proof) = multibus_proof();
 
-    let opening = &mut proof.chiplet_eval_proofs[0].ldt_proof;
+    let opening = &mut proof.eval_proof.ldt_proof;
 
     assert!(!opening.batch_path.is_empty());
 
     opening.batch_path[0][0] ^= 1;
 
     assert!(verify_rejects(&air, &instance, &config, &proof));
+}
+
+#[test]
+fn opened_column_off_part_layout_rejected() {
+    let (air, instance, config, proof) = multibus_proof();
+
+    let mut long_h = proof.clone();
+    long_h
+        .eval_proof
+        .h_ldt_proof
+        .as_mut()
+        .expect("bused proof carries an h opening")
+        .opened_columns[0]
+        .extend([0u8; 16]);
+
+    let mut short_trace = proof;
+    short_trace.eval_proof.ldt_proof.opened_columns[0].pop();
+
+    for forged in [long_h, short_trace] {
+        let result = verify_result(&air, &instance, &config, &forged);
+
+        assert!(
+            matches!(
+                result,
+                Err(Error::Protocol {
+                    protocol: "brakedown",
+                    message: "opened column length does not match the tables' parts",
+                })
+            ),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn master_count_mismatch_rejected() {
+    let (air, instance, config, proof) = multibus_proof();
+
+    let mut short = proof.clone();
+    short.eval_proof.masters.pop();
+
+    let mut long = proof;
+    long.eval_proof.masters.push(F::ONE);
+
+    for forged in [short, long] {
+        let result = verify_result(&air, &instance, &config, &forged);
+
+        assert!(
+            matches!(
+                result,
+                Err(Error::Protocol {
+                    protocol: "evaluator_verifier",
+                    message: "one master evaluation per pooled master is required",
+                })
+            ),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn master_or_fold_vector_tamper_rejected() {
+    let (air, instance, config, proof) = multibus_proof();
+
+    for k in 0..proof.eval_proof.masters.len() {
+        let mut forged = proof.clone();
+        forged.eval_proof.masters[k] += F::ONE;
+
+        let result = verify_result(&air, &instance, &config, &forged);
+
+        assert!(matches!(result, Ok(false)), "master {k}: {result:?}");
+    }
+
+    let mut bumped = proof.clone();
+    bumped.eval_proof.tensor_vec[0] += F::ONE;
+
+    let mut truncated = proof;
+    truncated.eval_proof.tensor_vec.pop();
+
+    for forged in [bumped, truncated] {
+        let result = verify_result(&air, &instance, &config, &forged);
+
+        assert!(matches!(result, Ok(false)), "{result:?}");
+    }
 }
