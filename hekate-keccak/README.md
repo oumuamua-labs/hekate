@@ -3,26 +3,14 @@
 [![Crates.io](https://img.shields.io/crates/v/hekate-keccak.svg)](https://crates.io/crates/hekate-keccak)
 [![Docs.rs](https://docs.rs/hekate-keccak/badge.svg)](https://docs.rs/hekate-keccak)
 [![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](https://github.com/oumuamua-labs/hekate/blob/main/hekate-keccak/LICENSE)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-Keccak-f[1600] AIR chiplet for the [Hekate](https://github.com/oumuamua-labs/hekate) ZK proving system. Includes
-SHA-3-256, SHA-3-512, SHAKE128, and SHAKE256 sponge constructions.
-
-Virtual packing: 1600 state bits stored in 25 physical B64 columns instead of 1600 bit columns. Bits expand JIT in
-registers during evaluation. ~16x memory savings vs. naive bit-column layout.
-
-```
-Scaling (Apple M3 Max, zero-knowledge):
-  2^15 trace rows (1,310 permutations): 191 ms, 166 MiB peak, 851 KiB proof, 12.4 ms verify
-  2^20 trace rows (41,943 permutations): 3.92 s, 2,418 MiB peak, 3,545 KiB proof, 17.5 ms verify
-```
-
-Conditions and the base-protocol column are in the
-[workspace README](https://github.com/oumuamua-labs/hekate#performance).
-
----
+Keccak-f[1600] in zero knowledge for [Hekate](https://oumuamua.dev/hekate), the Rust zero-knowledge proof engine: a
+chiplet that proves each output is the permutation of its input, and SHA3-256, SHA3-512, SHAKE128 and SHAKE256 host
+helpers that return the permutation calls of one hash. The 1600 state bits sit in 25 64-bit columns and expand to bits
+only during evaluation.
 
 ## ⚠️ Security Warning
 
@@ -30,13 +18,11 @@ This crate has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
 
----
+## Usage
 
-## Examples
-
-- [Keccak kernel (CPU AIR with embedded permutation)](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak.rs)
-
-### Usage
+```bash
+cargo add hekate-keccak hekate-core hekate-math hekate-program zeroize
+```
 
 The Keccak-f[1600] calls of one SHA3-256 hash, with the chiplet mounted in the host table:
 
@@ -94,27 +80,24 @@ fn sha3(message: &[u8]) -> errors::Result<(CircuitProgram<F>, Zeroizing<Vec<Kecc
 }
 ```
 
-The host trace holds call `k`'s input lanes on row `25k` and its output lanes on row `25k + 24`, `SELECTOR` set
-on both, and the columns `generate_keccak_trace` builds from the call inputs are appended to the same trace. The
-chiplet proves each output is Keccak-f[1600] of its input. Binding the digest to a message is the host's job: each
-call's input is the previous output with the next block XORed into its rate lanes.
+The host trace holds call `k`'s input lanes on row `25k` and its output lanes on row `25k + 24`, `SELECTOR` set on
+both, and the columns `generate_keccak_trace` builds from the call inputs are appended to the same trace. Binding the
+digest to a message is the host's job: each call's input is the previous output with the next block XORed into its
+rate lanes.
 
-## Benchmarks
+[`keccak.rs`](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak.rs) is a complete program, and
+`cargo bench --bench keccak` runs the Criterion suite at 2^12, 2^15 and 2^20 rows.
 
-Run the Criterion suite natively. Sizes 2^12, 2^15, and 2^20 are baked in. Throughput is reported in MB/s of hashed
-input (SHA-3 rate 136 B/permutation, 25 trace rows per permutation).
+## Documentation
 
-```bash
-# Run the full sweep
-cargo bench --bench keccak
-
-# Run a specific trace size (e.g., 2^15 rows)
-cargo bench --bench keccak -- Prove/15
-```
-
----
+- [Keccak-f[1600]](https://oumuamua.dev/primitives/hashing/keccak): what the proof states, binding a digest to a
+  message, and proving time, proof size and memory
+- [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets#inside-a-chiplet-keccak-f-1600):
+  inside this chiplet, and the ways a host table calls one
+- [API reference](https://docs.rs/hekate-keccak)
 
 ## License
 
-AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+AGPL-3.0-only. See [LICENSE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-keccak/LICENSE) and
+[NOTICE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-keccak/NOTICE).
 Commercial licenses are available from Oumuamua Labs <info@oumuamua.dev>.

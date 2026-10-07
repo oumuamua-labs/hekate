@@ -3,28 +3,14 @@
 [![Crates.io](https://img.shields.io/crates/v/hekate-pqc.svg)](https://crates.io/crates/hekate-pqc)
 [![Docs.rs](https://docs.rs/hekate-pqc/badge.svg)](https://docs.rs/hekate-pqc)
 [![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](https://github.com/oumuamua-labs/hekate/blob/main/hekate-pqc/LICENSE)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-Post-quantum chiplets for the [Hekate](https://github.com/oumuamua-labs/hekate) ZK proving system:
-ML-KEM key generation, encapsulation and decapsulation (FIPS 203) and ML-DSA signature
-verification (FIPS 204), at every parameter set, proven natively over binary tower fields.
-
-```
-Proving on Apple M3 Max (zero-knowledge):
-  ML-KEM-768 sender   : 573 ms, 248 MiB peak, 3,512 KiB proof, 72.6 ms verify
-  ML-KEM-768 receiver : 746 ms, 359 MiB peak, 3,895 KiB proof, 90.3 ms verify
-  ML-DSA-44           : 558 ms, 280 MiB peak, 2,877 KiB proof, 51.6 ms verify
-  ML-DSA-65           : 617 ms, 274 MiB peak, 2,958 KiB proof, 53.8 ms verify
-  ML-DSA-87           : 776 ms, 361 MiB peak, 3,326 KiB proof, 58.5 ms verify
-```
-
-The sender proves Encaps and AES-256-CTR over an 87-byte message; the receiver
-proves KeyGen chained into Decaps. Conditions and the base-protocol column are in the
-[workspace README](https://github.com/oumuamua-labs/hekate#performance).
-
----
+Post-quantum cryptography in zero knowledge for [Hekate](https://oumuamua.dev/hekate), the Rust zero-knowledge proof
+engine: ML-KEM key generation, encapsulation and decapsulation (FIPS 203) and ML-DSA signature verification
+(FIPS 204), at every parameter set, proven natively over binary tower fields. Each scheme is a pipeline of tables that
+your host table calls over one service bus, trading 32-bit words.
 
 ## ⚠️ Security Warning
 
@@ -32,43 +18,14 @@ This crate has not been audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
 
----
+The proof binds at **100 bits** regardless of parameter set, which is below every level here, and the proof is the
+weaker link rather than the lattice scheme. The proven operations still run the full FIPS 203 / 204 parameter sets.
 
-## How a call is proven
+## Usage
 
-Each scheme is a pipeline of tables that a host program attaches. The host trades 32-bit words with the
-ctrl table over one service bus. The tables pass coefficients, words and Keccak lanes to each other over
-internal buses, where every value is emitted once by its producer and once by its consumer. ML-KEM
-Encaps runs through the tables like this:
-
+```bash
+cargo add hekate-pqc hekate-core hekate-math hekate-program
 ```
-FIPS 203 Encaps_internal(ek, m)               table
-────────────────────────────────────────────  ───────────────
-h ← H(ek); (K, r) ← G(m ‖ h)                  ctrl, Keccak
-t̂ ← ByteDecode12(ek); μ ← Decompress1(m)      Codec
-Â ← SampleNTT(ρ); y, e1, e2 ← CBD(r)          Sampler, Keccak
-ŷ ← NTT(y); s ← e2 + μ                        NTT
-û ← Âᵀ∘ŷ; v̂ ← t̂ᵀ∘ŷ                            PolyArith
-u ← NTT⁻¹(û) + e1; v ← NTT⁻¹(v̂) + s           NTT
-c1 ← Compress_du(u); c2 ← Compress_dv(v)      Codec
-```
-
-Decaps decrypts c on the same tables and re-encrypts, and a KemSelect table compares c with c′ and
-returns K′ or the implicit-rejection key K̄. KeyGen samples from G(d ‖ k) and encodes t̂ and ŝ in the
-Codec. ML-DSA verification runs on the ctrl, Sampler, Keccak, Codec and NTT tables plus HighBits.
-
----
-
-## Examples
-
-- [ML-KEM sender](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_sender.rs):
-  Encaps and AES-256-CTR, publishing H(ek), c, the message and its ciphertext
-- [ML-KEM receiver](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_receiver.rs):
-  KeyGen chained into Decaps, publishing H(ek), c and valid
-- [ML-DSA verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs):
-  the public key and signature in the witness, publishing M′ and tr = H(pk)
-
-### Usage
 
 ML-DSA-65 verification of one signature over M′:
 
@@ -207,20 +164,28 @@ fn encaps(ek: &[u8], m: &[u8; 32]) -> errors::Result<(CircuitProgram<F>, MlKemWi
 }
 ```
 
-In both, the host trace fills `word` with `witness.words` and `sel` with ones, `witness.traces` are
-the chiplet traces, and `cx.publish` exposes the rows the statement needs.
+In both, the host trace fills `word` with `witness.words` and `sel` with ones, `witness.traces` are the chiplet
+traces, and `cx.publish` exposes the rows the statement needs.
 
----
+Complete programs:
 
-### Proof soundness vs. PQC security level
+- [ML-DSA verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs): the public key
+  and signature in the witness, publishing M′ and tr = H(pk)
+- [ML-KEM sender](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_sender.rs): Encaps and
+  AES-256-CTR, publishing H(ek), c, the message and its ciphertext
+- [ML-KEM receiver](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_receiver.rs): KeyGen
+  chained into Decaps, publishing H(ek), c and valid
 
-The proof binds at **100 bits** regardless of parameter set, which is below every level here,
-and the proof is the weaker link rather than the lattice scheme. The proven operations still
-run the full FIPS 203 / 204 parameter sets.
+## Documentation
 
----
+- [ML-DSA Verification](https://oumuamua.dev/primitives/signatures/mldsa): what the proof states, how the tables split
+  the work, how it is tested, and proving time, proof size and memory
+- [ML-KEM Sender / Receiver](https://oumuamua.dev/primitives/encryption/mlkem): KeyGen, Encaps and Decaps, the two
+  sides of a key exchange as complete crates, and their figures
+- [API reference](https://docs.rs/hekate-pqc)
 
 ## License
 
-AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+AGPL-3.0-only. See [LICENSE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-pqc/LICENSE) and
+[NOTICE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-pqc/NOTICE).
 Commercial licenses are available from Oumuamua Labs <info@oumuamua.dev>.

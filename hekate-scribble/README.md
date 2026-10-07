@@ -3,187 +3,76 @@
 [![Crates.io](https://img.shields.io/crates/v/hekate-scribble.svg)](https://crates.io/crates/hekate-scribble)
 [![Docs.rs](https://docs.rs/hekate-scribble/badge.svg)](https://docs.rs/hekate-scribble)
 [![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](./LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](https://github.com/oumuamua-labs/hekate/blob/main/hekate-scribble/LICENSE)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-Trace mutation fuzzer for [Hekate](https://github.com/oumuamua-labs/hekate) ZK programs and chiplets.
+A trace mutation fuzzer for [Hekate](https://oumuamua.dev/hekate) programs and chiplets. It tampers with a valid
+trace, runs preflight on each tamper, and panics with the smallest one preflight missed. A tamper that passes is a
+hole in your constraints.
 
-Tampers your valid trace, runs preflight checks,
-panics if the tamper goes undetected. If scribble
-panics, your constraints have a hole.
+Scribble never calls the prover or the verifier, which keeps a run to seconds in a debug build. It tests constraints
+on the concrete trace: transcript binding and the evaluation argument need prove-and-verify tests. Catching every
+tamper shows the constraints you wrote are wired up; a constraint missing where no tamper lands goes unnoticed.
 
-## What it does
+## Usage
 
-- Flips bits, swaps rows, toggles selectors, injects out-of-range values
-- Validates using preflight (row-by-row constraint eval + bus multiset check)
-- Proptest integration, shrinks failures to the smallest mutation that escapes your AIR
-- Runs in debug mode in seconds, not minutes
-
-## What it doesn't do
-
-- **No proofs.** Scribble never calls the prover or verifier. It checks your constraints on the concrete trace, not
-  through the ZK pipeline. This is why it's fast.
-- **No protocol-level testing.** Transcript binding, Fiat-Shamir, evaluation arguments, Brakedown, those need the real
-  prover/verifier e2e tests.
-- **No soundness guarantees.** Passing scribble means every random mutation was caught. It doesn't prove your
-  constraints are complete, only that the ones you wrote are wired up.
-
-## Two layers
-
-**Layer 1: random coverage.** `assert_all_caught` with shallow mutations (BitFlip, FlipSelector, SwapRows,
-OutOfBounds). Finds unconstrained columns, missing booleans, selector isolation gaps. Proptest shrinks any escape
-to a minimal reproduction. Run during chiplet development.
-
-**Layer 2: deterministic emulation.** `check_single_mutation` with hand-crafted structural or compound mutations
-(SwapColumns, CopyColumns, Compound). Replaces the 80-line boilerplate of each e2e exploit test with a 15-line
-call. Same attack logic, 100x faster (preflight vs prove+verify). Run as regression suite.
-
-## Quick start
-
-```rust
-use hekate_scribble::{ScribbleConfig, assert_all_caught};
-
-#[test]
-fn my_chiplet_survives_chaos() {
-    let (air, instance, witness) = setup_my_chiplet();
-    assert_all_caught(&air, &instance, &witness, ScribbleConfig::default());
-}
+```bash
+cargo add --dev hekate-scribble hekate-math hekate-program
 ```
 
-## Target a specific chiplet
-
 ```rust
-use hekate_scribble::{ScribbleConfig, Target, assert_all_caught};
+use hekate_math::Block128;
+use hekate_program::{Program, ProgramInstance, ProgramWitness};
+use hekate_scribble::{
+    Mutation, ScribbleConfig, Target, assert_all_caught_all_targets, check_single_mutation,
+};
 
-#[test]
-fn mlkem_ntt_chiplet_survives_chaos() {
-    let (program, instance, witness) = setup_mlkem_fixture();
+type F = Block128;
 
-    let config = ScribbleConfig::default()
-        .target(Target::Chiplet(1))
-        .cases(512);
+fn fuzz<P: Program<F>>(program: &P, instance: &ProgramInstance<F>, witness: &ProgramWitness<F>) {
+    let config = ScribbleConfig::default().cases(512);
 
-    assert_all_caught(&program, &instance, &witness, config);
+    assert_all_caught_all_targets(program, instance, witness, config);
 }
-```
 
-## Restrict mutation kinds
-
-```rust
-use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught};
-
-#[test]
-fn ram_selector_fuzzing() {
-    let (air, instance, witness) = setup_ram_fixture();
-
-    let config = ScribbleConfig::default()
-        .mutations([MutationKind::FlipSelector, MutationKind::SwapRows])
-        .cases(1024);
-
-    assert_all_caught(&air, &instance, &witness, config);
-}
-```
-
-## Dispatch swap (Layer 2)
-
-Swap a subset of columns between two rows. Selectors and RAM columns stay intact,
-emulates an attacker who rearranges data while preserving dispatch structure.
-
-```rust
-use hekate_scribble::{Mutation, Target, check_single_mutation};
-
-#[test]
-fn ntt_dispatch_swap_caught() {
-    let (air, instance, witness) = setup_ntt_fixture();
-
-    let ntt_data_cols = vec![
-        NTT_A, NTT_B, NTT_A_OUT, NTT_B_OUT,
-        NTT_LAYER, NTT_BFLY, NTT_INSTANCE,
-    ];
-
-    let mutation = Mutation::SwapColumns {
-        target: Target::Chiplet(0),
-        cols: ntt_data_cols,
-        row_a: 5,
-        row_b: 12,
+fn swapped_rows_are_caught<P: Program<F>>(
+    program: &P,
+    instance: &ProgramInstance<F>,
+    witness: &ProgramWitness<F>,
+) -> bool {
+    let swap = Mutation::SwapRows {
+        target: Target::Main,
+        row_a: 0,
+        row_b: 1,
     };
 
-    let result = check_single_mutation(&air, &instance, &witness, &mutation);
-    assert!(result.is_ok(), "dispatch swap must be caught by RAM binding");
+    check_single_mutation(program, instance, witness, &swap).is_ok()
 }
 ```
 
-## Coordinated cross-trace attack
+Call both from tests with a witness your generator built. `fuzz` runs 512 random tampers on the main trace and 512
+on each chiplet trace. `check_single_mutation` runs one tamper you choose and returns `Ok` with the report of the
+checks that caught it, or `Err` with the clean report of a tamper that escaped.
 
-`Compound` applies multiple mutations atomically. Modify chiplet AND main trace
-in sync to bypass per-table checks, the cross-table bus is the only backstop.
+| Tampers                | Kinds                                                                                                                            |
+|:-----------------------|:---------------------------------------------------------------------------------------------------------------------------------|
+| Random                 | `BitFlip`, `OutOfBounds`, `FlipSelector`, `SwapRows`, `DuplicateRow`, `ColumnUniformWrite`, `RowSegmentZero`, `MonotonicReplace` |
+| Hand-made, in addition | `SwapColumns`, `CopyColumns`, and `Compound`: several tampers at once, such as a chiplet trace and the main trace changed together |
 
-```rust
-use hekate_scribble::{Mutation, Target, check_single_mutation};
+`ScribbleConfig` narrows a random run with `target`, `mutations`, `include_cols`, `exclude_cols`, `include_rows` and
+`exclude_rows`.
 
-#[test]
-fn out_of_range_cross_trace_caught() {
-    let (program, instance, witness) = setup_ntt_with_cpu_fixture();
+## Documentation
 
-    let mutation = Mutation::Compound(vec![
-        Mutation::OutOfBounds {
-            target: Target::Chiplet(0),
-            col: BUS_B_OUT_PHY,
-            row: 0,
-            value: Q as u128,
-        },
-        Mutation::OutOfBounds {
-            target: Target::Main,
-            col: CPU_B_OUT,
-            row: 0,
-            value: Q as u128,
-        },
-    ]);
-
-    let result = check_single_mutation(&program, &instance, &witness, &mutation);
-    assert!(result.is_ok(), "out-of-range b_out must be caught");
-}
-```
-
-## Reading the preflight report
-
-When preflight catches a mutation, the report names the failing invariant, table, and row:
-
-```
-  PREFLIGHT: 1 constraint violations, 0 boundary violations, 0 bus issues
-
-    [Chiplet 0] Constraint 32 "bits_01_equal" failed at row 0
-```
-
-Boundary violations show the concrete mismatch:
-
-```
-  PREFLIGHT: 0 constraint violations, 2 boundary violations, 0 bus issues
-
-    Boundary #0: col=0 row=0 actual=Flat(Block128(0)) expected=Flat(Block128(22067681354706156661646625971774519825))
-    Boundary #1: col=1 row=0 actual=Flat(Block128(1)) expected=Flat(Block128(265498766201044366875656389800751278795))
-```
-
-Bus diagnostics list every endpoint with its row count, active rows,
-and multiset product, so you can see which side of the bus diverged:
-
-```
-  PREFLIGHT: 0 constraint violations, 0 boundary violations, 1 bus issues
-
-    Bus "test_bus" (2 endpoints):
-      Main: 8 rows, 4 active, product=Flat(Block128(16200159481073039905153729824056248498))
-      Chiplet 0: 8 rows, 4 active, product=Flat(Block128(179105452667142969769264969604701840821))
-```
-
-If a mutation escapes (report is clean), scribble panics with the proptest-shrunk `Mutation`. That tamper
-is the soundness gap, add a constraint that catches it.
-
-## Requirements
-
-Depends on `hekate-math`, `hekate-sdk`, `hekate-core`, `hekate-program`.
+- [Preflight: keep it in your tests](https://oumuamua.dev/hekate/docs/basics/preflight#keep-it-in-your-tests): tests
+  that break one cell on purpose and assert the check that catches it
+- [Preflight](https://oumuamua.dev/hekate/docs/basics/preflight): what each check covers, and what a clean report does
+  not prove
+- [API reference](https://docs.rs/hekate-scribble)
 
 ## License
 
-AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+AGPL-3.0-only. See [LICENSE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-scribble/LICENSE) and
+[NOTICE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-scribble/NOTICE).
 Commercial licenses are available from Oumuamua Labs <info@oumuamua.dev>.
