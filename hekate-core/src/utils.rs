@@ -24,37 +24,27 @@ impl Instant {
     }
 }
 
-/// Splitting variable `c` minimising proof bytes,
-/// the tensor vector against opened rows at `rs_field`
-/// widths. `table_geom`'s commit width is not priced.
-#[inline(always)]
-pub fn compute_split_vars(
-    num_vars: usize,
+/// The split in `lo..=hi` that `admissible` accepts with
+/// the fewest tensor-vector, opened-row and claim bytes;
+/// ties to the narrower, `None` when none qualifies.
+pub fn cheapest_split_vars(
+    lo: usize,
+    hi: usize,
     num_queries: usize,
-    support_size: usize,
-    row_bytes: usize,
-) -> usize {
-    if num_vars == 0 {
-        return 0;
-    }
-
+    row_bytes: impl Fn(usize) -> usize,
+    claim_bytes: impl Fn(usize) -> usize,
+    admissible: impl Fn(usize) -> bool,
+) -> Option<usize> {
     let vector_cost = Q_VECTOR_ELEM_BYTES as u128;
-    let opened_cost = ((num_queries * row_bytes).max(1)) as u128;
+    let cost = |c: usize| {
+        vector_cost * (1u128 << c)
+            + (num_queries * row_bytes(c)).max(1) as u128
+            + claim_bytes(c) as u128
+    };
 
-    let factor = (opened_cost / vector_cost).max(1);
-    let floor_c = ((num_vars + factor.ilog2() as usize) / 2).min(num_vars);
-
-    let cost = |c: usize| vector_cost * (1u128 << c) + opened_cost * (1u128 << (num_vars - c));
-
-    // floor_c never overshoots the argmin
-    let mut optimal_c = floor_c;
-    while optimal_c < num_vars && cost(optimal_c + 1) < cost(optimal_c) {
-        optimal_c += 1;
-    }
-
-    optimal_c
-        .max(support_floor_vars(support_size))
-        .clamp(1, num_vars)
+    (lo..=hi)
+        .filter(|&c| admissible(c))
+        .min_by_key(|&c| cost(c))
 }
 
 /// Fewest split variables whose grid holds the support block.
@@ -112,35 +102,73 @@ mod tests {
     }
 
     #[test]
-    fn split_vars_hits_the_discrete_argmin() {
+    fn packed_split_agrees_with_clamp_at_num_vars() {
         for (num_vars, q, s, rb) in cases() {
+            let at_clamp = (q * rb).max(1) as u128 + Q_VECTOR_ELEM_BYTES as u128 * (1 << num_vars);
+            let unpacked = scan_argmin(num_vars, q, s, rb);
+
+            if unpacked == num_vars {
+                let halved = cheapest_split_vars(
+                    num_vars,
+                    num_vars + 1,
+                    q,
+                    |c| match c > num_vars {
+                        true => rb.div_ceil(2),
+                        false => rb,
+                    },
+                    |_| 0,
+                    |_| true,
+                )
+                .unwrap();
+
+                let cost_up = (q * rb.div_ceil(2)).max(1) as u128
+                    + Q_VECTOR_ELEM_BYTES as u128 * (2 << num_vars);
+
+                assert_eq!(
+                    halved > num_vars,
+                    cost_up < at_clamp,
+                    "n={num_vars} q={q} rb={rb}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cheapest_split_reproduces_unpacked_objective() {
+        for (num_vars, q, s, rb) in cases() {
+            let floor = support_floor_vars(s).min(num_vars);
+
+            let cheapest = cheapest_split_vars(
+                1,
+                num_vars,
+                q,
+                |c| rb << (num_vars - c),
+                |_| 0,
+                |c| c >= floor,
+            );
+
             assert_eq!(
-                compute_split_vars(num_vars, q, s, rb),
-                scan_argmin(num_vars, q, s, rb),
+                cheapest,
+                Some(scan_argmin(num_vars, q, s, rb)),
                 "n={num_vars} q={q} s={s} rb={rb}"
             );
         }
     }
 
     #[test]
-    fn split_vars_respects_the_support_floor() {
-        for (num_vars, q, s, rb) in cases() {
-            let c = compute_split_vars(num_vars, q, s, rb);
-            let floor = if s > 1 {
-                (s - 1).ilog2() as usize + 1
-            } else {
-                1
-            };
-
-            assert!(
-                c >= floor.min(num_vars),
-                "n={num_vars} q={q} s={s} rb={rb} gave c={c}"
-            );
-        }
+    fn cheapest_split_is_none_when_nothing_qualifies() {
+        assert_eq!(
+            cheapest_split_vars(1, 12, 287, |_| 64, |_| 0, |_| false),
+            None
+        );
     }
 
     #[test]
-    fn split_vars_collapses_for_a_single_row() {
-        assert_eq!(compute_split_vars(0, 176, 128, 244), 0);
+    fn claim_bytes_move_split_down() {
+        let row_bytes = |c: usize| 4096usize >> c.min(12);
+        let free = cheapest_split_vars(1, 12, 4, row_bytes, |_| 0, |_| true).unwrap();
+        let charged = cheapest_split_vars(1, 12, 4, row_bytes, |c| 1 << (c + 8), |_| true).unwrap();
+
+        assert!(charged < free, "{charged} against {free}");
     }
 }
