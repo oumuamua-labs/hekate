@@ -1,11 +1,12 @@
 [package]
 name = "hekate-sha2"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 authors.workspace = true
-repository = "https://github.com/oumuamua-labs/hekate/tree/main/hekate-sha2"
+repository.workspace = true
 description = "SHA-256 compression AIR chiplet for the Hekate ZK proving system."
 keywords = ["zk", "cryptography", "sha256", "air", "no-std"]
 categories = ["cryptography", "no-std"]
