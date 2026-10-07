@@ -999,7 +999,7 @@ mod tests {
                 boundary: &[],
             };
 
-            match TableShape::from_air(&TestFibProgram, 4, &statics) {
+            match TableShape::from_air(&TestFibProgram, &statics) {
                 Err(Error::Protocol { message, .. }) => assert_eq!(message, expected, "{case}"),
                 other => panic!("{case}: {other:?}"),
             }

@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use hekate_core::config::Config;
 use hekate_core::errors;
-use hekate_core::proofs::{BrakedownCommitment, BrakedownProof};
+use hekate_core::proofs::BrakedownProof;
 use hekate_crypto::Hasher;
-use hekate_crypto::merkle::MerkleTree;
+use hekate_crypto::merkle::{MerkleTree, hash_parts_leaf};
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{Block8, HardwareField, PackableField};
 use tracing::instrument;
@@ -40,7 +40,7 @@ where
     F: HardwareField + PackableField + From<Block8> + From<u128>,
 {
     /// Draws `num_queries` columns of the codeword domain;
-    /// every tree of the table opens at this one set.
+    /// every tree of the pool opens at this one set.
     #[instrument(skip_all, level = "trace", name = "Brakedown::draw_queries")]
     pub fn draw_queries(
         transcript: &mut Transcript<H>,
@@ -94,9 +94,10 @@ where
     /// replays the octopus multiproof against the root.
     #[instrument(skip_all, level = "trace", name = "Brakedown::verify_opening")]
     pub fn verify_opening<'a>(
-        commitment: &BrakedownCommitment,
+        root: &[u8; 32],
         proof: &'a BrakedownProof<F>,
         queries: &QuerySet,
+        parts: &[usize],
     ) -> errors::Result<OpenedRows<'a>> {
         let distinct = &queries.distinct;
 
@@ -104,6 +105,15 @@ where
             return Err(errors::Error::Protocol {
                 protocol: "brakedown",
                 message: "opened column count does not match distinct query count",
+            });
+        }
+
+        let column_bytes: usize = parts.iter().sum();
+
+        if proof.opened_columns.iter().any(|c| c.len() != column_bytes) {
+            return Err(errors::Error::Protocol {
+                protocol: "brakedown",
+                message: "opened column length does not match the tables' parts",
             });
         }
 
@@ -117,24 +127,21 @@ where
                 distinct
                     .par_iter()
                     .zip(proof.opened_columns.par_iter())
-                    .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
+                    .map_init(Vec::new, |digests, (&col_idx, col)| {
+                        (col_idx, column_leaf::<H>(col, parts, digests))
+                    })
                     .collect()
             } else {
-                hash_leaves::<H>(distinct, &proof.opened_columns)
+                hash_leaves::<H>(distinct, &proof.opened_columns, parts)
             }
         };
 
         #[cfg(not(feature = "parallel"))]
-        let leaves = hash_leaves::<H>(distinct, &proof.opened_columns);
+        let leaves = hash_leaves::<H>(distinct, &proof.opened_columns, parts);
 
         let padded_leaves = queries.encoded_width.next_power_of_two();
 
-        if !MerkleTree::<F, H>::verify_batch(
-            &commitment.root,
-            padded_leaves,
-            &leaves,
-            &proof.batch_path,
-        ) {
+        if !MerkleTree::<F, H>::verify_batch(root, padded_leaves, &leaves, &proof.batch_path) {
             return Err(errors::Error::Protocol {
                 protocol: "brakedown",
                 message: "batch merkle proof verification failed",
@@ -154,12 +161,33 @@ fn hash_leaf<H: Hasher>(code: &[u8]) -> [u8; 32] {
 }
 
 /// `(column, leaf)` per opened column, on this thread.
-fn hash_leaves<H: Hasher>(distinct: &[usize], columns: &[Vec<u8>]) -> Vec<(usize, [u8; 32])> {
+fn hash_leaves<H: Hasher>(
+    distinct: &[usize],
+    columns: &[Vec<u8>],
+    parts: &[usize],
+) -> Vec<(usize, [u8; 32])> {
+    let mut digests = Vec::with_capacity(parts.len());
+
     distinct
         .iter()
         .zip(columns)
-        .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
+        .map(|(&col_idx, col)| (col_idx, column_leaf::<H>(col, parts, &mut digests)))
         .collect()
+}
+
+fn column_leaf<H: Hasher>(column: &[u8], parts: &[usize], digests: &mut Vec<[u8; 32]>) -> [u8; 32] {
+    digests.clear();
+
+    let mut rest = column;
+    for &len in parts {
+        let (part, tail) = rest.split_at(len);
+
+        digests.push(hash_leaf::<H>(part));
+
+        rest = tail;
+    }
+
+    hash_parts_leaf::<H>(digests.iter())
 }
 
 #[cfg(test)]
@@ -167,10 +195,61 @@ mod tests {
     use super::*;
     use alloc::vec;
     use hekate_crypto::DefaultHasher;
+    use hekate_crypto::merkle::hash_column_leaves;
     use hekate_math::{Block128, CanonicalSerialize};
 
     type F = Block128;
     type H = DefaultHasher;
+
+    fn two_part_opening(
+        config: &Config,
+        split_vars: usize,
+    ) -> ([u8; 32], BrakedownProof<F>, QuerySet) {
+        let encoded_width = config.encoded_width(1 << split_vars);
+
+        let code = |seed: u8| -> Vec<u8> {
+            (0..encoded_width * 16)
+                .map(|i| (i as u8).wrapping_mul(31) ^ seed)
+                .collect()
+        };
+
+        let (a, b0, b1) = (code(1), code(2), code(3));
+
+        let mut digests_a = vec![[0u8; 32]; encoded_width];
+        let mut digests_b = vec![[0u8; 32]; encoded_width];
+
+        hash_column_leaves::<H>(1, encoded_width, &[(a.as_slice(), 16)], &mut digests_a);
+        hash_column_leaves::<H>(
+            1,
+            encoded_width,
+            &[(b0.as_slice(), 16), (b1.as_slice(), 16)],
+            &mut digests_b,
+        );
+
+        let leaves: Vec<[u8; 32]> = digests_a
+            .iter()
+            .zip(&digests_b)
+            .map(|(da, db)| hash_parts_leaf::<H>([da, db]))
+            .collect();
+
+        let tree = MerkleTree::<F, H>::new(&leaves);
+
+        let mut transcript = Transcript::<H>::new(b"two_parts");
+        let queries =
+            BrakedownVerifier::<F, H>::draw_queries(&mut transcript, config, split_vars).unwrap();
+
+        let cell = |code: &[u8], j: usize| code[j * 16..(j + 1) * 16].to_vec();
+
+        let opened = queries
+            .distinct
+            .iter()
+            .map(|&j| [cell(&a, j), cell(&b0, j), cell(&b1, j)].concat())
+            .collect();
+
+        let proof = BrakedownProof::new(opened, tree.prove_batch(&queries.distinct).unwrap());
+
+        (tree.root(), proof, queries)
+    }
 
     #[test]
     fn brakedown_verify_valid_proof() {
@@ -180,25 +259,16 @@ mod tests {
             ..Config::default()
         };
 
-        let num_rows = 16;
-        let num_vars = 4; // 2^4 = 16
-        let num_cols = 1;
+        let split_vars = 4; // 2^4 = 16
         let field_size = 16; // Block128 size
 
-        let split_vars = hekate_core::utils::compute_split_vars(
-            num_vars,
-            config.num_queries,
-            config.ldt_support_size,
-            128,
-        );
-
         let grid_cols = 1 << split_vars;
-        let grid_rows = 1 << (num_vars - split_vars);
+        let grid_rows = 1;
         let encoded_width = config.encoded_width(grid_cols);
 
         // 1. Setup Mock Data (Leaves)
         // Verification expects:
-        // Leaf = Hash(0 || code_bytes)
+        // Leaf = Hash(2 || Hash(0 || code_bytes))
         let mut leaves = vec![[0u8; 32]; encoded_width];
         for (i, leaf) in leaves.iter_mut().enumerate() {
             let mut code_bytes = vec![0u8; field_size * grid_rows];
@@ -214,16 +284,11 @@ mod tests {
             h.update(&[0u8]); // Domain separator
             h.update(&code_bytes);
 
-            *leaf = h.finalize();
+            *leaf = hash_parts_leaf::<H>([&h.finalize()]);
         }
 
         let tree = MerkleTree::<F, H>::new(&leaves);
         let root = tree.root();
-        let commitment = BrakedownCommitment {
-            root,
-            num_rows,
-            num_cols,
-        };
 
         // 2. Simulate Transcript
         let num_queries = config.num_queries;
@@ -273,7 +338,12 @@ mod tests {
         let queries =
             BrakedownVerifier::<F, H>::draw_queries(&mut verifier_transcript, &config, split_vars)
                 .unwrap();
-        let result = BrakedownVerifier::<F, H>::verify_opening(&commitment, &proof, &queries);
+        let result = BrakedownVerifier::<F, H>::verify_opening(
+            &root,
+            &proof,
+            &queries,
+            &[field_size * grid_rows],
+        );
 
         assert!(result.is_ok(), "Valid Brakedown proof should verify");
         assert_eq!(result.unwrap().len(), distinct.len());
@@ -286,27 +356,14 @@ mod tests {
             num_queries: 2,
             ..Config::default()
         };
-        let num_rows = 16;
-        let num_vars = 4;
 
-        let split_vars = hekate_core::utils::compute_split_vars(
-            num_vars,
-            config.num_queries,
-            config.ldt_support_size,
-            128,
-        );
+        let split_vars = 4;
         let grid_cols = 1 << split_vars;
         let encoded_width = config.encoded_width(grid_cols);
 
         // Minimal fake tree mapped to encoded_width
         let leaves = vec![[0u8; 32]; encoded_width];
         let tree = MerkleTree::<F, H>::new(&leaves);
-
-        let commitment = BrakedownCommitment {
-            root: tree.root(),
-            num_rows,
-            num_cols: 1,
-        };
 
         // Replay the query draws to learn the distinct
         // count, then submit garbage columns with an
@@ -336,8 +393,54 @@ mod tests {
         let mut transcript = Transcript::<H>::new(b"test");
         let queries =
             BrakedownVerifier::<F, H>::draw_queries(&mut transcript, &config, split_vars).unwrap();
-        let result = BrakedownVerifier::<F, H>::verify_opening(&commitment, &proof, &queries);
+        let result =
+            BrakedownVerifier::<F, H>::verify_opening(&tree.root(), &proof, &queries, &[3]);
 
         assert!(result.is_err(), "Tampered/Invalid proof should fail");
+    }
+
+    #[test]
+    fn two_part_columns_verify_at_layout_boundaries() {
+        let config = Config {
+            num_queries: 4,
+            ldt_support_size: 2,
+            ..Config::default()
+        };
+
+        let (root, proof, queries) = two_part_opening(&config, 4);
+
+        assert!(
+            BrakedownVerifier::<F, H>::verify_opening(&root, &proof, &queries, &[16, 32]).is_ok()
+        );
+        assert!(
+            BrakedownVerifier::<F, H>::verify_opening(&root, &proof, &queries, &[32, 16]).is_err()
+        );
+    }
+
+    #[test]
+    fn misframed_part_column_rejected() {
+        let config = Config {
+            num_queries: 4,
+            ldt_support_size: 2,
+            ..Config::default()
+        };
+
+        let (root, proof, queries) = two_part_opening(&config, 4);
+
+        let mut short = proof.clone();
+        short.opened_columns[0].pop();
+
+        let mut long = proof;
+        long.opened_columns[0].push(0);
+
+        for tampered in [short, long] {
+            assert!(matches!(
+                BrakedownVerifier::<F, H>::verify_opening(&root, &tampered, &queries, &[16, 32]),
+                Err(errors::Error::Protocol {
+                    message: "opened column length does not match the tables' parts",
+                    ..
+                })
+            ));
+        }
     }
 }

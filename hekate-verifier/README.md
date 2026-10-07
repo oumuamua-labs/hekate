@@ -76,29 +76,28 @@ stage         the verifier
 ────────────  ──────────────────────────────────────────────────────────────────
 shape         trace heights, counts, the security floor of the configuration
 identity      prepared program id against the pinned id
-bind          absorb program id, configuration, sizes, public inputs, trace root,
-              boundary pins and every chiplet header; in ZK mode the pad root
-buses         draw γ and β, and one r_bus per lookup bus
-each table    absorb the bus helper root and the claimed bus sums, draw α
+bind          absorb program id, configuration, sizes, public inputs, boundary
+              pins, every chiplet header, the trace root; in ZK mode the pad root
+buses         draw γ and β, one r_bus per lookup bus; absorb the bus helper root
+each table    absorb the claimed bus sums, draw α
 (chiplets,    replay the ZeroCheck rounds, degree-checked, down to r_final
 then main)    check constraints, boundary pins, fixed columns and bus terms
               at r_final; in ZK mode record them for the outer argument
-              absorb the claimed column values, draw η, replay the
-              evaluation sumcheck
-              draw query columns, check the Merkle openings and the
-              proximity of the opened columns to the code
+              absorb the claimed column values
+pool          draw η, replay one evaluation sumcheck over every table; draw
+              query columns, check the openings and their proximity to the code
 close         base mode: the claimed bus sums cancel for every bus id
               ZK mode: the outer argument over the masked scalars
 ```
 
 ZeroCheck turns "every constraint vanishes on every row" into one claim at a random point
 `r_final`. The evaluation argument ties the column values claimed at `r_final` to the committed
-trace: each table is committed under a Reed-Solomon row code and a Merkle tree, and the verifier
-opens the queried columns and checks them against the claims. The LogUp helper column `h` of a table
-with buses gets the same commitment and opening, which binds the bus sums to the trace.
+trace: every table is committed under one Reed-Solomon row code and one Merkle tree, and the verifier
+opens the queried columns and checks them against the claims. The LogUp helper columns `h` share a
+second tree opened at the same columns, which binds the bus sums to the trace.
 
-With `zero_knowledge` on, the default, every scalar the proof exposes is one-time padded: round
-evaluations, claimed bus sums and column claims. The replay runs on the masked values, and each
+With `zero_knowledge` on, the default, round evaluations, claimed bus sums and column claims are
+one-time padded. The replay runs on the masked values, and each
 check that base mode runs in the clear becomes a row of an outer statement over them, proven at the
 end by a zk-Ligero argument.
 
@@ -107,9 +106,7 @@ end by a zk-Ligero argument.
 ## Usage
 
 Proof bytes decode with `hekate_sdk::deserialize_proof`. The transcript label and the `Config` must be
-the ones the prover used. An end-to-end example that proves with `hekate-prover-sys` and verifies with
-this crate is the [Quick Example](https://github.com/oumuamua-labs/hekate#quick-example) of the
-workspace README.
+the ones the prover used.
 
 | Entry point       | For                                  | Each call                                    |
 |:------------------|:-------------------------------------|:---------------------------------------------|

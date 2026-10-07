@@ -13,7 +13,7 @@ use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::TowerField;
 
-/// Absorbs a chiplet header (name, dims, Merkle root).
+/// Absorbs a chiplet header (name, dims).
 /// Prover and verifier must call this with identical
 /// arguments in identical order or chiplet-phase
 /// Fiat-Shamir challenges diverge.
@@ -23,13 +23,11 @@ pub fn absorb_chiplet_header<H: Hasher>(
     num_rows: usize,
     num_cols: usize,
     row_bytes: usize,
-    root: &[u8; 32],
 ) {
     transcript.append_message(b"chiplet_name", name.as_bytes());
     transcript.append_u64(b"chiplet_num_rows", num_rows as u64);
     transcript.append_u64(b"chiplet_num_cols", num_cols as u64);
     transcript.append_u64(b"chiplet_row_bytes", row_bytes as u64);
-    transcript.append_message(b"chiplet_root", root);
 }
 
 /// Binds LogUp `claimed_sums` into the

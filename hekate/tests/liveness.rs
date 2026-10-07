@@ -11,7 +11,8 @@ use hekate_keccak::KeccakChiplet;
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::outer::TableShape;
+use hekate_program::expander::{PoolLayout, RingSwitchPlan};
+use hekate_program::outer::{OuterStatement, TableShape, table_plan};
 use hekate_program::{Air, FixedColumn};
 use hekate_sha2::Sha256Chiplet;
 
@@ -116,39 +117,54 @@ fn every_bus_selector_is_fixed_or_absent() {
 #[test]
 fn shipped_tables_fit_outer_statement() {
     let config = Config::prod();
-    let blind_units = config.blind_units();
     let num_vars = NUM_ROWS.trailing_zeros() as usize;
+    let field_bits = size_of::<F>() * 8;
 
-    let mut per_table = Vec::new();
-    let mut mul_wires = 0;
-    let mut masked_scalars = 0;
+    let mut labels = Vec::new();
+    let mut defs = Vec::new();
 
     for (label, snapshot) in shipped_tables() {
-        let defs = match snapshot {
-            Ok(defs) => defs,
+        match snapshot {
+            Ok(snapshot) => {
+                labels.extend(snapshot.iter().map(|_| label));
+                defs.extend(snapshot);
+            }
             Err(e) => panic!("{label}: snapshot rejected: {e}"),
-        };
-
-        let mut table_wires = 0;
-        for def in &defs {
-            let shape = TableShape::from_air(def, num_vars, &def.statics()).unwrap();
-
-            table_wires += shape.mul_wires();
-            masked_scalars += shape.masked_scalars(blind_units);
         }
-
-        mul_wires += table_wires;
-
-        per_table.push(format!("{label}: {table_wires}"));
     }
 
-    let field_bits = size_of::<F>() * 8;
+    let plans: Vec<RingSwitchPlan> = defs
+        .iter()
+        .map(|def| table_plan(def, def.permutation_checks.len(), &config).unwrap())
+        .collect();
+
+    let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
+    let pool = PoolLayout::new(&heights, field_bits, &config);
+
+    let shapes: Vec<TableShape> = defs
+        .iter()
+        .zip(&pool.tables)
+        .map(|(def, layout)| {
+            TableShape::from_air(def, &def.statics())
+                .unwrap()
+                .at(layout)
+        })
+        .collect();
+
+    let statement = OuterStatement::new(&shapes, pool.num_vars());
+
+    let per_table: Vec<String> = labels
+        .iter()
+        .zip(&shapes)
+        .map(|(label, shape)| format!("{label}: {}", shape.mul_wires()))
+        .collect();
 
     assert!(
         config
-            .outer_geom(masked_scalars, mul_wires, field_bits)
+            .outer_geom(statement.masked_scalars, statement.mul_wires, field_bits)
             .is_ok(),
-        "{mul_wires} mul wires exceed the outer statement:\n{}",
+        "{} mul wires exceed the outer statement:\n{}",
+        statement.mul_wires,
         per_table.join("\n"),
     );
 }

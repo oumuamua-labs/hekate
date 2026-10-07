@@ -141,173 +141,6 @@ pub mod hekate {
             }
         }
 
-        pub enum BrakedownCommitmentOffset {}
-        #[derive(Copy, Clone, PartialEq)]
-
-        pub struct BrakedownCommitment<'a> {
-            pub _tab: ::flatbuffers::Table<'a>,
-        }
-
-        impl<'a> ::flatbuffers::Follow<'a> for BrakedownCommitment<'a> {
-            type Inner = BrakedownCommitment<'a>;
-            #[inline]
-            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                Self {
-                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
-                }
-            }
-        }
-
-        impl<'a> BrakedownCommitment<'a> {
-            pub const VT_ROOT: ::flatbuffers::VOffsetT = 4;
-            pub const VT_NUM_ROWS: ::flatbuffers::VOffsetT = 6;
-            pub const VT_NUM_COLS: ::flatbuffers::VOffsetT = 8;
-
-            #[inline]
-            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                BrakedownCommitment { _tab: table }
-            }
-            #[allow(unused_mut)]
-            pub fn create<
-                'bldr: 'args,
-                'args: 'mut_bldr,
-                'mut_bldr,
-                A: ::flatbuffers::Allocator + 'bldr,
-            >(
-                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args BrakedownCommitmentArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<BrakedownCommitment<'bldr>> {
-                let mut builder = BrakedownCommitmentBuilder::new(_fbb);
-                builder.add_num_cols(args.num_cols);
-                builder.add_num_rows(args.num_rows);
-                if let Some(x) = args.root {
-                    builder.add_root(x);
-                }
-                builder.finish()
-            }
-
-            #[inline]
-            pub fn root(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
-                            BrakedownCommitment::VT_ROOT,
-                            None,
-                        )
-                }
-            }
-            #[inline]
-            pub fn num_rows(&self) -> u64 {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<u64>(BrakedownCommitment::VT_NUM_ROWS, Some(0))
-                        .unwrap()
-                }
-            }
-            #[inline]
-            pub fn num_cols(&self) -> u64 {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<u64>(BrakedownCommitment::VT_NUM_COLS, Some(0))
-                        .unwrap()
-                }
-            }
-        }
-
-        impl ::flatbuffers::Verifiable for BrakedownCommitment<'_> {
-            #[inline]
-            fn run_verifier(
-                v: &mut ::flatbuffers::Verifier,
-                pos: usize,
-            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
-                v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
-                        "root",
-                        Self::VT_ROOT,
-                        false,
-                    )?
-                    .visit_field::<u64>("num_rows", Self::VT_NUM_ROWS, false)?
-                    .visit_field::<u64>("num_cols", Self::VT_NUM_COLS, false)?
-                    .finish();
-                Ok(())
-            }
-        }
-        pub struct BrakedownCommitmentArgs<'a> {
-            pub root: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
-            pub num_rows: u64,
-            pub num_cols: u64,
-        }
-        impl<'a> Default for BrakedownCommitmentArgs<'a> {
-            #[inline]
-            fn default() -> Self {
-                BrakedownCommitmentArgs {
-                    root: None,
-                    num_rows: 0,
-                    num_cols: 0,
-                }
-            }
-        }
-
-        pub struct BrakedownCommitmentBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
-            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
-        }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BrakedownCommitmentBuilder<'a, 'b, A> {
-            #[inline]
-            pub fn add_root(
-                &mut self,
-                root: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
-            ) {
-                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    BrakedownCommitment::VT_ROOT,
-                    root,
-                );
-            }
-            #[inline]
-            pub fn add_num_rows(&mut self, num_rows: u64) {
-                self.fbb_
-                    .push_slot::<u64>(BrakedownCommitment::VT_NUM_ROWS, num_rows, 0);
-            }
-            #[inline]
-            pub fn add_num_cols(&mut self, num_cols: u64) {
-                self.fbb_
-                    .push_slot::<u64>(BrakedownCommitment::VT_NUM_COLS, num_cols, 0);
-            }
-            #[inline]
-            pub fn new(
-                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> BrakedownCommitmentBuilder<'a, 'b, A> {
-                let start = _fbb.start_table();
-                BrakedownCommitmentBuilder {
-                    fbb_: _fbb,
-                    start_: start,
-                }
-            }
-            #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<BrakedownCommitment<'a>> {
-                let o = self.fbb_.end_table(self.start_);
-                ::flatbuffers::WIPOffset::new(o.value())
-            }
-        }
-
-        impl ::core::fmt::Debug for BrakedownCommitment<'_> {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("BrakedownCommitment");
-                ds.field("root", &self.root());
-                ds.field("num_rows", &self.num_rows());
-                ds.field("num_cols", &self.num_cols());
-                ds.finish()
-            }
-        }
         pub enum UnivariatePolyOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -740,134 +573,6 @@ pub mod hekate {
                 ds.finish()
             }
         }
-        pub enum MasterEvalsOffset {}
-        #[derive(Copy, Clone, PartialEq)]
-
-        pub struct MasterEvals<'a> {
-            pub _tab: ::flatbuffers::Table<'a>,
-        }
-
-        impl<'a> ::flatbuffers::Follow<'a> for MasterEvals<'a> {
-            type Inner = MasterEvals<'a>;
-            #[inline]
-            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                Self {
-                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
-                }
-            }
-        }
-
-        impl<'a> MasterEvals<'a> {
-            pub const VT_WHOLE: ::flatbuffers::VOffsetT = 4;
-            pub const VT_RING: ::flatbuffers::VOffsetT = 6;
-
-            #[inline]
-            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                MasterEvals { _tab: table }
-            }
-            #[allow(unused_mut)]
-            pub fn create<
-                'bldr: 'args,
-                'args: 'mut_bldr,
-                'mut_bldr,
-                A: ::flatbuffers::Allocator + 'bldr,
-            >(
-                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args MasterEvalsArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<MasterEvals<'bldr>> {
-                let mut builder = MasterEvalsBuilder::new(_fbb);
-                if let Some(x) = args.ring {
-                    builder.add_ring(x);
-                }
-                if let Some(x) = args.whole {
-                    builder.add_whole(x);
-                }
-                builder.finish()
-            }
-
-            #[inline]
-            pub fn whole(&self) -> Option<&'a Block128> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe { self._tab.get::<Block128>(MasterEvals::VT_WHOLE, None) }
-            }
-            #[inline]
-            pub fn ring(&self) -> Option<&'a Block128> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe { self._tab.get::<Block128>(MasterEvals::VT_RING, None) }
-            }
-        }
-
-        impl ::flatbuffers::Verifiable for MasterEvals<'_> {
-            #[inline]
-            fn run_verifier(
-                v: &mut ::flatbuffers::Verifier,
-                pos: usize,
-            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
-                v.visit_table(pos)?
-                    .visit_field::<Block128>("whole", Self::VT_WHOLE, false)?
-                    .visit_field::<Block128>("ring", Self::VT_RING, false)?
-                    .finish();
-                Ok(())
-            }
-        }
-        pub struct MasterEvalsArgs<'a> {
-            pub whole: Option<&'a Block128>,
-            pub ring: Option<&'a Block128>,
-        }
-        impl<'a> Default for MasterEvalsArgs<'a> {
-            #[inline]
-            fn default() -> Self {
-                MasterEvalsArgs {
-                    whole: None,
-                    ring: None,
-                }
-            }
-        }
-
-        pub struct MasterEvalsBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
-            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
-        }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MasterEvalsBuilder<'a, 'b, A> {
-            #[inline]
-            pub fn add_whole(&mut self, whole: &Block128) {
-                self.fbb_
-                    .push_slot_always::<&Block128>(MasterEvals::VT_WHOLE, whole);
-            }
-            #[inline]
-            pub fn add_ring(&mut self, ring: &Block128) {
-                self.fbb_
-                    .push_slot_always::<&Block128>(MasterEvals::VT_RING, ring);
-            }
-            #[inline]
-            pub fn new(
-                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> MasterEvalsBuilder<'a, 'b, A> {
-                let start = _fbb.start_table();
-                MasterEvalsBuilder {
-                    fbb_: _fbb,
-                    start_: start,
-                }
-            }
-            #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<MasterEvals<'a>> {
-                let o = self.fbb_.end_table(self.start_);
-                ::flatbuffers::WIPOffset::new(o.value())
-            }
-        }
-
-        impl ::core::fmt::Debug for MasterEvals<'_> {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("MasterEvals");
-                ds.field("whole", &self.whole());
-                ds.field("ring", &self.ring());
-                ds.finish()
-            }
-        }
         pub enum PointEvaluationOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -1039,10 +744,9 @@ pub mod hekate {
         impl<'a> EvalBatchProof<'a> {
             pub const VT_SUMCHECK_PROOF: ::flatbuffers::VOffsetT = 4;
             pub const VT_LDT_PROOF: ::flatbuffers::VOffsetT = 6;
-            pub const VT_POINT_EVALUATION: ::flatbuffers::VOffsetT = 8;
-            pub const VT_TENSOR_VEC: ::flatbuffers::VOffsetT = 10;
-            pub const VT_MASTER_EVALS: ::flatbuffers::VOffsetT = 12;
-            pub const VT_H_LDT_PROOF: ::flatbuffers::VOffsetT = 14;
+            pub const VT_TENSOR_VEC: ::flatbuffers::VOffsetT = 8;
+            pub const VT_MASTERS: ::flatbuffers::VOffsetT = 10;
+            pub const VT_H_LDT_PROOF: ::flatbuffers::VOffsetT = 12;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1062,14 +766,11 @@ pub mod hekate {
                 if let Some(x) = args.h_ldt_proof {
                     builder.add_h_ldt_proof(x);
                 }
-                if let Some(x) = args.master_evals {
-                    builder.add_master_evals(x);
+                if let Some(x) = args.masters {
+                    builder.add_masters(x);
                 }
                 if let Some(x) = args.tensor_vec {
                     builder.add_tensor_vec(x);
-                }
-                if let Some(x) = args.point_evaluation {
-                    builder.add_point_evaluation(x);
                 }
                 if let Some(x) = args.ldt_proof {
                     builder.add_ldt_proof(x);
@@ -1107,19 +808,6 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn point_evaluation(&self) -> Option<PointEvaluation<'a>> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<PointEvaluation>>(
-                            EvalBatchProof::VT_POINT_EVALUATION,
-                            None,
-                        )
-                }
-            }
-            #[inline]
             pub fn tensor_vec(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
                 // Safety:
                 // Created from valid Table for this object
@@ -1133,14 +821,14 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn master_evals(&self) -> Option<MasterEvals<'a>> {
+            pub fn masters(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<MasterEvals>>(
-                            EvalBatchProof::VT_MASTER_EVALS,
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                            EvalBatchProof::VT_MASTERS,
                             None,
                         )
                 }
@@ -1169,9 +857,8 @@ pub mod hekate {
                 v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<SumcheckProof>>("sumcheck_proof", Self::VT_SUMCHECK_PROOF, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownProof>>("ldt_proof", Self::VT_LDT_PROOF, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<PointEvaluation>>("point_evaluation", Self::VT_POINT_EVALUATION, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("tensor_vec", Self::VT_TENSOR_VEC, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<MasterEvals>>("master_evals", Self::VT_MASTER_EVALS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("masters", Self::VT_MASTERS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownProof>>("h_ldt_proof", Self::VT_H_LDT_PROOF, false)?
      .finish();
                 Ok(())
@@ -1180,9 +867,8 @@ pub mod hekate {
         pub struct EvalBatchProofArgs<'a> {
             pub sumcheck_proof: Option<::flatbuffers::WIPOffset<SumcheckProof<'a>>>,
             pub ldt_proof: Option<::flatbuffers::WIPOffset<BrakedownProof<'a>>>,
-            pub point_evaluation: Option<::flatbuffers::WIPOffset<PointEvaluation<'a>>>,
             pub tensor_vec: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
-            pub master_evals: Option<::flatbuffers::WIPOffset<MasterEvals<'a>>>,
+            pub masters: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
             pub h_ldt_proof: Option<::flatbuffers::WIPOffset<BrakedownProof<'a>>>,
         }
         impl<'a> Default for EvalBatchProofArgs<'a> {
@@ -1191,9 +877,8 @@ pub mod hekate {
                 EvalBatchProofArgs {
                     sumcheck_proof: None,
                     ldt_proof: None,
-                    point_evaluation: None,
                     tensor_vec: None,
-                    master_evals: None,
+                    masters: None,
                     h_ldt_proof: None,
                 }
             }
@@ -1227,17 +912,6 @@ pub mod hekate {
                     );
             }
             #[inline]
-            pub fn add_point_evaluation(
-                &mut self,
-                point_evaluation: ::flatbuffers::WIPOffset<PointEvaluation<'b>>,
-            ) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<PointEvaluation>>(
-                        EvalBatchProof::VT_POINT_EVALUATION,
-                        point_evaluation,
-                    );
-            }
-            #[inline]
             pub fn add_tensor_vec(
                 &mut self,
                 tensor_vec: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
@@ -1248,15 +922,14 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_master_evals(
+            pub fn add_masters(
                 &mut self,
-                master_evals: ::flatbuffers::WIPOffset<MasterEvals<'b>>,
+                masters: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
             ) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<MasterEvals>>(
-                        EvalBatchProof::VT_MASTER_EVALS,
-                        master_evals,
-                    );
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    EvalBatchProof::VT_MASTERS,
+                    masters,
+                );
             }
             #[inline]
             pub fn add_h_ldt_proof(
@@ -1291,9 +964,8 @@ pub mod hekate {
                 let mut ds = f.debug_struct("EvalBatchProof");
                 ds.field("sumcheck_proof", &self.sumcheck_proof());
                 ds.field("ldt_proof", &self.ldt_proof());
-                ds.field("point_evaluation", &self.point_evaluation());
                 ds.field("tensor_vec", &self.tensor_vec());
-                ds.field("master_evals", &self.master_evals());
+                ds.field("masters", &self.masters());
                 ds.field("h_ldt_proof", &self.h_ldt_proof());
                 ds.finish()
             }
@@ -1453,7 +1125,6 @@ pub mod hekate {
         impl<'a> LogUpAux<'a> {
             pub const VT_H_EVALS: ::flatbuffers::VOffsetT = 4;
             pub const VT_CLAIMED_SUMS: ::flatbuffers::VOffsetT = 6;
-            pub const VT_H_COMMITMENT: ::flatbuffers::VOffsetT = 8;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1470,9 +1141,6 @@ pub mod hekate {
                 args: &'args LogUpAuxArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<LogUpAux<'bldr>> {
                 let mut builder = LogUpAuxBuilder::new(_fbb);
-                if let Some(x) = args.h_commitment {
-                    builder.add_h_commitment(x);
-                }
                 if let Some(x) = args.claimed_sums {
                     builder.add_claimed_sums(x);
                 }
@@ -1510,19 +1178,6 @@ pub mod hekate {
                     >>(LogUpAux::VT_CLAIMED_SUMS, None)
                 }
             }
-            #[inline]
-            pub fn h_commitment(&self) -> Option<BrakedownCommitment<'a>> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<BrakedownCommitment>>(
-                            LogUpAux::VT_H_COMMITMENT,
-                            None,
-                        )
-                }
-            }
         }
 
         impl ::flatbuffers::Verifiable for LogUpAux<'_> {
@@ -1538,11 +1193,6 @@ pub mod hekate {
                     .visit_field::<::flatbuffers::ForwardsUOffset<
                         ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
                     >>("claimed_sums", Self::VT_CLAIMED_SUMS, false)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownCommitment>>(
-                        "h_commitment",
-                        Self::VT_H_COMMITMENT,
-                        false,
-                    )?
                     .finish();
                 Ok(())
             }
@@ -1558,7 +1208,6 @@ pub mod hekate {
                     ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>,
                 >,
             >,
-            pub h_commitment: Option<::flatbuffers::WIPOffset<BrakedownCommitment<'a>>>,
         }
         impl<'a> Default for LogUpAuxArgs<'a> {
             #[inline]
@@ -1566,7 +1215,6 @@ pub mod hekate {
                 LogUpAuxArgs {
                     h_evals: None,
                     claimed_sums: None,
-                    h_commitment: None,
                 }
             }
         }
@@ -1599,17 +1247,6 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_h_commitment(
-                &mut self,
-                h_commitment: ::flatbuffers::WIPOffset<BrakedownCommitment<'b>>,
-            ) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<BrakedownCommitment>>(
-                        LogUpAux::VT_H_COMMITMENT,
-                        h_commitment,
-                    );
-            }
-            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> LogUpAuxBuilder<'a, 'b, A> {
@@ -1631,7 +1268,6 @@ pub mod hekate {
                 let mut ds = f.debug_struct("LogUpAux");
                 ds.field("h_evals", &self.h_evals());
                 ds.field("claimed_sums", &self.claimed_sums());
-                ds.field("h_commitment", &self.h_commitment());
                 ds.finish()
             }
         }
@@ -2109,16 +1745,18 @@ pub mod hekate {
 
         impl<'a> Proof<'a> {
             pub const VT_VERSION: ::flatbuffers::VOffsetT = 4;
-            pub const VT_TRACE_COMMITMENT: ::flatbuffers::VOffsetT = 6;
-            pub const VT_ZEROCHECK_PROOF: ::flatbuffers::VOffsetT = 8;
-            pub const VT_MAIN_LOGUP_AUX: ::flatbuffers::VOffsetT = 10;
-            pub const VT_EVAL_PROOF: ::flatbuffers::VOffsetT = 12;
-            pub const VT_CHIPLET_COMMITMENTS: ::flatbuffers::VOffsetT = 14;
-            pub const VT_CHIPLET_ZEROCHECK_PROOFS: ::flatbuffers::VOffsetT = 16;
-            pub const VT_CHIPLET_LOGUP_AUX: ::flatbuffers::VOffsetT = 18;
-            pub const VT_CHIPLET_EVAL_PROOFS: ::flatbuffers::VOffsetT = 20;
-            pub const VT_PAD_ROOT: ::flatbuffers::VOffsetT = 22;
-            pub const VT_OUTER: ::flatbuffers::VOffsetT = 24;
+            pub const VT_TRACE_ROOT: ::flatbuffers::VOffsetT = 6;
+            pub const VT_H_ROOT: ::flatbuffers::VOffsetT = 8;
+            pub const VT_ZEROCHECK_PROOF: ::flatbuffers::VOffsetT = 10;
+            pub const VT_MAIN_LOGUP_AUX: ::flatbuffers::VOffsetT = 12;
+            pub const VT_MAIN_POINT_EVALUATION: ::flatbuffers::VOffsetT = 14;
+            pub const VT_EVAL_PROOF: ::flatbuffers::VOffsetT = 16;
+            pub const VT_CHIPLET_ROWS: ::flatbuffers::VOffsetT = 18;
+            pub const VT_CHIPLET_ZEROCHECK_PROOFS: ::flatbuffers::VOffsetT = 20;
+            pub const VT_CHIPLET_LOGUP_AUX: ::flatbuffers::VOffsetT = 22;
+            pub const VT_CHIPLET_POINT_EVALUATIONS: ::flatbuffers::VOffsetT = 24;
+            pub const VT_PAD_ROOT: ::flatbuffers::VOffsetT = 26;
+            pub const VT_OUTER: ::flatbuffers::VOffsetT = 28;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2141,8 +1779,8 @@ pub mod hekate {
                 if let Some(x) = args.pad_root {
                     builder.add_pad_root(x);
                 }
-                if let Some(x) = args.chiplet_eval_proofs {
-                    builder.add_chiplet_eval_proofs(x);
+                if let Some(x) = args.chiplet_point_evaluations {
+                    builder.add_chiplet_point_evaluations(x);
                 }
                 if let Some(x) = args.chiplet_logup_aux {
                     builder.add_chiplet_logup_aux(x);
@@ -2150,11 +1788,14 @@ pub mod hekate {
                 if let Some(x) = args.chiplet_zerocheck_proofs {
                     builder.add_chiplet_zerocheck_proofs(x);
                 }
-                if let Some(x) = args.chiplet_commitments {
-                    builder.add_chiplet_commitments(x);
+                if let Some(x) = args.chiplet_rows {
+                    builder.add_chiplet_rows(x);
                 }
                 if let Some(x) = args.eval_proof {
                     builder.add_eval_proof(x);
+                }
+                if let Some(x) = args.main_point_evaluation {
+                    builder.add_main_point_evaluation(x);
                 }
                 if let Some(x) = args.main_logup_aux {
                     builder.add_main_logup_aux(x);
@@ -2162,8 +1803,11 @@ pub mod hekate {
                 if let Some(x) = args.zerocheck_proof {
                     builder.add_zerocheck_proof(x);
                 }
-                if let Some(x) = args.trace_commitment {
-                    builder.add_trace_commitment(x);
+                if let Some(x) = args.h_root {
+                    builder.add_h_root(x);
+                }
+                if let Some(x) = args.trace_root {
+                    builder.add_trace_root(x);
                 }
                 builder.add_version(args.version);
                 builder.finish()
@@ -2177,14 +1821,27 @@ pub mod hekate {
                 unsafe { self._tab.get::<u32>(Proof::VT_VERSION, Some(0)).unwrap() }
             }
             #[inline]
-            pub fn trace_commitment(&self) -> Option<BrakedownCommitment<'a>> {
+            pub fn trace_root(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<BrakedownCommitment>>(
-                            Proof::VT_TRACE_COMMITMENT,
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                            Proof::VT_TRACE_ROOT,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn h_root(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                            Proof::VT_H_ROOT,
                             None,
                         )
                 }
@@ -2215,6 +1872,19 @@ pub mod hekate {
                 }
             }
             #[inline]
+            pub fn main_point_evaluation(&self) -> Option<PointEvaluation<'a>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<PointEvaluation>>(
+                            Proof::VT_MAIN_POINT_EVALUATION,
+                            None,
+                        )
+                }
+            }
+            #[inline]
             pub fn eval_proof(&self) -> Option<EvalBatchProof<'a>> {
                 // Safety:
                 // Created from valid Table for this object
@@ -2228,21 +1898,16 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn chiplet_commitments(
-                &self,
-            ) -> Option<
-                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<BrakedownCommitment<'a>>>,
-            > {
+            pub fn chiplet_rows(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
-                    self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<
-                            'a,
-                            ::flatbuffers::ForwardsUOffset<BrakedownCommitment>,
-                        >,
-                    >>(Proof::VT_CHIPLET_COMMITMENTS, None)
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(
+                            Proof::VT_CHIPLET_ROWS,
+                            None,
+                        )
                 }
             }
             #[inline]
@@ -2274,17 +1939,18 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn chiplet_eval_proofs(
+            pub fn chiplet_point_evaluations(
                 &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<EvalBatchProof<'a>>>>
-            {
+            ) -> Option<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PointEvaluation<'a>>>,
+            > {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<EvalBatchProof>>,
-                    >>(Proof::VT_CHIPLET_EVAL_PROOFS, None)
+                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PointEvaluation>>,
+                    >>(Proof::VT_CHIPLET_POINT_EVALUATIONS, None)
                 }
             }
             #[inline]
@@ -2320,9 +1986,14 @@ pub mod hekate {
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
                     .visit_field::<u32>("version", Self::VT_VERSION, false)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownCommitment>>(
-                        "trace_commitment",
-                        Self::VT_TRACE_COMMITMENT,
+                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
+                        "trace_root",
+                        Self::VT_TRACE_ROOT,
+                        false,
+                    )?
+                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
+                        "h_root",
+                        Self::VT_H_ROOT,
                         false,
                     )?
                     .visit_field::<::flatbuffers::ForwardsUOffset<SumcheckProof>>(
@@ -2335,18 +2006,20 @@ pub mod hekate {
                         Self::VT_MAIN_LOGUP_AUX,
                         false,
                     )?
+                    .visit_field::<::flatbuffers::ForwardsUOffset<PointEvaluation>>(
+                        "main_point_evaluation",
+                        Self::VT_MAIN_POINT_EVALUATION,
+                        false,
+                    )?
                     .visit_field::<::flatbuffers::ForwardsUOffset<EvalBatchProof>>(
                         "eval_proof",
                         Self::VT_EVAL_PROOF,
                         false,
                     )?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<
-                            '_,
-                            ::flatbuffers::ForwardsUOffset<BrakedownCommitment>,
-                        >,
-                    >>(
-                        "chiplet_commitments", Self::VT_CHIPLET_COMMITMENTS, false
+                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>(
+                        "chiplet_rows",
+                        Self::VT_CHIPLET_ROWS,
+                        false,
                     )?
                     .visit_field::<::flatbuffers::ForwardsUOffset<
                         ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<SumcheckProof>>,
@@ -2359,9 +2032,11 @@ pub mod hekate {
                         ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LogUpAux>>,
                     >>("chiplet_logup_aux", Self::VT_CHIPLET_LOGUP_AUX, false)?
                     .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<EvalBatchProof>>,
+                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PointEvaluation>>,
                     >>(
-                        "chiplet_eval_proofs", Self::VT_CHIPLET_EVAL_PROOFS, false
+                        "chiplet_point_evaluations",
+                        Self::VT_CHIPLET_POINT_EVALUATIONS,
+                        false,
                     )?
                     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
                         "pad_root",
@@ -2379,18 +2054,13 @@ pub mod hekate {
         }
         pub struct ProofArgs<'a> {
             pub version: u32,
-            pub trace_commitment: Option<::flatbuffers::WIPOffset<BrakedownCommitment<'a>>>,
+            pub trace_root: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub h_root: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
             pub zerocheck_proof: Option<::flatbuffers::WIPOffset<SumcheckProof<'a>>>,
             pub main_logup_aux: Option<::flatbuffers::WIPOffset<LogUpAux<'a>>>,
+            pub main_point_evaluation: Option<::flatbuffers::WIPOffset<PointEvaluation<'a>>>,
             pub eval_proof: Option<::flatbuffers::WIPOffset<EvalBatchProof<'a>>>,
-            pub chiplet_commitments: Option<
-                ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<
-                        'a,
-                        ::flatbuffers::ForwardsUOffset<BrakedownCommitment<'a>>,
-                    >,
-                >,
-            >,
+            pub chiplet_rows: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
             pub chiplet_zerocheck_proofs: Option<
                 ::flatbuffers::WIPOffset<
                     ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<SumcheckProof<'a>>>,
@@ -2401,9 +2071,9 @@ pub mod hekate {
                     ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpAux<'a>>>,
                 >,
             >,
-            pub chiplet_eval_proofs: Option<
+            pub chiplet_point_evaluations: Option<
                 ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<EvalBatchProof<'a>>>,
+                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PointEvaluation<'a>>>,
                 >,
             >,
             pub pad_root: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
@@ -2414,14 +2084,16 @@ pub mod hekate {
             fn default() -> Self {
                 ProofArgs {
                     version: 0,
-                    trace_commitment: None,
+                    trace_root: None,
+                    h_root: None,
                     zerocheck_proof: None,
                     main_logup_aux: None,
+                    main_point_evaluation: None,
                     eval_proof: None,
-                    chiplet_commitments: None,
+                    chiplet_rows: None,
                     chiplet_zerocheck_proofs: None,
                     chiplet_logup_aux: None,
-                    chiplet_eval_proofs: None,
+                    chiplet_point_evaluations: None,
                     pad_root: None,
                     outer: None,
                 }
@@ -2438,15 +2110,22 @@ pub mod hekate {
                 self.fbb_.push_slot::<u32>(Proof::VT_VERSION, version, 0);
             }
             #[inline]
-            pub fn add_trace_commitment(
+            pub fn add_trace_root(
                 &mut self,
-                trace_commitment: ::flatbuffers::WIPOffset<BrakedownCommitment<'b>>,
+                trace_root: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    Proof::VT_TRACE_ROOT,
+                    trace_root,
+                );
+            }
+            #[inline]
+            pub fn add_h_root(
+                &mut self,
+                h_root: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
             ) {
                 self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<BrakedownCommitment>>(
-                        Proof::VT_TRACE_COMMITMENT,
-                        trace_commitment,
-                    );
+                    .push_slot_always::<::flatbuffers::WIPOffset<_>>(Proof::VT_H_ROOT, h_root);
             }
             #[inline]
             pub fn add_zerocheck_proof(
@@ -2471,6 +2150,17 @@ pub mod hekate {
                     );
             }
             #[inline]
+            pub fn add_main_point_evaluation(
+                &mut self,
+                main_point_evaluation: ::flatbuffers::WIPOffset<PointEvaluation<'b>>,
+            ) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<PointEvaluation>>(
+                        Proof::VT_MAIN_POINT_EVALUATION,
+                        main_point_evaluation,
+                    );
+            }
+            #[inline]
             pub fn add_eval_proof(
                 &mut self,
                 eval_proof: ::flatbuffers::WIPOffset<EvalBatchProof<'b>>,
@@ -2482,18 +2172,13 @@ pub mod hekate {
                     );
             }
             #[inline]
-            pub fn add_chiplet_commitments(
+            pub fn add_chiplet_rows(
                 &mut self,
-                chiplet_commitments: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<
-                        'b,
-                        ::flatbuffers::ForwardsUOffset<BrakedownCommitment<'b>>,
-                    >,
-                >,
+                chiplet_rows: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u64>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    Proof::VT_CHIPLET_COMMITMENTS,
-                    chiplet_commitments,
+                    Proof::VT_CHIPLET_ROWS,
+                    chiplet_rows,
                 );
             }
             #[inline]
@@ -2521,15 +2206,15 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_chiplet_eval_proofs(
+            pub fn add_chiplet_point_evaluations(
                 &mut self,
-                chiplet_eval_proofs: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<EvalBatchProof<'b>>>,
+                chiplet_point_evaluations: ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<PointEvaluation<'b>>>,
                 >,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    Proof::VT_CHIPLET_EVAL_PROOFS,
-                    chiplet_eval_proofs,
+                    Proof::VT_CHIPLET_POINT_EVALUATIONS,
+                    chiplet_point_evaluations,
                 );
             }
             #[inline]
@@ -2569,14 +2254,19 @@ pub mod hekate {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 let mut ds = f.debug_struct("Proof");
                 ds.field("version", &self.version());
-                ds.field("trace_commitment", &self.trace_commitment());
+                ds.field("trace_root", &self.trace_root());
+                ds.field("h_root", &self.h_root());
                 ds.field("zerocheck_proof", &self.zerocheck_proof());
                 ds.field("main_logup_aux", &self.main_logup_aux());
+                ds.field("main_point_evaluation", &self.main_point_evaluation());
                 ds.field("eval_proof", &self.eval_proof());
-                ds.field("chiplet_commitments", &self.chiplet_commitments());
+                ds.field("chiplet_rows", &self.chiplet_rows());
                 ds.field("chiplet_zerocheck_proofs", &self.chiplet_zerocheck_proofs());
                 ds.field("chiplet_logup_aux", &self.chiplet_logup_aux());
-                ds.field("chiplet_eval_proofs", &self.chiplet_eval_proofs());
+                ds.field(
+                    "chiplet_point_evaluations",
+                    &self.chiplet_point_evaluations(),
+                );
                 ds.field("pad_root", &self.pad_root());
                 ds.field("outer", &self.outer());
                 ds.finish()

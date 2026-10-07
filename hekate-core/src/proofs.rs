@@ -13,14 +13,16 @@ use serde::{Deserialize, Serialize};
 // PROGRAM INNER PROOF
 // ===================================
 
-/// The prover's full transcript-independent output.
-/// Main-trace and chiplet-trace sub-vectors are parallel:
-/// the k-th chiplet contributes
-/// `(chiplet_commitments[k], chiplet_zerocheck_proofs[k],
-/// chiplet_logup_aux[k], chiplet_eval_proofs[k])`.
+/// The prover's full transcript-independent output; the
+/// k-th chiplet contributes index k of every `chiplet_*` vector.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InnerProof<F: TowerField> {
-    pub trace_commitment: BrakedownCommitment,
+    /// Root over every table's trace codewords.
+    pub trace_root: [u8; 32],
+
+    /// Root over every bus-carrying table's
+    /// `h` codewords, absorbed before any `α`.
+    pub h_root: Option<[u8; 32]>,
 
     /// Sumcheck proving
     /// `Σ_x ( Σ α_i · C_i(x) ) · eq(r, x) = 0`
@@ -31,15 +33,16 @@ pub struct InnerProof<F: TowerField> {
     /// bus endpoints, pinned to the committed `h`.
     pub main_logup_aux: LogUpAux<F>,
 
-    /// Pins trace evaluations to `trace_commitment`.
-    /// Blocks disconnected-witness / floating-proof
-    /// forgeries.
+    /// `(r_final, claimed_column_evals)` of main.
+    pub main_point_evaluation: (Vec<F>, Vec<F>),
+
+    /// Pins every table's trace evaluations to the two roots.
     pub eval_proof: EvalBatchProof<F>,
 
-    pub chiplet_commitments: Vec<BrakedownCommitment>,
+    pub chiplet_rows: Vec<usize>,
     pub chiplet_zerocheck_proofs: Vec<SumcheckProof<F>>,
     pub chiplet_logup_aux: Vec<LogUpAux<F>>,
-    pub chiplet_eval_proofs: Vec<EvalBatchProof<F>>,
+    pub chiplet_point_evaluations: Vec<(Vec<F>, Vec<F>)>,
 
     /// Absorbed before the first challenge.
     pub pad_root: Option<[u8; 32]>,
@@ -51,26 +54,30 @@ pub struct InnerProof<F: TowerField> {
 impl<F: TowerField> InnerProof<F> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        trace_commitment: BrakedownCommitment,
+        trace_root: [u8; 32],
+        h_root: Option<[u8; 32]>,
         zerocheck_proof: SumcheckProof<F>,
         main_logup_aux: LogUpAux<F>,
+        main_point_evaluation: (Vec<F>, Vec<F>),
         eval_proof: EvalBatchProof<F>,
-        chiplet_commitments: Vec<BrakedownCommitment>,
+        chiplet_rows: Vec<usize>,
         chiplet_zerocheck_proofs: Vec<SumcheckProof<F>>,
         chiplet_logup_aux: Vec<LogUpAux<F>>,
-        chiplet_eval_proofs: Vec<EvalBatchProof<F>>,
+        chiplet_point_evaluations: Vec<(Vec<F>, Vec<F>)>,
         pad_root: Option<[u8; 32]>,
         outer: Option<OuterProof<F>>,
     ) -> Self {
         Self {
-            trace_commitment,
+            trace_root,
+            h_root,
             zerocheck_proof,
             main_logup_aux,
+            main_point_evaluation,
             eval_proof,
-            chiplet_commitments,
+            chiplet_rows,
             chiplet_zerocheck_proofs,
             chiplet_logup_aux,
-            chiplet_eval_proofs,
+            chiplet_point_evaluations,
             pad_root,
             outer,
         }
@@ -135,16 +142,6 @@ impl<F: TowerField> BrakedownProof<F> {
     }
 }
 
-/// Merkle root plus the dimensions it was taken over.
-/// `num_rows` and `num_cols` must be absorbed into
-/// the transcript before any challenge is drawn.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct BrakedownCommitment {
-    pub root: [u8; 32],
-    pub num_rows: usize,
-    pub num_cols: usize,
-}
-
 // ===================================
 // SUMCHECK PROOF
 // ===================================
@@ -164,40 +161,27 @@ pub struct SumcheckProof<F: TowerField> {
 // EVALUATION BATCH PROOF
 // ===================================
 
-/// The two master evaluations at `r'`, fixed before
-/// the line challenge `λ` binds them to one vector.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MasterEvals<F: TowerField> {
-    pub whole: F,
-    pub ring: F,
-}
-
-/// Single-point evaluation argument binding
-/// trace-column evaluations at one challenge
-/// point to the table's Brakedown commitments.
+/// Evaluation argument binding every table's trace-column
+/// evaluations to the pool's two Brakedown commitments.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvalBatchProof<F: TowerField> {
     /// Sumcheck reducing the batched claim
     /// to a single-point evaluation.
     pub sumcheck_proof: SumcheckProof<F>,
 
-    /// Brakedown opening for the rows selected
-    /// by the evaluation sumcheck's challenge.
+    /// The trace tree opened at the query columns.
     pub ldt_proof: BrakedownProof<F>,
 
-    /// `(r_final, claimed_column_evals)`.
-    pub point_evaluation: (Vec<F>, Vec<F>),
-
-    /// `q_whole = M_whole · r_col`, or the line
-    /// `q_ring + λ · q_whole` with a ring unit.
+    /// `Σ_k λ^k · q_k` over the masters' folds.
     /// Length `grid_cols + support_size`.
     pub tensor_vec: Vec<F>,
 
-    /// Present iff the ring-switch plan carries a ring unit.
-    pub master_evals: Option<MasterEvals<F>>,
+    /// Every table's master evaluations at `r`, pool order,
+    /// ring before whole, fixed before `λ` binds them.
+    pub masters: Vec<F>,
 
-    /// The table's `h` tree opened at the same query
-    /// columns; present iff the table carries a bus.
+    /// The `h` tree opened at the same query columns;
+    /// present iff some table carries a bus.
     pub h_ldt_proof: Option<BrakedownProof<F>>,
 }
 
@@ -205,17 +189,15 @@ impl<F: TowerField> EvalBatchProof<F> {
     pub fn new(
         sumcheck_proof: SumcheckProof<F>,
         ldt_proof: BrakedownProof<F>,
-        point_evaluation: (Vec<F>, Vec<F>),
         tensor_vec: Vec<F>,
-        master_evals: Option<MasterEvals<F>>,
+        masters: Vec<F>,
         h_ldt_proof: Option<BrakedownProof<F>>,
     ) -> Self {
         Self {
             sumcheck_proof,
             ldt_proof,
-            point_evaluation,
             tensor_vec,
-            master_evals,
+            masters,
             h_ldt_proof,
         }
     }
@@ -226,15 +208,12 @@ impl<F: TowerField> EvalBatchProof<F> {
 // ===================================
 
 /// Per-table LogUp auxiliary payload keyed by `bus_id`.
-/// `claimed_sums[i]` and `h_commitment` are absorbed
-/// pre-`α`/`r_zerocheck`; `h_evals[i]` post-sumcheck.
-/// `h_commitment` is `None` iff the table carries no bus;
-/// the table's eval argument opens it at `r_final`.
+/// `claimed_sums[i]` is absorbed pre-`α`/`r_zerocheck`;
+/// `h_evals[i]` post-sumcheck.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogUpAux<F: TowerField> {
     pub h_evals: Vec<(String, F)>,
     pub claimed_sums: Vec<(String, F)>,
-    pub h_commitment: Option<BrakedownCommitment>,
 }
 
 impl<F: TowerField> LogUpAux<F> {
@@ -242,7 +221,6 @@ impl<F: TowerField> LogUpAux<F> {
         Self {
             h_evals,
             claimed_sums,
-            h_commitment: None,
         }
     }
 }

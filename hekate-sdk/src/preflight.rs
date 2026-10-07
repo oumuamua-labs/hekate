@@ -1189,7 +1189,7 @@ fn write_grouped_constraint_violations<F>(
 
         writeln!(
             f,
-            "  [{}] constraint #{} \"{}\" — {} rows: {:?}",
+            "  [{}] constraint #{} \"{}\" on {} rows: {:?}",
             table,
             ci,
             label,

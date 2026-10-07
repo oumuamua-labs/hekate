@@ -9,11 +9,12 @@
 //! to chiplet isolation, transcript binding,
 //! and evaluation argument integrity.
 
-use hekate::core::config::Config;
+use hekate::core::config::{Config, MAX_TABLE_VARS};
 use hekate::core::trace::{ColumnTrace, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
+use hekate_core::errors::Error;
 use hekate_core::trace::IntoTraceColumn;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
 use hekate_math::{Bit, Block32};
@@ -153,23 +154,23 @@ fn prove_and_verify(
 }
 
 // ==========================================================
-// EXPLOIT: Extra chiplet commitments in proof
+// EXPLOIT: Extra chiplet heights in proof
 //
-// A malicious prover adds extra chiplet_commitments
+// A malicious prover adds extra chiplet_rows
 // that don't correspond to any chiplet_defs().
 // The verifier must reject this immediately.
 // ==========================================================
 
 #[test]
-fn extra_chiplet_commitments_rejected() {
+fn extra_chiplet_rows_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
     assert!(ok, "Baseline proof must verify");
 
     // ATTACK:
-    // Duplicate the first chiplet commitment
-    let extra_comm = proof.chiplet_commitments[0].clone();
-    proof.chiplet_commitments.push(extra_comm);
+    // Duplicate the first chiplet height
+    let extra_rows = proof.chiplet_rows[0];
+    proof.chiplet_rows.push(extra_rows);
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -179,26 +180,26 @@ fn extra_chiplet_commitments_rejected() {
 
     assert!(
         result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: Extra chiplet commitment accepted"
+        "SECURITY FAILURE: Extra chiplet height accepted"
     );
 }
 
 // ==========================================================
-// EXPLOIT: Missing chiplet commitments in proof
+// EXPLOIT: Missing chiplet heights in proof
 //
-// A malicious prover strips chiplet_commitments
+// A malicious prover strips chiplet_rows
 // to bypass chiplet ZeroCheck verification.
 // ==========================================================
 
 #[test]
-fn missing_chiplet_commitments_rejected() {
+fn missing_chiplet_rows_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
     assert!(ok, "Baseline proof must verify");
 
     // ATTACK:
-    // Remove all chiplet commitments
-    proof.chiplet_commitments.clear();
+    // Remove all chiplet heights
+    proof.chiplet_rows.clear();
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -208,7 +209,7 @@ fn missing_chiplet_commitments_rejected() {
 
     assert!(
         result.is_err(),
-        "SECURITY FAILURE: Missing chiplet commitments accepted"
+        "SECURITY FAILURE: Missing chiplet heights accepted"
     );
 }
 
@@ -229,10 +230,10 @@ fn chiplet_eval_values_forgery() {
     // ATTACK:
     // Corrupt first chiplet's
     // claimed evaluation at r_final.
-    let c_eval = &mut proof.chiplet_eval_proofs[0];
-    assert!(!c_eval.point_evaluation.1.is_empty());
+    let c_eval = &mut proof.chiplet_point_evaluations[0];
+    assert!(!c_eval.1.is_empty());
 
-    c_eval.point_evaluation.1[0] += F::ONE;
+    c_eval.1[0] += F::ONE;
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -247,23 +248,23 @@ fn chiplet_eval_values_forgery() {
 }
 
 // ==========================================================
-// EXPLOIT: Swap chiplet commitment root
+// EXPLOIT: Swap the pool root
 //
-// A malicious prover replaces the chiplet's Merkle
+// A malicious prover replaces the pool's Merkle
 // root with an all-zero root. This desynchronizes the
 // Fiat-Shamir transcript (because the root is absorbed
 // into the transcript before challenges are drawn).
 // ==========================================================
 
 #[test]
-fn chiplet_root_swap_rejected() {
+fn pool_root_swap_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
     assert!(ok, "Baseline proof must verify");
 
     // ATTACK:
-    // Replace chiplet root with zeros
-    proof.chiplet_commitments[0].root = [0u8; 32];
+    // Replace the pool root with zeros
+    proof.trace_root = [0u8; 32];
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -273,7 +274,7 @@ fn chiplet_root_swap_rejected() {
 
     assert!(
         result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: Forged chiplet Merkle root accepted"
+        "SECURITY FAILURE: Forged pool Merkle root accepted"
     );
 }
 
@@ -295,7 +296,7 @@ fn chiplet_eval_values_truncated() {
     // Truncate chiplet's combined trace values
     // to 1 entry; the verifier's length check
     // rejects without panicking.
-    proof.chiplet_eval_proofs[0].point_evaluation.1.truncate(1);
+    proof.chiplet_point_evaluations[0].1.truncate(1);
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -453,18 +454,18 @@ fn chiplet_sumcheck_degree_inflation_rejected() {
 }
 
 // =====================================================
-// chiplet_commitments[i].num_rows
+// chiplet_rows[i]
 // must be non-zero power of two.
 // =====================================================
 
 #[test]
-fn chiplet_commitment_num_rows_non_power_of_two_rejected() {
+fn chiplet_rows_non_power_of_two_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
 
     assert!(ok, "Baseline proof must verify");
 
-    proof.chiplet_commitments[0].num_rows = 5;
+    proof.chiplet_rows[0] = 5;
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -473,19 +474,25 @@ fn chiplet_commitment_num_rows_non_power_of_two_rejected() {
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
     assert!(
-        result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: chiplet_commitments[0].num_rows = 5 accepted"
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "verifier",
+                message: "chiplet_rows[c] must be a non-zero power of two",
+            })
+        ),
+        "{result:?}"
     );
 }
 
 #[test]
-fn chiplet_commitment_num_rows_zero_rejected() {
+fn chiplet_rows_zero_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
 
     assert!(ok, "Baseline proof must verify");
 
-    proof.chiplet_commitments[0].num_rows = 0;
+    proof.chiplet_rows[0] = 0;
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -494,7 +501,146 @@ fn chiplet_commitment_num_rows_zero_rejected() {
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
     assert!(
-        result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: chiplet_commitments[0].num_rows = 0 accepted"
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "verifier",
+                message: "chiplet_rows[c] must be a non-zero power of two",
+            })
+        ),
+        "{result:?}"
+    );
+}
+
+// ==========================================================
+// EXPLOIT: Tamper one table's part of a pool leaf
+//
+// A pool leaf hashes every table's part. One flipped
+// byte in the ROM or the CPU part, of the trace tree
+// or the `h` tree, must fail the Merkle check.
+// ==========================================================
+
+#[test]
+fn tampered_leaf_part_rejected_at_merkle_check() {
+    let (air, instance, witness, config) = build_test_system(6);
+    let (proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+
+    assert!(ok, "Baseline proof must verify");
+
+    let pinned_id = program_id(&air).unwrap();
+
+    for h_tree in [false, true] {
+        for chiplet_part in [true, false] {
+            let mut forged = proof.clone();
+
+            let opening = match h_tree {
+                true => forged.eval_proof.h_ldt_proof.as_mut().unwrap(),
+                false => &mut forged.eval_proof.ldt_proof,
+            };
+
+            let column = &mut opening.opened_columns[0];
+            let byte = match chiplet_part {
+                true => 0,
+                false => column.len() - 1,
+            };
+
+            column[byte] ^= 1;
+
+            let mut vt = Transcript::<H>::new(b"ChipletSecurity");
+            let result = HekateVerifier::<F, H>::verify(
+                &pinned_id, &air, &instance, &forged, &mut vt, &config,
+            );
+
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Protocol {
+                        protocol: "brakedown",
+                        message: "batch merkle proof verification failed",
+                    })
+                ),
+                "h_tree {h_tree}, chiplet_part {chiplet_part}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn chiplet_rows_above_height_bound_rejected() {
+    let (air, instance, witness, config) = build_test_system(6);
+    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+
+    assert!(ok, "Baseline proof must verify");
+
+    proof.chiplet_rows[0] = 1 << (MAX_TABLE_VARS + 1);
+
+    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
+    let pinned_id = program_id(&air).unwrap();
+
+    let result =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "verifier",
+                message: "chiplet_rows[c] exceeds the table height bound",
+            })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn main_rows_above_height_bound_rejected() {
+    let (air, instance, witness, config) = build_test_system(6);
+    let (proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+
+    assert!(ok, "Baseline proof must verify");
+
+    let tall = ProgramInstance::new(1 << (MAX_TABLE_VARS + 1), vec![]);
+
+    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
+    let pinned_id = program_id(&air).unwrap();
+
+    let result = HekateVerifier::<F, H>::verify(&pinned_id, &air, &tall, &proof, &mut vt, &config);
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "verifier",
+                message: "num_rows exceeds the table height bound",
+            })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn height_spread_rejected_before_pool_layout() {
+    let (air, instance, witness, config) = build_test_system(6);
+    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+
+    assert!(ok, "Baseline proof must verify");
+
+    proof.chiplet_rows[0] = 1 << 20;
+
+    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
+    let pinned_id = program_id(&air).unwrap();
+
+    let result =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "verifier",
+                message: "claimed evaluation count does not match the pool layout",
+            })
+        ),
+        "{result:?}"
     );
 }

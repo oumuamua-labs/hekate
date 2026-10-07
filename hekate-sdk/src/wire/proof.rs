@@ -9,30 +9,27 @@ use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::Result;
 use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::{
-    BrakedownCommitment, BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, MasterEvals,
-    OuterOpening, OuterProof, SumcheckProof,
+    BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
 };
 use hekate_math::TowerField;
 
 use crate::generated::proof as fb;
 
-const WIRE_PROOF_VERSION: u32 = 6;
+const WIRE_PROOF_VERSION: u32 = 7;
 
 pub fn serialize_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     proof: &InnerProof<F>,
 ) -> flatbuffers::WIPOffset<fb::Proof<'a>> {
-    let tc = serialize_brakedown_commitment(fbb, &proof.trace_commitment);
+    let trace_root = fbb.create_vector(&proof.trace_root);
+    let h_root = proof.h_root.map(|r| fbb.create_vector(&r));
     let zc = serialize_sumcheck(fbb, &proof.zerocheck_proof);
     let mla = serialize_logup_aux(fbb, &proof.main_logup_aux);
+    let mpe = serialize_point_evaluation(fbb, &proof.main_point_evaluation);
     let ep = serialize_eval_batch(fbb, &proof.eval_proof);
 
-    let cc_offsets: Vec<_> = proof
-        .chiplet_commitments
-        .iter()
-        .map(|c| serialize_brakedown_commitment(fbb, c))
-        .collect();
-    let cc = fbb.create_vector(&cc_offsets);
+    let rows: Vec<u64> = proof.chiplet_rows.iter().map(|&r| r as u64).collect();
+    let cr = fbb.create_vector(&rows);
 
     let czc_offsets: Vec<_> = proof
         .chiplet_zerocheck_proofs
@@ -48,12 +45,12 @@ pub fn serialize_proof<'a, F: TowerField>(
         .collect();
     let cla = fbb.create_vector(&cla_offsets);
 
-    let cep_offsets: Vec<_> = proof
-        .chiplet_eval_proofs
+    let cpe_offsets: Vec<_> = proof
+        .chiplet_point_evaluations
         .iter()
-        .map(|p| serialize_eval_batch(fbb, p))
+        .map(|p| serialize_point_evaluation(fbb, p))
         .collect();
-    let cep = fbb.create_vector(&cep_offsets);
+    let cpe = fbb.create_vector(&cpe_offsets);
 
     let pad_root = proof.pad_root.map(|r| fbb.create_vector(&r));
     let outer = proof.outer.as_ref().map(|o| serialize_outer(fbb, o));
@@ -62,14 +59,16 @@ pub fn serialize_proof<'a, F: TowerField>(
         fbb,
         &fb::ProofArgs {
             version: WIRE_PROOF_VERSION,
-            trace_commitment: Some(tc),
+            trace_root: Some(trace_root),
+            h_root,
             zerocheck_proof: Some(zc),
             main_logup_aux: Some(mla),
+            main_point_evaluation: Some(mpe),
             eval_proof: Some(ep),
-            chiplet_commitments: Some(cc),
+            chiplet_rows: Some(cr),
             chiplet_zerocheck_proofs: Some(czc),
             chiplet_logup_aux: Some(cla),
-            chiplet_eval_proofs: Some(cep),
+            chiplet_point_evaluations: Some(cpe),
             pad_root,
             outer,
         },
@@ -155,10 +154,10 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
         return Err(wire_err("proof wire format version mismatch"));
     }
 
-    let trace_commitment = fb_proof
-        .trace_commitment()
-        .map(|c| deserialize_commitment(c))
-        .ok_or(wire_err("missing trace_commitment"))?;
+    let trace_root = deserialize_root(fb_proof.trace_root(), "trace_root must be 32 bytes")?
+        .ok_or(wire_err("missing trace_root"))?;
+
+    let h_root = deserialize_root(fb_proof.h_root(), "h_root must be 32 bytes")?;
 
     let zerocheck_proof = fb_proof
         .zerocheck_proof()
@@ -172,16 +171,23 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
         .transpose()?
         .ok_or(wire_err("missing main_logup_aux"))?;
 
+    let main_point_evaluation = fb_proof
+        .main_point_evaluation()
+        .map(|p| deserialize_point_evaluation::<F>(p))
+        .transpose()?
+        .ok_or(wire_err("missing main_point_evaluation"))?;
+
     let eval_proof = fb_proof
         .eval_proof()
         .map(|p| deserialize_eval_batch::<F>(p))
         .transpose()?
         .ok_or(wire_err("missing eval_proof"))?;
 
-    let chiplet_commitments = match fb_proof.chiplet_commitments() {
-        Some(v) => (0..v.len())
-            .map(|i| deserialize_commitment(v.get(i)))
-            .collect(),
+    let chiplet_rows = match fb_proof.chiplet_rows() {
+        Some(v) => v
+            .iter()
+            .map(|r| usize::try_from(r).map_err(|_| wire_err("chiplet_rows exceeds usize")))
+            .collect::<Result<Vec<_>>>()?,
         None => Vec::new(),
     };
 
@@ -209,32 +215,19 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
         None => Vec::new(),
     };
 
-    let chiplet_eval_proofs = match fb_proof.chiplet_eval_proofs() {
+    let chiplet_point_evaluations = match fb_proof.chiplet_point_evaluations() {
         Some(v) => {
-            let mut proofs = Vec::with_capacity(v.len());
+            let mut evaluations = Vec::with_capacity(v.len());
             for i in 0..v.len() {
-                proofs.push(deserialize_eval_batch::<F>(v.get(i))?);
+                evaluations.push(deserialize_point_evaluation::<F>(v.get(i))?);
             }
 
-            proofs
+            evaluations
         }
         None => Vec::new(),
     };
 
-    let pad_root = match fb_proof.pad_root() {
-        None => None,
-        Some(bytes) => {
-            let raw = bytes.bytes();
-            if raw.len() != 32 {
-                return Err(wire_err("pad_root must be 32 bytes"));
-            }
-
-            let mut root = [0u8; 32];
-            root.copy_from_slice(raw);
-
-            Some(root)
-        }
-    };
+    let pad_root = deserialize_root(fb_proof.pad_root(), "pad_root must be 32 bytes")?;
 
     let outer = fb_proof
         .outer()
@@ -242,14 +235,16 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
         .transpose()?;
 
     Ok(InnerProof {
-        trace_commitment,
+        trace_root,
+        h_root,
         zerocheck_proof,
         main_logup_aux,
+        main_point_evaluation,
         eval_proof,
-        chiplet_commitments,
+        chiplet_rows,
         chiplet_zerocheck_proofs,
         chiplet_logup_aux,
-        chiplet_eval_proofs,
+        chiplet_point_evaluations,
         pad_root,
         outer,
     })
@@ -285,6 +280,20 @@ fn deserialize_hashes(
             Ok(bytes.as_chunks::<32>().0.to_vec())
         }
         None => Ok(Vec::new()),
+    }
+}
+
+fn deserialize_root(
+    bytes: Option<flatbuffers::Vector<'_, u8>>,
+    message: &'static str,
+) -> Result<Option<[u8; 32]>> {
+    match bytes {
+        None => Ok(None),
+        Some(bytes) => {
+            let root: [u8; 32] = bytes.bytes().try_into().map_err(|_| wire_err(message))?;
+
+            Ok(Some(root))
+        }
     }
 }
 
@@ -379,21 +388,6 @@ fn serialize_sumcheck<'a, F: TowerField>(
     )
 }
 
-fn serialize_brakedown_commitment<'a>(
-    fbb: &mut FlatBufferBuilder<'a>,
-    commit: &BrakedownCommitment,
-) -> flatbuffers::WIPOffset<fb::BrakedownCommitment<'a>> {
-    let root = fbb.create_vector(&commit.root);
-    fb::BrakedownCommitment::create(
-        fbb,
-        &fb::BrakedownCommitmentArgs {
-            root: Some(root),
-            num_rows: commit.num_rows as u64,
-            num_cols: commit.num_cols as u64,
-        },
-    )
-}
-
 fn serialize_brakedown_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     proof: &BrakedownProof<F>,
@@ -430,22 +424,6 @@ fn serialize_eval_batch<'a, F: TowerField>(
     let sc = serialize_sumcheck(fbb, &proof.sumcheck_proof);
     let ldt = serialize_brakedown_proof(fbb, &proof.ldt_proof);
 
-    let (point, vals) = &proof.point_evaluation;
-
-    let pt: Vec<fb::Block128> = point.iter().map(|f| block128_from_field(f)).collect();
-    let pt_vec = fbb.create_vector(&pt);
-
-    let cv: Vec<fb::Block128> = vals.iter().map(|f| block128_from_field(f)).collect();
-    let cv_vec = fbb.create_vector(&cv);
-
-    let pt_offset = fb::PointEvaluation::create(
-        fbb,
-        &fb::PointEvaluationArgs {
-            point: Some(pt_vec),
-            column_values: Some(cv_vec),
-        },
-    );
-
     let tv: Vec<fb::Block128> = proof
         .tensor_vec
         .iter()
@@ -454,18 +432,13 @@ fn serialize_eval_batch<'a, F: TowerField>(
 
     let tensor = fbb.create_vector(&tv);
 
-    let master_evals = proof.master_evals.as_ref().map(|evals| {
-        let whole = block128_from_field(&evals.whole);
-        let ring = block128_from_field(&evals.ring);
+    let mv: Vec<fb::Block128> = proof
+        .masters
+        .iter()
+        .map(|f| block128_from_field(f))
+        .collect();
 
-        fb::MasterEvals::create(
-            fbb,
-            &fb::MasterEvalsArgs {
-                whole: Some(&whole),
-                ring: Some(&ring),
-            },
-        )
-    });
+    let masters = fbb.create_vector(&mv);
 
     let h_ldt_proof = proof
         .h_ldt_proof
@@ -477,10 +450,28 @@ fn serialize_eval_batch<'a, F: TowerField>(
         &fb::EvalBatchProofArgs {
             sumcheck_proof: Some(sc),
             ldt_proof: Some(ldt),
-            point_evaluation: Some(pt_offset),
             tensor_vec: Some(tensor),
-            master_evals,
+            masters: Some(masters),
             h_ldt_proof,
+        },
+    )
+}
+
+fn serialize_point_evaluation<'a, F: TowerField>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    (point, vals): &(Vec<F>, Vec<F>),
+) -> flatbuffers::WIPOffset<fb::PointEvaluation<'a>> {
+    let pt: Vec<fb::Block128> = point.iter().map(|f| block128_from_field(f)).collect();
+    let pt_vec = fbb.create_vector(&pt);
+
+    let cv: Vec<fb::Block128> = vals.iter().map(|f| block128_from_field(f)).collect();
+    let cv_vec = fbb.create_vector(&cv);
+
+    fb::PointEvaluation::create(
+        fbb,
+        &fb::PointEvaluationArgs {
+            point: Some(pt_vec),
+            column_values: Some(cv_vec),
         },
     )
 }
@@ -489,11 +480,6 @@ fn serialize_logup_aux<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     aux: &LogUpAux<F>,
 ) -> flatbuffers::WIPOffset<fb::LogUpAux<'a>> {
-    let h_commitment = aux
-        .h_commitment
-        .as_ref()
-        .map(|c| serialize_brakedown_commitment(fbb, c));
-
     let h_offsets: Vec<_> = aux
         .h_evals
         .iter()
@@ -535,23 +521,8 @@ fn serialize_logup_aux<'a, F: TowerField>(
         &fb::LogUpAuxArgs {
             h_evals: Some(h_evals),
             claimed_sums: Some(claimed_sums),
-            h_commitment,
         },
     )
-}
-
-fn deserialize_commitment(fb: fb::BrakedownCommitment<'_>) -> BrakedownCommitment {
-    let mut root = [0u8; 32];
-    if let Some(r) = fb.root() {
-        let len = r.len().min(32);
-        root[..len].copy_from_slice(&r.bytes()[..len]);
-    }
-
-    BrakedownCommitment {
-        root,
-        num_rows: fb.num_rows() as usize,
-        num_cols: fb.num_cols() as usize,
-    }
 }
 
 fn deserialize_sumcheck<F: TowerField>(fb: fb::SumcheckProof<'_>) -> Result<SumcheckProof<F>> {
@@ -607,36 +578,6 @@ fn deserialize_eval_batch<F: TowerField>(fb: fb::EvalBatchProof<'_>) -> Result<E
         .transpose()?
         .ok_or(wire_err("missing eval ldt_proof"))?;
 
-    let pt = fb
-        .point_evaluation()
-        .ok_or(wire_err("missing eval point_evaluation"))?;
-
-    let point: Vec<F> = match pt.point() {
-        Some(v) => {
-            let mut p = Vec::with_capacity(v.len());
-            for j in 0..v.len() {
-                p.push(field_from_block128::<F>(*v.get(j))?);
-            }
-
-            p
-        }
-        None => Vec::new(),
-    };
-
-    let vals: Vec<F> = match pt.column_values() {
-        Some(v) => {
-            let mut cv = Vec::with_capacity(v.len());
-            for j in 0..v.len() {
-                cv.push(field_from_block128::<F>(*v.get(j))?);
-            }
-
-            cv
-        }
-        None => Vec::new(),
-    };
-
-    let point_evaluation = (point, vals);
-
     let tensor_vec = match fb.tensor_vec() {
         Some(v) => {
             let mut tv = Vec::with_capacity(v.len());
@@ -649,20 +590,7 @@ fn deserialize_eval_batch<F: TowerField>(fb: fb::EvalBatchProof<'_>) -> Result<E
         None => Vec::new(),
     };
 
-    let master_evals = match fb.master_evals() {
-        Some(evals) => {
-            let whole = evals
-                .whole()
-                .ok_or(wire_err("missing master_evals.whole"))?;
-            let ring = evals.ring().ok_or(wire_err("missing master_evals.ring"))?;
-
-            Some(MasterEvals {
-                whole: field_from_block128::<F>(*whole)?,
-                ring: field_from_block128::<F>(*ring)?,
-            })
-        }
-        None => None,
-    };
+    let masters = deserialize_field_vec::<F>(fb.masters())?;
 
     let h_ldt_proof = fb
         .h_ldt_proof()
@@ -672,11 +600,19 @@ fn deserialize_eval_batch<F: TowerField>(fb: fb::EvalBatchProof<'_>) -> Result<E
     Ok(EvalBatchProof {
         sumcheck_proof,
         ldt_proof,
-        point_evaluation,
         tensor_vec,
-        master_evals,
+        masters,
         h_ldt_proof,
     })
+}
+
+fn deserialize_point_evaluation<F: TowerField>(
+    fb: fb::PointEvaluation<'_>,
+) -> Result<(Vec<F>, Vec<F>)> {
+    Ok((
+        deserialize_field_vec::<F>(fb.point())?,
+        deserialize_field_vec::<F>(fb.column_values())?,
+    ))
 }
 
 fn deserialize_brakedown_proof<F: TowerField>(
@@ -764,11 +700,50 @@ fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux
         None => Vec::new(),
     };
 
-    let h_commitment = fb.h_commitment().map(deserialize_commitment);
-
     Ok(LogUpAux {
         h_evals,
         claimed_sums,
-        h_commitment,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hekate_core::errors::Error;
+    use hekate_math::Block128;
+
+    fn proof_with_trace_root(root: &[u8]) -> Result<InnerProof<Block128>> {
+        let mut fbb = FlatBufferBuilder::new();
+        let trace_root = fbb.create_vector(root);
+
+        let proof = fb::Proof::create(
+            &mut fbb,
+            &fb::ProofArgs {
+                version: WIRE_PROOF_VERSION,
+                trace_root: Some(trace_root),
+                ..Default::default()
+            },
+        );
+
+        fbb.finish_minimal(proof);
+
+        deserialize_proof(fbb.finished_data())
+    }
+
+    #[test]
+    fn trace_root_of_wrong_length_rejected() {
+        let rejected = |len: usize| {
+            matches!(
+                proof_with_trace_root(&vec![7u8; len]),
+                Err(Error::Protocol {
+                    message: "trace_root must be 32 bytes",
+                    ..
+                })
+            )
+        };
+
+        assert!(rejected(31));
+        assert!(rejected(33));
+        assert!(!rejected(32));
+    }
 }

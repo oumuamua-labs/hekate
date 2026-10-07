@@ -113,14 +113,15 @@ where
     );
 
     // Main components
-    let trace_comm_sz = enc_size(&proof.trace_commitment, bin_cfg);
+    let trace_root_sz = enc_size(&proof.trace_root, bin_cfg);
+    let h_root_sz = enc_size(&proof.h_root, bin_cfg);
     let zcheck_sz = enc_size(&proof.zerocheck_proof, bin_cfg);
+    let main_pt_sz = enc_size(&proof.main_point_evaluation, bin_cfg);
 
     // Eval batch argument breakdown
     let eval_sc_sz = enc_size(&proof.eval_proof.sumcheck_proof, bin_cfg);
     let eval_tensor_sz = enc_size(&proof.eval_proof.tensor_vec, bin_cfg);
-    let eval_master_sz = enc_size(&proof.eval_proof.master_evals, bin_cfg);
-    let eval_pt_sz = enc_size(&proof.eval_proof.point_evaluation, bin_cfg);
+    let eval_master_sz = enc_size(&proof.eval_proof.masters, bin_cfg);
     let ldt_batch_sz = enc_size(&proof.eval_proof.ldt_proof.batch_path, bin_cfg);
     let ldt_opened_sz = enc_size(&proof.eval_proof.ldt_proof.opened_columns, bin_cfg);
     let eval_h_sz = enc_size(&proof.eval_proof.h_ldt_proof, bin_cfg);
@@ -128,33 +129,28 @@ where
     println!("--------------------------------------------------");
     println!("  PROOF COMPONENT BREAKDOWN (bincode)");
     println!("--------------------------------------------------");
-    println!("  Trace Commitment:       {:>8} bytes", trace_comm_sz);
+    println!("  Trace Root:             {:>8} bytes", trace_root_sz);
+    println!("  H Root:                 {:>8} bytes", h_root_sz);
     println!("  Main AIR ZeroCheck:     {:>8} bytes", zcheck_sz);
+    println!("  Main Point Evaluation:  {:>8} bytes", main_pt_sz);
     println!("  Eval Batch Argument:");
     println!("    Eval Sumcheck:        {:>8} bytes", eval_sc_sz);
     println!("    Tensor Vector (q):    {:>8} bytes", eval_tensor_sz);
-    println!("    Master Evals:         {:>8} bytes", eval_master_sz);
-    println!("    Point Evaluation:     {:>8} bytes", eval_pt_sz);
+    println!("    Masters:              {:>8} bytes", eval_master_sz);
     println!("    LDT Batch Path:       {:>8} bytes", ldt_batch_sz);
     println!("    LDT Opened Columns:   {:>8} bytes", ldt_opened_sz);
     println!("    H Opening:            {:>8} bytes", eval_h_sz);
 
-    if !proof.chiplet_commitments.is_empty() {
-        let n = proof.chiplet_commitments.len();
-        let chip_comm_sz = enc_size(&proof.chiplet_commitments, bin_cfg);
+    if !proof.chiplet_rows.is_empty() {
+        let n = proof.chiplet_rows.len();
+        let chip_rows_sz = enc_size(&proof.chiplet_rows, bin_cfg);
         let chip_zc_sz = enc_size(&proof.chiplet_zerocheck_proofs, bin_cfg);
-        let chip_eval_sz = enc_size(&proof.chiplet_eval_proofs, bin_cfg);
-        let chip_h_sz = proof
-            .chiplet_eval_proofs
-            .iter()
-            .map(|p| enc_size(&p.h_ldt_proof, bin_cfg))
-            .sum::<usize>();
+        let chip_pt_sz = enc_size(&proof.chiplet_point_evaluations, bin_cfg);
 
         println!("  Chiplets ({}):", n);
-        println!("    Commitments:          {:>8} bytes", chip_comm_sz);
+        println!("    Heights:              {:>8} bytes", chip_rows_sz);
         println!("    ZeroChecks:           {:>8} bytes", chip_zc_sz);
-        println!("    Eval Arguments:       {:>8} bytes", chip_eval_sz);
-        println!("      of which h openings:{:>8} bytes", chip_h_sz);
+        println!("    Point Evaluations:    {:>8} bytes", chip_pt_sz);
     }
 
     let main_bus_count = proof.main_logup_aux.h_evals.len();
@@ -184,14 +180,16 @@ where
 
     let outer_sz = outer_breakdown(proof, bin_cfg);
 
-    let itemized = enc_size(&proof.trace_commitment, bin_cfg)
-        + enc_size(&proof.zerocheck_proof, bin_cfg)
+    let itemized = trace_root_sz
+        + h_root_sz
+        + zcheck_sz
         + enc_size(&proof.main_logup_aux, bin_cfg)
+        + main_pt_sz
         + enc_size(&proof.eval_proof, bin_cfg)
-        + enc_size(&proof.chiplet_commitments, bin_cfg)
+        + enc_size(&proof.chiplet_rows, bin_cfg)
         + enc_size(&proof.chiplet_zerocheck_proofs, bin_cfg)
         + enc_size(&proof.chiplet_logup_aux, bin_cfg)
-        + enc_size(&proof.chiplet_eval_proofs, bin_cfg)
+        + enc_size(&proof.chiplet_point_evaluations, bin_cfg)
         + pad_root_sz
         + outer_sz;
 

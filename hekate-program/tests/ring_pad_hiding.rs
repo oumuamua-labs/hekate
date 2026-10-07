@@ -40,41 +40,52 @@ fn pad_contribution_to_ring_target_is_horner_delta() {
 
     let entries = expander.expansion_entries();
     let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
-    let total = 2 * plan.total_claims();
 
     let mut state = 0x0101_0202_0303_0404_0505_0606_0707_0808u128;
 
-    let claims: Vec<K> = (0..total).map(|_| next(&mut state)).collect();
-    let pad: Vec<K> = (0..total).map(|_| next(&mut state)).collect();
-    let masked: Vec<K> = claims.iter().zip(&pad).map(|(c, h)| *c + *h).collect();
+    for split in [4, 5] {
+        let at = plan.at_split(4, split);
+        let total = 2 * at.plan.total_claims();
 
-    let eta = next(&mut state);
-    let r_mix: Vec<K> = (0..7).map(|_| next(&mut state)).collect();
+        let claims: Vec<K> = (0..total).map(|_| next(&mut state)).collect();
+        let pad: Vec<K> = (0..total).map(|_| next(&mut state)).collect();
+        let masked: Vec<K> = claims.iter().zip(&pad).map(|(c, h)| *c + *h).collect();
 
-    let to_flat = |v: &[K]| -> Vec<Flat<K>> { v.iter().map(|x| x.to_hardware()).collect() };
+        let eta = next(&mut state);
+        let rho: Vec<K> = (0..at.pack_vars()).map(|_| next(&mut state)).collect();
+        let r_mix: Vec<K> = (0..7).map(|_| next(&mut state)).collect();
 
-    let t_masked = ring_target::<K>(&plan, &to_flat(&masked), eta, &r_mix, true);
-    let t_plain = ring_target::<K>(&plan, &to_flat(&claims), eta, &r_mix, true);
-    let expected = (t_masked - t_plain).to_hardware();
+        let to_flat = |v: &[K]| -> Vec<Flat<K>> { v.iter().map(|x| x.to_hardware()).collect() };
 
-    let mut whole_part = Flat::from_raw(K::ZERO);
-    let mut ring: Vec<(u32, Flat<K>)> = Vec::new();
-    let mut ring_pad: Vec<Flat<K>> = Vec::new();
+        let t_masked = ring_target::<K>(&at, &to_flat(&masked), eta, &rho, &r_mix, true).unwrap();
+        let t_plain = ring_target::<K>(&at, &to_flat(&claims), eta, &rho, &r_mix, true).unwrap();
+        let expected = (t_masked - t_plain).to_hardware();
 
-    for (c, (is_ring, weight)) in claim_weights::<K>(&plan, eta, true).into_iter().enumerate() {
-        let h = pad[c].to_hardware();
+        let mut whole_part = Flat::from_raw(K::ZERO);
+        let mut ring: Vec<(u32, Flat<K>)> = Vec::new();
+        let mut ring_pad: Vec<Flat<K>> = Vec::new();
 
-        match is_ring {
-            true => {
-                ring.push((c as u32, weight.to_hardware()));
-                ring_pad.push(h);
+        let weights = claim_weights::<K>(&at, eta, &rho, true).unwrap();
+
+        for (c, (is_ring, weight)) in weights.into_iter().enumerate() {
+            let h = pad[c].to_hardware();
+
+            match is_ring {
+                true => {
+                    ring.push((c as u32, weight.to_hardware()));
+                    ring_pad.push(h);
+                }
+                false => whole_part += weight.to_hardware() * h,
             }
-            false => whole_part += weight.to_hardware() * h,
         }
+
+        let mu = linearized_coeffs(&eq_tensor_b(&r_mix));
+        let gadget = RingGadget::new(ring, mu, 0);
+
+        assert_eq!(
+            whole_part + gadget.delta(&ring_pad),
+            expected,
+            "split {split}"
+        );
     }
-
-    let mu = linearized_coeffs(&eq_tensor_b(&r_mix));
-    let gadget = RingGadget::new(ring, mu, 0);
-
-    assert_eq!(whole_part + gadget.delta(&ring_pad), expected);
 }

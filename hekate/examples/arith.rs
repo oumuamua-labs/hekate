@@ -29,8 +29,7 @@ type H = DefaultHasher;
 // =================================================================
 // 1. INLINED ARITHMETIC CHIPLET - SINGLE TRACE
 //
-// 1:1 op:row makes a separate chiplet trace wasteful
-// (2× commit, 2× ZeroCheck, 2× eval, plus a LogUp bus).
+// 1:1 op:row makes a separate chiplet trace wasteful.
 // Reuse the arithmetic chiplet's columns + AIR directly
 // as the program's trace and rely on the registered
 // IntArith kernel via `inline_chiplet_kernels`.
