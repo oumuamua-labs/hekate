@@ -26,7 +26,7 @@ pub type SumcheckVerifyResult<F> = errors::Result<Option<(Vec<Flat<F>>, Flat<F>)
 /// # Security & Protocol Mechanics
 /// 1. **Degree Enforcement:** Strictly validates
 ///    that each round polynomial provides exactly
-///    `degree + 1` evaluations. This is a critical
+///    `degree` evaluations. This is a critical
 ///    security boundary to prevent degree-inflation
 ///    attacks where a malicious prover might attempt
 ///    to hide forged claims in higher-degree terms.

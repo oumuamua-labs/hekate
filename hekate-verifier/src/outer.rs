@@ -20,7 +20,8 @@ use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, TowerField};
 use hekate_program::outer::{
-    OuterLayout, OuterStatement, TableRecord, linear_tensor_vars, linear_weights, statement_rows,
+    EvalRecord, OuterLayout, OuterStatement, TableRecord, linear_tensor_vars, linear_weights,
+    statement_rows,
 };
 use tracing::{instrument, trace_span, warn};
 
@@ -38,10 +39,9 @@ impl PadCursor {
     }
 }
 
-/// The zk-Ligero segment: geometry from the statement,
-/// FS challenges after `aux_root`, both oracles opened
-/// at the same columns, and the three Ligero tests
-/// over the assembled rows.
+/// The zk-Ligero segment: geometry from the statement, FS challenges
+/// after `aux_root`, both oracles opened at the same columns,
+/// and the three Ligero tests over the assembled rows.
 #[instrument(skip_all, level = "trace", name = "verify_outer")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_outer<F, H>(
@@ -50,6 +50,7 @@ pub fn verify_outer<F, H>(
     config: &Config,
     statement: OuterStatement,
     records: &[TableRecord<'_, F>],
+    eval: &EvalRecord<F>,
     cursor: PadCursor,
     scratch: &mut VerifierScratch<F>,
 ) -> errors::Result<bool>
@@ -90,7 +91,7 @@ where
 
     transcript.append_field_list(b"outer_w", &outer.interleaved);
 
-    let rows = statement_rows(records, &statement)?;
+    let rows = statement_rows(records, eval, &statement)?;
     let lin_vars = linear_tensor_vars(rows);
 
     let r_lin: Vec<F> = trace_span!("r_lin", rows, lin_vars).in_scope(|| {
@@ -173,7 +174,7 @@ where
 
         let linear = || -> errors::Result<bool> {
             let batch = trace_span!("linear_weights")
-                .in_scope(|| linear_weights(&layout, &statement, records, &r_lin))?;
+                .in_scope(|| linear_weights(&layout, &statement, records, eval, &r_lin))?;
             let encoded = trace_span!("encode_weights", rows = batch.rows.len())
                 .in_scope(|| weights_at_columns(encoder, &batch.weights, &columns))?;
 

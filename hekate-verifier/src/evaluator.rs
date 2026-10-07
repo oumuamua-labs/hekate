@@ -7,9 +7,9 @@ use crate::sumcheck::verify;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use hekate_core::config::{Config, FoldShape, INV_RATE};
+use hekate_core::config::{Config, INV_RATE};
 use hekate_core::errors;
-use hekate_core::proofs::{BrakedownCommitment, EvalBatchProof};
+use hekate_core::proofs::EvalBatchProof;
 use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::{ColumnType, TraceCompatibleField};
 use hekate_crypto::Hasher;
@@ -17,7 +17,7 @@ use hekate_crypto::transcript::Transcript;
 use hekate_math::{
     BinaryFieldExtras, Block128, CantorBasis, Flat, HardwareField, PackableField, TowerField,
 };
-use hekate_program::expander::{RingSwitchPlan, eq_tensor_b, ring_target};
+use hekate_program::expander::{PoolLayout, eq_tensor_b, ring_target};
 use tracing::{debug, instrument, trace_span, warn};
 
 #[cfg(feature = "parallel")]
@@ -54,11 +54,14 @@ impl<'a, F: HardwareField> Claims<'a, F> {
     }
 }
 
-pub struct EvalVerifyContext<'a, F: HardwareField> {
+pub struct TableClaims<'a, F> {
     pub point: &'a [Flat<F>],
     pub claims: &'a Claims<'a, F>,
-    pub num_vars: usize,
-    pub ring_plan: &'a RingSwitchPlan,
+}
+
+pub struct EvalVerifyContext<'a, F: HardwareField> {
+    pub pool: &'a PoolLayout,
+    pub tables: &'a [TableClaims<'a, F>],
 
     /// `true` when the claims carry a next-row half,
     /// proven through the K_P / A_next weights.
@@ -67,15 +70,13 @@ pub struct EvalVerifyContext<'a, F: HardwareField> {
     /// Masked claims: the ring-switch final
     /// check is left to the outer argument.
     pub masked: bool,
-
-    /// The table's `h` tree, opened alongside the trace.
-    pub h_commitment: Option<&'a BrakedownCommitment>,
 }
 
 /// What the outer argument needs from an accepted
 /// eval sumcheck: `claim_n = fin` on plaintext values.
 pub struct EvalOutcome<F: HardwareField> {
     pub eta: F,
+    pub rho: Vec<F>,
     pub r_mix: Vec<Block128>,
     pub challenges: Vec<Flat<F>>,
     pub claim_masked: Flat<F>,
@@ -86,16 +87,13 @@ impl<F, H: Hasher> EvaluatorVerifier<F, H>
 where
     F: HardwareField + PackableField + TraceCompatibleField,
 {
-    /// Verifies the ring-switch TensorPCS evaluation argument,
-    /// binding the claimed virtual evals to the base-only
-    /// Brakedown commitment. A degree-2 sumcheck reduces
-    /// `[A + η^U·A_next]·master_bit + [Eq + η^U·K_P]·master_whole`
-    /// to `r_final`; the final check pairs the transparent weight
-    /// evals at `r'` with the two master evaluations, which the
-    /// λ-line fold and the proximity test bind to the codewords.
+    /// Binds every pooled table's claimed virtual evals to
+    /// the two roots: one degree-2 sumcheck to `r`, each table's
+    /// masters pinned by the λ line and the proximity test.
     #[instrument(skip_all, level = "trace", name = "Evaluator::verify")]
     pub fn verify(
-        commitment: &BrakedownCommitment,
+        trace_root: &[u8; 32],
+        h_root: Option<&[u8; 32]>,
         proof: &EvalBatchProof<F>,
         transcript: &mut Transcript<H>,
         ctx: EvalVerifyContext<'_, F>,
@@ -104,27 +102,33 @@ where
     where
         F: BinaryFieldExtras + Into<Block128> + From<u128>,
     {
-        let point = ctx.point;
-        let claims = ctx.claims.flat();
-        let num_vars = ctx.num_vars;
-        let plan = ctx.ring_plan;
+        let pool = ctx.pool;
         let shifted_claims = ctx.shifted_claims;
         let claim_halves = if shifted_claims { 2 } else { 1 };
-        let zero = Flat::from_raw(F::ZERO);
 
-        if claims.len() != plan.total_claims() * claim_halves {
+        let zero = Flat::from_raw(F::ZERO);
+        let one = Flat::from_raw(F::ONE);
+
+        if ctx.tables.len() != pool.tables.len() {
             return Err(errors::Error::Protocol {
                 protocol: "evaluator_verifier",
-                message: "ring-switch plan claim count does not match the claimed evaluations",
+                message: "one claim set per pooled table is required",
             });
         }
 
-        let h_tree = match (
-            ctx.h_commitment,
-            proof.h_ldt_proof.as_ref(),
-            plan.h_cols > 0,
-        ) {
-            (Some(h_comm), Some(h_opening), true) => Some((h_comm, h_opening)),
+        for (table, layout) in ctx.tables.iter().zip(&pool.tables) {
+            if table.claims.flat().len() != layout.plan.total_claims() * claim_halves {
+                return Err(errors::Error::Protocol {
+                    protocol: "evaluator_verifier",
+                    message: "ring-switch plan claim count does not match the claimed evaluations",
+                });
+            }
+        }
+
+        let has_h = pool.tables.iter().any(|t| t.plan.h_cols > 0);
+
+        let h_tree = match (h_root, proof.h_ldt_proof.as_ref(), has_h) {
+            (Some(root), Some(h_opening), true) => Some((root, h_opening)),
             (None, None, false) => None,
             _ => {
                 return Err(errors::Error::Protocol {
@@ -135,12 +139,16 @@ where
         };
 
         transcript.append_message(b"eval_batch_start", b"");
-        transcript.append_field_each(b"claimed_val", ctx.claims.canonical());
 
         let eta_tower = transcript.challenge_field::<F>(b"eval_eta")?;
         let eta = eta_tower.to_hardware();
 
-        let has_ring = plan.has_ring();
+        let mut rho = Vec::with_capacity(pool.rho_vars());
+        for _ in 0..pool.rho_vars() {
+            rho.push(transcript.challenge_field::<F>(b"eval_rho")?);
+        }
+
+        let has_ring = pool.tables.iter().any(|t| t.plan.has_ring());
 
         if has_ring && F::BITS != NBITS {
             return Err(errors::Error::Protocol {
@@ -164,11 +172,26 @@ where
             Vec::new()
         };
 
-        let target = ring_target::<F>(plan, claims, eta_tower, &r_mix, shifted_claims);
+        let mut target = Block128::ZERO;
+        for (table, layout) in ctx.tables.iter().zip(&pool.tables) {
+            let rho = &rho[..layout.pack_vars()];
+
+            target += ring_target::<F>(
+                layout,
+                table.claims.flat(),
+                eta_tower,
+                rho,
+                &r_mix,
+                shifted_claims,
+            )?;
+        }
+
         let target_flat = F::from(target.0).to_hardware();
+        let num_vars = pool.num_vars();
 
         let sc_res = verify(num_vars, 2, target_flat, &proof.sumcheck_proof, transcript)?;
-        let (r_row, sumcheck_final_eval) = match sc_res {
+
+        let (r, sumcheck_final_eval) = match sc_res {
             Some(res) => res,
             None => {
                 warn!("Sumcheck failed");
@@ -176,65 +199,53 @@ where
             }
         };
 
-        // Both master evaluations precede λ
-        let line = match (proof.master_evals.as_ref(), has_ring) {
-            (Some(evals), true) => {
-                transcript.append_field(b"eval_master_whole", evals.whole);
-                transcript.append_field(b"eval_master_ring", evals.ring);
+        if proof.masters.len() != pool.num_masters() {
+            return Err(errors::Error::Protocol {
+                protocol: "evaluator_verifier",
+                message: "one master evaluation per pooled master is required",
+            });
+        }
 
-                let lambda = transcript
-                    .challenge_field::<F>(b"eval_lambda")?
-                    .to_hardware();
+        // Every master evaluation precedes λ
+        transcript.append_field_list(b"eval_masters", &proof.masters);
 
-                Some((evals.whole.to_hardware(), evals.ring.to_hardware(), lambda))
-            }
-            (None, false) => None,
-            _ => {
-                return Err(errors::Error::Protocol {
-                    protocol: "evaluator_verifier",
-                    message: "master evaluations present iff the plan carries a ring unit",
-                });
-            }
+        let lambda = match proof.masters.len() > 1 {
+            true => transcript
+                .challenge_field::<F>(b"eval_lambda")?
+                .to_hardware(),
+            false => one,
         };
+
+        let masters: Vec<Flat<F>> = proof.masters.iter().map(|m| m.to_hardware()).collect();
 
         let q = &proof.tensor_vec;
 
         transcript.append_field_list(b"tensor_q", q);
 
         let field_bits = F::BITS;
-        let split_vars = plan.split_vars(num_vars, field_bits, config);
-
-        let grid_cols = 1 << split_vars;
-        let grid_rows = 1 << (num_vars - split_vars);
+        let split_vars = pool.split_vars;
+        let grid_cols = pool.grid_cols();
         let geom = config.table_geom(grid_cols);
         let encoded_width = geom.encoded_width;
-        let phys_row_bytes = plan.leaf_row_bytes();
-        let h_row_bytes = plan.h_leaf_row_bytes();
-
-        let shape = FoldShape {
-            grid_cols,
-            grid_rows,
-            units: plan.num_units,
-        };
+        let shape = pool.fold_shape();
 
         debug!(
             num_vars,
             split_vars,
+            tables = pool.tables.len(),
             grid_cols,
             encoded_width,
             support = geom.support_size,
-            row_bytes = phys_row_bytes,
-            h_row_bytes,
             fractional = encoded_width == grid_cols * INV_RATE,
-            "table geometry"
+            "pool geometry"
         );
 
         debug!(
             bits = config.estimated_security_bits(field_bits, shape),
             ldt_query = config.security_metrics(field_bits, shape).ldt_bits,
             fold_gap = config.proximity_gap_bits(field_bits, shape),
-            units = plan.num_units,
-            "table security"
+            units = shape.units,
+            "pool security"
         );
 
         if grid_cols + geom.support_size > encoded_width {
@@ -253,43 +264,78 @@ where
 
         let q_flat: Vec<Flat<F>> = q.iter().map(|v| v.to_hardware()).collect();
 
-        let r_col_low = &r_row[..split_vars];
-        let tensor_col = build_tensor_table::<F>(r_col_low);
+        let tensor_col = build_tensor_table::<F>(&r[..split_vars]);
 
         let mut q_eval = zero;
         for (&val, &t) in q_flat.iter().take(grid_cols).zip(&tensor_col) {
             q_eval += val * t;
         }
 
-        let (master_whole_eval, master_bit_eval) = match line {
-            Some((whole, ring, lambda)) => {
-                if q_eval != ring + lambda * whole {
-                    warn!("line fold disagrees with the master evaluations");
-                    return Ok(None);
-                }
+        let mut lambda_pows = Vec::with_capacity(masters.len());
+        let mut line = zero;
+        let mut lambda_pow = one;
 
-                (whole, ring)
-            }
-            None => (q_eval, zero),
-        };
+        for &master in &masters {
+            lambda_pows.push(lambda_pow);
+            line += lambda_pow * master;
+            lambda_pow *= lambda;
+        }
 
-        let (coeff_bit, coeff_whole, eta_shift) = plan.column_coeffs::<F>(eta);
+        if q_eval != line {
+            warn!("line fold disagrees with the master evaluations");
+            return Ok(None);
+        }
 
-        let coeff_line = match line {
-            Some((_, _, lambda)) => coeff_bit
+        let mut coeff_lines: Vec<Vec<Flat<F>>> = Vec::with_capacity(pool.tables.len());
+        let mut fin = zero;
+        let mut k = 0;
+
+        for (table, layout) in ctx.tables.iter().zip(&pool.tables) {
+            let ring = layout.plan.has_ring();
+            let n = layout.num_vars;
+
+            let (lambda_bit, master_bit) = match ring {
+                true => (lambda_pows[k], masters[k]),
+                false => (zero, zero),
+            };
+
+            k += usize::from(ring);
+
+            let (lambda_whole, master_whole) = (lambda_pows[k], masters[k]);
+
+            k += 1;
+
+            let (coeff_bit, coeff_whole, eta_shift) = layout.slot_coeffs::<F>(eta);
+
+            coeff_lines.push(
+                coeff_bit
+                    .iter()
+                    .zip(&coeff_whole)
+                    .map(|(&bit, &whole)| lambda_bit * bit + lambda_whole * whole)
+                    .collect(),
+            );
+
+            // The weight evals at r' are transparent; the two
+            // master evals are bound by the proximity check below.
+            let (whole_weight, ring_weight) = master_weights_at::<F>(
+                table.point,
+                &r[..n],
+                &r_mix,
+                eta_shift,
+                ring,
+                shifted_claims,
+            );
+
+            let rho_table: Vec<Flat<F>> = rho[..layout.pack_vars()]
                 .iter()
-                .zip(&coeff_whole)
-                .map(|(&bit, &whole)| bit + lambda * whole)
-                .collect(),
-            None => coeff_whole,
-        };
+                .map(|x| x.to_hardware())
+                .collect();
 
-        // The weight evals at r' are transparent; the two
-        // master evals are bound by the proximity check below.
-        let (whole_weight_at_r, ring_weight_at_r) =
-            master_weights_at::<F>(point, &r_row, &r_mix, eta_shift, has_ring, shifted_claims);
+            let blocks =
+                TensorProduct::evaluate_eq_slice(&rho_table, &r[n..n + layout.pack_vars()]);
 
-        let fin = ring_weight_at_r * master_bit_eval + whole_weight_at_r * master_whole_eval;
+            fin += blocks * (ring_weight * master_bit + whole_weight * master_whole);
+        }
 
         if !ctx.masked && sumcheck_final_eval != fin {
             warn!("ring-switch final check failed");
@@ -299,14 +345,30 @@ where
         transcript.append_message(b"eval_batch_ldt", b"");
 
         let queries = BrakedownVerifier::<F, H>::draw_queries(transcript, config, split_vars)?;
-        let opened_columns =
-            BrakedownVerifier::<F, H>::verify_opening(commitment, &proof.ldt_proof, &queries)?;
+
+        let trace_parts: Vec<usize> = pool
+            .tables
+            .iter()
+            .map(|t| t.grid_rows() * t.leaf_row_bytes())
+            .collect();
+
+        let opened_columns = BrakedownVerifier::<F, H>::verify_opening(
+            trace_root,
+            &proof.ldt_proof,
+            &queries,
+            &trace_parts,
+        )?;
+
+        let h_parts: Vec<usize> = pool
+            .tables
+            .iter()
+            .filter(|t| t.h_slots > 0)
+            .map(|t| t.grid_rows() * t.h_leaf_row_bytes())
+            .collect();
 
         let h_opened = match h_tree {
-            Some((h_commitment, h_opening)) => Some(BrakedownVerifier::<F, H>::verify_opening(
-                h_commitment,
-                h_opening,
-                &queries,
+            Some((root, h_opening)) => Some(BrakedownVerifier::<F, H>::verify_opening(
+                root, h_opening, &queries, &h_parts,
             )?),
             None => None,
         };
@@ -317,57 +379,66 @@ where
 
         let slot_map = &queries.slot_map;
         let random_indices = &queries.indices;
-        let h_rs = vec![ColumnType::B128; plan.h_cols];
 
-        let r_row_high = &r_row[split_vars..];
-        let tensor_row = TensorProduct::<F>::new(r_row_high.to_vec());
+        let h_rs: Vec<Vec<ColumnType>> = pool
+            .tables
+            .iter()
+            .map(|t| vec![ColumnType::B128; t.h_slots])
+            .collect();
 
-        let mut tensor_row_evals = Vec::with_capacity(grid_rows);
-        for r in 0..grid_rows {
-            tensor_row_evals.push(tensor_row.evaluate_at_index(r));
-        }
+        let tensor_row_evals = build_tensor_table::<F>(&r[split_vars..]);
 
-        let num_fold_cols = plan.phys_rs.len() + plan.h_cols;
+        let num_fold_cols = pool
+            .tables
+            .iter()
+            .map(|t| t.slot_rs.len() + t.h_slots)
+            .max()
+            .unwrap_or(0);
 
-        // Re-derive the folded opening from the physical columns in the
+        // Re-derive the folded opening from the slots in the
         // opened leaf; RS commutes with a whole-column fold, this must
         // match the RS re-encoding of the prover's committed q vector.
         let check_query =
             |q_idx: usize, col_idx: usize, phys_row: &mut Vec<Flat<F>>| -> errors::Result<bool> {
-                let col_bytes = &opened_columns[slot_map[q_idx]];
-
-                if col_bytes.len() != grid_rows * phys_row_bytes {
-                    warn!("opened column length does not match the physical row layout");
-                    return Ok(false);
-                }
-
-                let h_bytes = h_opened.map(|h| &h[slot_map[q_idx]]);
-
-                if h_bytes.is_some_and(|h| h.len() != grid_rows * h_row_bytes) {
-                    warn!("opened h column length does not match the h row layout");
-                    return Ok(false);
-                }
+                let col_bytes = opened_columns[slot_map[q_idx]].as_slice();
+                let h_bytes = h_opened.map(|h| h[slot_map[q_idx]].as_slice());
 
                 let mut q_val = zero;
+                let mut at = 0;
+                let mut h_at = 0;
 
-                for r in 0..grid_rows {
-                    let row_data = &col_bytes[r * phys_row_bytes..(r + 1) * phys_row_bytes];
+                for ((layout, coeff_line), h_rs) in pool.tables.iter().zip(&coeff_lines).zip(&h_rs)
+                {
+                    let row_bytes = layout.leaf_row_bytes();
+                    let h_row_bytes = layout.h_leaf_row_bytes();
+                    let rows = layout.grid_rows();
 
-                    phys_row.clear();
+                    for (g, &eq_g) in tensor_row_evals.iter().take(rows).enumerate() {
+                        let row = at + g * row_bytes;
 
-                    parse_physical_row::<F>(row_data, &plan.phys_rs, phys_row);
+                        phys_row.clear();
 
-                    if let Some(h) = h_bytes {
-                        let h_row = &h[r * h_row_bytes..(r + 1) * h_row_bytes];
-                        parse_physical_row::<F>(h_row, &h_rs, phys_row);
+                        parse_physical_row::<F>(
+                            &col_bytes[row..row + row_bytes],
+                            &layout.slot_rs,
+                            phys_row,
+                        );
+
+                        if let Some(h) = h_bytes {
+                            let h_row = h_at + g * h_row_bytes;
+                            parse_physical_row::<F>(&h[h_row..h_row + h_row_bytes], h_rs, phys_row);
+                        }
+
+                        let mut fold = zero;
+                        for (&base, &coeff) in phys_row.iter().zip(coeff_line) {
+                            fold += base * coeff;
+                        }
+
+                        q_val += fold * eq_g;
                     }
 
-                    let mut fold = zero;
-                    for (&base, &coeff) in phys_row.iter().zip(&coeff_line) {
-                        fold += base * coeff;
-                    }
-
-                    q_val += fold * tensor_row_evals[r];
+                    at += rows * row_bytes;
+                    h_at += rows * h_row_bytes;
                 }
 
                 let ok = q_val == q_encoded[slot_map[q_idx]];
@@ -392,7 +463,13 @@ where
 
         #[cfg(feature = "parallel")]
         let all_matched = {
-            let proximity_work = config.num_queries * grid_rows * 2 * num_fold_cols;
+            let fold_cells: usize = pool
+                .tables
+                .iter()
+                .map(|t| t.grid_rows() * (t.slot_rs.len() + t.h_slots))
+                .sum();
+
+            let proximity_work = config.num_queries * 2 * fold_cells;
 
             if proximity_work >= PARALLEL_PROXIMITY_THRESHOLD {
                 use rayon::prelude::*;
@@ -419,8 +496,9 @@ where
 
         Ok(Some(EvalOutcome {
             eta: eta_tower,
+            rho,
             r_mix,
-            challenges: r_row,
+            challenges: r,
             claim_masked: sumcheck_final_eval,
             fin,
         }))

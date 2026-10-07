@@ -11,9 +11,9 @@ use hekate_core::trace::ColumnType;
 use hekate_math::{BinaryFieldExtras, HardwareField, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::expander::RingSwitchPlan;
-use hekate_program::outer::{TableParts, TableShape};
+use hekate_program::outer::{TableParts, TableShape, table_plan};
 use hekate_program::permutation::validate_fixed_selectors;
-use hekate_program::{Air, Program, digest};
+use hekate_program::{Program, digest};
 
 /// What verifying `program` under one `Config` needs before
 /// any proof: chiplet definitions, table parts, ring-switch
@@ -42,30 +42,15 @@ impl<F: TowerField> PreparedProgram<F> {
             validate_fixed_selectors(&def.permutation_checks, def.pins())?;
         }
 
-        let main_entries = program.virtual_expander().map(|e| e.expansion_entries());
-        let main_plan = RingSwitchPlan::new(
-            program.column_layout(),
-            main_entries.as_deref(),
-            config.blind_units(),
-            main.specs.len(),
-        )?;
-
-        let main_shape = TableShape::from_air(program, 0, &main.statics())?;
+        let main_plan = table_plan(program, main.specs.len(), config)?;
+        let main_shape = TableShape::from_air(program, &main.statics())?;
 
         let mut chiplet_plans = Vec::with_capacity(chiplets.len());
         let mut chiplet_shapes = Vec::with_capacity(chiplets.len());
 
         for def in &chiplets {
-            let entries = Air::<F>::virtual_expander(def).map(|e| e.expansion_entries());
-
-            chiplet_plans.push(RingSwitchPlan::new(
-                Air::<F>::column_layout(def),
-                entries.as_deref(),
-                config.blind_units(),
-                def.permutation_checks.len(),
-            )?);
-
-            chiplet_shapes.push(TableShape::from_air(def, 0, &def.statics())?);
+            chiplet_plans.push(table_plan(def, def.permutation_checks.len(), config)?);
+            chiplet_shapes.push(TableShape::from_air(def, &def.statics())?);
         }
 
         let program_id = digest::program_id_of(program, &chiplets, &program.inline_chiplets()?);
