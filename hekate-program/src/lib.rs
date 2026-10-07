@@ -2,6 +2,25 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+//! The circuit DSL of Hekate, the Rust zero-knowledge proof engine.
+//!
+//! A [`circuit::Circuit`] declares a table's columns with [`define_columns!`],
+//! relates its rows with constraints, pins cells and fixed columns,
+//! publishes public inputs and calls chiplets over LogUp buses.
+//! It compiles into a [`Program`]: the prover runs it on a [`ProgramWitness`],
+//! and the verifier checks it against a [`ProgramInstance`].
+//! [`digest::program_id`] hashes the program for the verifier to pin.
+//!
+//! - [Your First ZK Program][first]
+//! - [AIR Constraints][air]
+//! - [LogUp Buses][logup]
+//! - [Cryptographic Chiplets][chiplets]
+//!
+//! [first]: https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program
+//! [air]: https://oumuamua.dev/hekate/docs/basics/air-constraints
+//! [logup]: https://oumuamua.dev/hekate/docs/basics/logup-buses
+//! [chiplets]: https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;

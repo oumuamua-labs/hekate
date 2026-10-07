@@ -2,6 +2,18 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+//! SHA-256 compression chiplet for Hekate, the Rust zero-knowledge proof engine.
+//!
+//! [`Sha256Chiplet`] proves the 64 rounds of FIPS 180-4 §6.2.2
+//! at 1, 2, 4, 8 or 16 rounds per row. [`CpuSha256Block`] places
+//! the host's side in the caller's table: the request and the
+//! feed-forward add. [`pad_message`] splits a message into padded
+//! blocks, and [`compress`] computes one compression natively.
+//!
+//! - [SHA-256][sha2]: what the proof states, and padding and chaining
+//!
+//! [sha2]: https://oumuamua.dev/primitives/hashing/sha2
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
