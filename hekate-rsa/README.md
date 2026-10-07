@@ -17,7 +17,7 @@ The host table chains SHA-256 one block per row and requests two chiplets over t
 
 ## ⚠️ Security Warning
 
-This crate has not been audited and may contain bugs and security flaws.
+This crate has not been independently audited and may contain bugs and security flaws.
 
 ## Usage
 

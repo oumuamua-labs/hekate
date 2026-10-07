@@ -14,7 +14,7 @@ only during evaluation.
 
 ## ⚠️ Security Warning
 
-This crate has not been audited and may contain bugs and security flaws.
+This crate has not been independently audited and may contain bugs and security flaws.
 
 USE AT YOUR OWN RISK!
 

@@ -14,7 +14,7 @@ and chaining belong to the host program: `pad_message` pads in host code, your h
 
 ## ⚠️ Security Warning
 
-This crate has not been audited and may contain bugs and security flaws.
+This crate has not been independently audited and may contain bugs and security flaws.
 
 ## Usage
 
