@@ -9,13 +9,14 @@ use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, Flat, HardwareField, TowerField};
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{IntoTraceColumn, Trace, TraceBuilder};
-use hekate_core::utils::compute_split_vars;
 use hekate_math::{Bit, Block32};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use hekate_program::digest::program_id;
+use hekate_program::expander::PoolLayout;
+use hekate_program::outer::table_plan;
 use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
@@ -153,14 +154,9 @@ fn noise_entropy_inspection() {
     // Calculate grid_rows based on the
     // asymmetric grid formula used in Prover.
     let grid_rows = {
-        let split_vars = compute_split_vars(
-            num_vars,
-            config.num_queries,
-            config.ldt_support_size,
-            bytes_per_row,
-        );
+        let plan = table_plan(&air, air.permutation_checks().len(), &config).unwrap();
 
-        1 << (num_vars - split_vars)
+        PoolLayout::new(&[(&plan, num_vars)], F::BITS, &config).grid_rows()
     };
 
     for col_data in columns {
@@ -273,7 +269,7 @@ fn seed_nondeterminism() {
     .unwrap();
 
     assert_ne!(
-        proof_a.trace_commitment.root, proof_b.trace_commitment.root,
+        proof_a.trace_root, proof_b.trace_root,
         "Merkle root must depend on blinding seed"
     );
 
@@ -706,9 +702,9 @@ fn algebraic_and_evaluation_perfect_hiding() {
     // GUARANTEE 3:
     // Seed dependence only:
     // r_final differs across seeds.
-    let eval_no_zk = &p_no_zk.eval_proof.point_evaluation.1;
-    let eval_zk_a = &p_zk_a.eval_proof.point_evaluation.1;
-    let eval_zk_b = &p_zk_b.eval_proof.point_evaluation.1;
+    let eval_no_zk = &p_no_zk.main_point_evaluation.1;
+    let eval_zk_a = &p_zk_a.main_point_evaluation.1;
+    let eval_zk_b = &p_zk_b.main_point_evaluation.1;
 
     assert_ne!(eval_no_zk, eval_zk_a, "ZK failed to hide trace evaluations");
     assert_ne!(eval_zk_a, eval_zk_b, "ZK failed to hide trace evaluations");
@@ -787,8 +783,8 @@ fn algebraic_and_evaluation_perfect_hiding() {
         "K=0/ldt>0: round polys must diverge across seeds"
     );
 
-    let eval_only_ldt_a = &p_only_ldt_a.eval_proof.point_evaluation.1;
-    let eval_only_ldt_b = &p_only_ldt_b.eval_proof.point_evaluation.1;
+    let eval_only_ldt_a = &p_only_ldt_a.main_point_evaluation.1;
+    let eval_only_ldt_b = &p_only_ldt_b.main_point_evaluation.1;
 
     assert_ne!(
         eval_no_zk, eval_only_ldt_a,
@@ -837,7 +833,7 @@ fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<[(F, F); 2]> {
         .unwrap()
     );
 
-    let (r_final, claims) = &proof.eval_proof.point_evaluation;
+    let (r_final, claims) = &proof.main_point_evaluation;
     let num_cols = air.num_columns();
     let k = config.blind_units();
 
@@ -889,11 +885,9 @@ fn true_zk_memory_isolation() {
     //   generate a proof, the magic hardware-basis
     //   bytes must NOT appear in main LDT openings.
     //
-    //   STAGE B (zero blinding negative control):
-    //   same construction with both blinding factors
-    //   at zero, the magic hardware-basis bytes MUST
-    //   appear at least once - otherwise the positive
-    //   case is passing vacuously.
+    //   STAGE B (positive control):
+    //   a needle planted in an opened column
+    //   must be found by the same scan.
 
     let num_vars = 4;
     let num_rows = 1 << num_vars;
@@ -1151,12 +1145,12 @@ fn noise_shift_sign_forgery() {
     // Swap the base noise value and the next-row
     // noise value. This "disconnects" the algebraic
     // claim from the physical Merkle tree data.
-    let expected_trace_len = proof.eval_proof.point_evaluation.1.len() / 2;
-    let base_noise = proof.eval_proof.point_evaluation.1[noise_col_idx];
-    let next_noise = proof.eval_proof.point_evaluation.1[expected_trace_len + noise_col_idx];
+    let expected_trace_len = proof.main_point_evaluation.1.len() / 2;
+    let base_noise = proof.main_point_evaluation.1[noise_col_idx];
+    let next_noise = proof.main_point_evaluation.1[expected_trace_len + noise_col_idx];
 
-    proof.eval_proof.point_evaluation.1[noise_col_idx] = next_noise;
-    proof.eval_proof.point_evaluation.1[expected_trace_len + noise_col_idx] = base_noise;
+    proof.main_point_evaluation.1[noise_col_idx] = next_noise;
+    proof.main_point_evaluation.1[expected_trace_len + noise_col_idx] = base_noise;
 
     // 2. Verify the forged proof
     let mut verifier_transcript = Transcript::<H>::new(b"ZK_NoiseShift");
@@ -1433,22 +1427,14 @@ fn chiplet_pipeline_witness_isolation() {
     //   ALL chiplet LDT opened bytes, the
     //   magic sequence must NOT appear.
     //
-    //   STAGE B (zero blinding negative control):
-    //   same construction with all blinding
-    //   factors at zero, the magic sequence
-    //   MUST appear at least once. This proves
-    //   assertion has bite, without the negative,
-    //   "bytes don't appear" could be coincidence
-    //   from matrix XOR cancellation.
+    //   STAGE B (positive control):
+    //   a needle planted in an opened column
+    //   must be found by the same scan.
     //
     // What this catches end-to-end:
-    // - chiplet pipeline forgets to
-    //   apply LDT noise injection.
-    // - chiplet path silently overrides
-    //   support_size.
     // - any code change that lets
     //   raw chiplet bytes reach:
-    //   `chiplet_eval_proofs[..].ldt_proof.opened_columns`
+    //   `eval_proof.ldt_proof.opened_columns`
 
     const MAGIC: u32 = 0xDEAD_BEEF;
 
@@ -1486,21 +1472,13 @@ fn chiplet_pipeline_witness_isolation() {
 
     let seed = [0xA5u8; 32];
 
-    // Local helper:
-    // scan every byte of every opened column
-    // for both chiplets and report whether
-    // the magic needle appears anywhere.
-    let scan_chiplet_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
-        for c_idx in 0..proof.chiplet_eval_proofs.len() {
-            let ldt = &proof.chiplet_eval_proofs[c_idx].ldt_proof;
-            for col in &ldt.opened_columns {
-                if col.windows(needle.len()).any(|w| w == needle) {
-                    return true;
-                }
-            }
-        }
-
-        false
+    let scan_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
+        proof
+            .eval_proof
+            .ldt_proof
+            .opened_columns
+            .iter()
+            .any(|col| col.windows(needle.len()).any(|w| w == needle))
     };
 
     // STAGE A
@@ -1539,7 +1517,7 @@ fn chiplet_pipeline_witness_isolation() {
         "ZK proof must verify",
     );
 
-    let leaked_zk = scan_chiplet_openings(&proof_zk);
+    let leaked_zk = scan_openings(&proof_zk);
     assert!(
         !leaked_zk,
         "STAGE A FAILURE: magic witness bytes 0x{MAGIC:08X} appeared in chiplet LDT openings",
@@ -1551,16 +1529,17 @@ fn chiplet_pipeline_witness_isolation() {
     let mut planted = proof_zk.clone();
 
     let target = planted
-        .chiplet_eval_proofs
+        .eval_proof
+        .ldt_proof
+        .opened_columns
         .iter_mut()
-        .flat_map(|ep| ep.ldt_proof.opened_columns.iter_mut())
         .find(|col| col.len() >= needle.len())
-        .expect("a chiplet opening wide enough to hold the needle");
+        .expect("opening wide enough to hold the needle");
 
     target[..needle.len()].copy_from_slice(&needle);
 
     assert!(
-        scan_chiplet_openings(&planted),
+        scan_openings(&planted),
         "positive control: a planted needle must be detected by the scan",
     );
 }

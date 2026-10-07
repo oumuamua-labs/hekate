@@ -196,19 +196,19 @@ fn transcript_binding_security_trace_root_changes_challenges() {
     .unwrap();
 
     assert_ne!(
-        proof_a.trace_commitment.root, proof_b.trace_commitment.root,
+        proof_a.trace_root, proof_b.trace_root,
         "Sanity: different configs must yield different trace roots"
     );
 
     let alpha_a = {
         let mut t = Transcript::<H>::new(b"BindingTest");
-        t.append_message(b"trace_root", &proof_a.trace_commitment.root);
+        t.append_message(b"trace_root", &proof_a.trace_root);
         t.challenge_field::<F>(b"alpha").unwrap()
     };
 
     let alpha_b = {
         let mut t = Transcript::<H>::new(b"BindingTest");
-        t.append_message(b"trace_root", &proof_b.trace_commitment.root);
+        t.append_message(b"trace_root", &proof_b.trace_root);
         t.challenge_field::<F>(b"alpha").unwrap()
     };
 

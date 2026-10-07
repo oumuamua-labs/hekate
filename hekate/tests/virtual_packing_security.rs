@@ -197,7 +197,7 @@ fn virtual_packing_eval_forgery_rejected() {
     assert!(ok, "baseline must verify");
 
     // Corrupt virtual bit column 17
-    let evals = &mut proof.chiplet_eval_proofs[0].point_evaluation.1;
+    let evals = &mut proof.chiplet_point_evaluations[0].1;
     assert!(evals.len() > 17);
     evals[17] += F::ONE;
 
@@ -220,10 +220,6 @@ fn virtual_packing_eval_forgery_rejected() {
 // NOT appear in chiplet LDT openings. The noise
 // generation path through parse_virtual_row must
 // mask the data.
-//
-// Stage B:
-// Without ZK, the magic bytes MUST appear
-// (control group validating the scan is reliable).
 // =========================================================
 
 #[test]
@@ -232,17 +228,13 @@ fn virtual_expansion_witness_isolation() {
     let seed = [0xBBu8; 32];
     let needle = Block32(MAGIC).to_hardware().into_raw().0.to_le_bytes();
 
-    let scan_chiplet_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
-        for c_idx in 0..proof.chiplet_eval_proofs.len() {
-            let ldt = &proof.chiplet_eval_proofs[c_idx].ldt_proof;
-            for col in &ldt.opened_columns {
-                if col.windows(needle.len()).any(|w| w == needle) {
-                    return true;
-                }
-            }
-        }
-
-        false
+    let scan_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
+        proof
+            .eval_proof
+            .ldt_proof
+            .opened_columns
+            .iter()
+            .any(|col| col.windows(needle.len()).any(|w| w == needle))
     };
 
     let config_zk = zk_config();
@@ -269,7 +261,7 @@ fn virtual_expansion_witness_isolation() {
     );
 
     assert!(
-        !scan_chiplet_openings(&proof_zk),
+        !scan_openings(&proof_zk),
         "ZK enabled but witness bytes leaked in chiplet LDT openings",
     );
 
@@ -278,16 +270,17 @@ fn virtual_expansion_witness_isolation() {
     let mut planted = proof_zk.clone();
 
     let target = planted
-        .chiplet_eval_proofs
+        .eval_proof
+        .ldt_proof
+        .opened_columns
         .iter_mut()
-        .flat_map(|ep| ep.ldt_proof.opened_columns.iter_mut())
         .find(|col| col.len() >= needle.len())
-        .expect("a chiplet opening wide enough to hold the needle");
+        .expect("opening wide enough to hold the needle");
 
     target[..needle.len()].copy_from_slice(&needle);
 
     assert!(
-        scan_chiplet_openings(&planted),
+        scan_openings(&planted),
         "positive control: a planted needle must be detected by the scan",
     );
 }

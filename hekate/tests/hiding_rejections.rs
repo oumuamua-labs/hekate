@@ -8,7 +8,7 @@
 //! on a broken witness, which only an outer row can reject.
 
 use hekate::core::config::Config;
-use hekate::core::proofs::{EvalBatchProof, InnerProof};
+use hekate::core::proofs::InnerProof;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
@@ -202,10 +202,10 @@ fn bump(value: &mut F) {
     *value += F::ONE;
 }
 
-fn first_h_claim(eval: &mut EvalBatchProof<F>, num_buses: usize) -> &mut F {
-    let half = eval.point_evaluation.1.len() / 2;
+fn first_h_claim(evaluation: &mut (Vec<F>, Vec<F>), num_buses: usize) -> &mut F {
+    let half = evaluation.1.len() / 2;
 
-    &mut eval.point_evaluation.1[half - num_buses]
+    &mut evaluation.1[half - num_buses]
 }
 
 #[test]
@@ -220,11 +220,11 @@ fn honest_proofs_verify() {
 #[test]
 fn absorbed_claims_are_transcript_bound() {
     let (air, instance, proof) = pinned_case();
-    let claims = proof.eval_proof.point_evaluation.1.len();
+    let claims = proof.main_point_evaluation.1.len();
 
     for idx in 0..claims {
         let mut mutant = proof.clone();
-        bump(&mut mutant.eval_proof.point_evaluation.1[idx]);
+        bump(&mut mutant.main_point_evaluation.1[idx]);
 
         assert!(
             !accepted(b"Tamper_Pinned", &air, &instance, &mutant),
@@ -284,7 +284,7 @@ fn absorbed_bus_values_are_transcript_bound() {
     let num_buses = mutant.main_logup_aux.h_evals.len();
 
     bump(&mut mutant.main_logup_aux.h_evals[0].1);
-    bump(first_h_claim(&mut mutant.eval_proof, num_buses));
+    bump(first_h_claim(&mut mutant.main_point_evaluation, num_buses));
 
     assert!(
         !accepted(b"Tamper_Ram", &air, &instance, &mutant),
@@ -295,7 +295,10 @@ fn absorbed_bus_values_are_transcript_bound() {
     let num_buses = mutant.chiplet_logup_aux[0].h_evals.len();
 
     bump(&mut mutant.chiplet_logup_aux[0].h_evals[0].1);
-    bump(first_h_claim(&mut mutant.chiplet_eval_proofs[0], num_buses));
+    bump(first_h_claim(
+        &mut mutant.chiplet_point_evaluations[0],
+        num_buses,
+    ));
 
     assert!(
         !accepted(b"Tamper_Ram", &air, &instance, &mutant),
@@ -303,7 +306,7 @@ fn absorbed_bus_values_are_transcript_bound() {
     );
 
     let mut mutant = proof.clone();
-    bump(&mut mutant.chiplet_eval_proofs[0].point_evaluation.1[0]);
+    bump(&mut mutant.chiplet_point_evaluations[0].1[0]);
 
     assert!(
         !accepted(b"Tamper_Ram", &air, &instance, &mutant),

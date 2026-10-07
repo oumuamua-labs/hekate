@@ -11,11 +11,12 @@ use hekate_math::{Block128, Flat, HardwareField, TowerField};
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
+use hekate_program::expander::{PoolLayout, RingSwitchPlan};
 use hekate_program::linearized::{self, RingGadget};
 use hekate_program::outer::{
     BusRow, BusSource, ConsistencyInputs, EvalRecord, OuterLayout, OuterStatement, TableRecord,
     TableShape, assemble, linear_tensor_vars, linear_weights, linear_weights_of_rows,
-    statement_rows,
+    statement_rows, table_plan,
 };
 use hekate_program::permutation::{BusKind, Source};
 use hekate_program::predicate::Unknown;
@@ -102,14 +103,13 @@ fn record(
     let seed = base as u128;
     let one = Flat::from_raw(F::ONE);
 
-    let half = shape.eval_claims(blind_units) as u32;
+    let half = shape.eval_claims() as u32;
     let columns = shape.num_columns as u32;
     let buses = statics.specs.len() as u32;
 
     let h_pad = base + 2 * half;
     let sums_pad = h_pad + buses;
     let mask_pad = sums_pad + buses;
-    let ring_pad = mask_pad + 6;
 
     let bus_rows = statics
         .specs
@@ -141,25 +141,6 @@ fn record(
             }
         })
         .collect();
-
-    let mut mask_form: Vec<(Unknown, Flat<F>)> = (0..3)
-        .map(|j| (Unknown::Pad(mask_pad + 3 + j), mix(seed + 30 + j as u128)))
-        .collect();
-
-    let gadget = shape.ring_units.then(|| {
-        let entries = (0..4)
-            .map(|c| (ring_pad + c, mix(seed + 40 + c as u128)))
-            .collect();
-        let mu = (0..linearized::BITS as u128)
-            .map(|j| mix(seed + 100 + j))
-            .collect();
-
-        RingGadget::new(entries, mu, (shape.mul_nodes + shape.num_buses) as u32)
-    });
-
-    if let Some(gadget) = &gadget {
-        mask_form.extend(gadget.delta_form());
-    }
 
     let record = TableRecord {
         claims_masked: (0..2 * half as u128).map(|i| mix(seed + 500 + i)).collect(),
@@ -200,12 +181,6 @@ fn record(
                 (base + col, col, mix(seed + 80 + col as u128))
             })
             .collect(),
-        trace_eval: EvalRecord {
-            mask_form,
-            claim_masked: mix(seed + 6),
-            fin: mix(seed + 7),
-        },
-        gadget,
         claimed_sums: statics
             .specs
             .iter()
@@ -213,6 +188,42 @@ fn record(
             .map(|(k, (bus_id, _))| (bus_id.clone(), sums_pad + k as u32, mix(seed + 90)))
             .collect(),
         shape,
+    };
+
+    (record, mask_pad + 3)
+}
+
+/// The pool's eval record with random masked values,
+/// its pads from `base` on and its gadget's wires
+/// from `first_wire` on; returns the next free pad.
+fn eval(ring_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32) {
+    let seed = base as u128;
+    let ring_pad = base + 3;
+
+    let mut mask_form: Vec<(Unknown, Flat<F>)> = (0..3)
+        .map(|j| (Unknown::Pad(base + j), mix(seed + 30 + j as u128)))
+        .collect();
+
+    let gadget = ring_units.then(|| {
+        let entries = (0..4)
+            .map(|c| (ring_pad + c, mix(seed + 40 + c as u128)))
+            .collect();
+        let mu = (0..linearized::BITS as u128)
+            .map(|j| mix(seed + 100 + j))
+            .collect();
+
+        RingGadget::new(entries, mu, first_wire)
+    });
+
+    if let Some(gadget) = &gadget {
+        mask_form.extend(gadget.delta_form());
+    }
+
+    let record = EvalRecord {
+        mask_form,
+        claim_masked: mix(seed + 6),
+        fin: mix(seed + 7),
+        gadget,
     };
 
     (record, ring_pad + 4)
@@ -231,11 +242,21 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
             Err(e) => panic!("{label}: snapshot rejected: {e}"),
         };
 
+        let plans: Vec<RingSwitchPlan> = defs
+            .iter()
+            .map(|def| table_plan(def, def.permutation_checks.len(), &config).unwrap())
+            .collect();
+
+        let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
+        let pool = PoolLayout::new(&heights, field_bits, &config);
+
         let mut records = Vec::with_capacity(defs.len());
         let mut base = 0;
 
-        for def in &defs {
-            let shape = TableShape::from_air(def, num_vars, &def.statics()).unwrap();
+        for (def, layout) in defs.iter().zip(&pool.tables) {
+            let shape = TableShape::from_air(def, &def.statics())
+                .unwrap()
+                .at(layout);
             let (table, next) = record(def, shape, blind_units, base);
 
             records.push(table);
@@ -243,9 +264,19 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
             base = next;
         }
 
+        let ring_units = records.iter().any(|r| r.shape.ring_units);
+        let table_wires: usize = records.iter().map(|r| r.shape.mul_wires()).sum();
+
+        let (eval, next) = eval(ring_units, base, table_wires as u32);
+
+        let gadget_wires = match ring_units {
+            true => linearized::BITS - 1,
+            false => 0,
+        };
+
         let statement = OuterStatement {
-            masked_scalars: base as usize,
-            mul_wires: records.iter().map(|r| r.shape.mul_wires()).sum(),
+            masked_scalars: next as usize,
+            mul_wires: table_wires + gadget_wires,
         };
 
         let geom = config
@@ -255,8 +286,8 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
         let layout =
             OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires).unwrap();
 
-        let rows = statement_rows(&records, &statement).unwrap();
-        let assembled = assemble(&records, &statement).unwrap();
+        let rows = statement_rows(&records, &eval, &statement).unwrap();
+        let assembled = assemble(&records, &eval, &statement).unwrap();
 
         assert_eq!(assembled.affine.len(), rows, "{label}");
 
@@ -264,7 +295,7 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
             .map(|i| mix(i).to_tower())
             .collect();
 
-        let got = linear_weights(&layout, &statement, &records, &tensor).unwrap();
+        let got = linear_weights(&layout, &statement, &records, &eval, &tensor).unwrap();
         let want = linear_weights_of_rows(&layout, &assembled, &tensor).unwrap();
 
         assert_eq!(got.rows, want.rows, "{label}");

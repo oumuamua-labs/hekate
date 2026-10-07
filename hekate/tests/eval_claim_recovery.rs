@@ -113,7 +113,7 @@ fn recover_from_proof(zero_knowledge: bool) -> (F, F) {
             .unwrap()
     );
 
-    let recovered = recover_slot_constant(&proof.eval_proof.point_evaluation, SECRET, BLOCK);
+    let recovered = recover_slot_constant(&proof.main_point_evaluation, SECRET, BLOCK);
 
     (recovered, secret_f)
 }
