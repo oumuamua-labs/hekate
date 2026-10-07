@@ -510,19 +510,19 @@ pub fn hash_leaf_row_blinded<H: Hasher>(
     hasher.finalize()
 }
 
-/// One leaf per grid column, `H(0x00 ‖ its cells row by row)`,
-/// for columns `0..leaves.len()`, hashed by tiles of columns.
+/// One digest per grid column, `H(0x00 ‖ its cells row by row)`,
+/// for columns `0..digests.len()`, hashed by tiles of columns.
 pub fn hash_column_leaves<H: Hasher>(
     grid_rows: usize,
     encoded_width: usize,
     code_views: &[(&[u8], usize)],
-    leaves: &mut [MaybeUninit<[u8; 32]>],
+    digests: &mut [[u8; 32]],
 ) {
     let stride = 1 + grid_rows * code_views.iter().map(|&(_, width)| width).sum::<usize>();
     let tile = (TILE_BYTES / stride).clamp(1, TILE_LEAVES);
 
     #[cfg(feature = "parallel")]
-    leaves
+    digests
         .par_chunks_mut(tile)
         .enumerate()
         .for_each_init(Vec::new, |scratch, (t, out)| {
@@ -532,7 +532,7 @@ pub fn hash_column_leaves<H: Hasher>(
     #[cfg(not(feature = "parallel"))]
     {
         let mut scratch = Vec::new();
-        for (t, out) in leaves.chunks_mut(tile).enumerate() {
+        for (t, out) in digests.chunks_mut(tile).enumerate() {
             hash_tile::<H>(
                 t * tile,
                 grid_rows,
@@ -545,7 +545,40 @@ pub fn hash_column_leaves<H: Hasher>(
     }
 }
 
-/// Leaves of columns `first..first + out.len()`,
+/// Writes one pool leaf per column: each leaf hashes
+/// every table's digest of that column, in pool order.
+///
+/// # Panics
+/// If a table holds fewer digests than `leaves`.
+pub fn hash_parts_leaves<H: Hasher>(
+    table_digests: &[&[[u8; 32]]],
+    leaves: &mut [MaybeUninit<[u8; 32]>],
+) {
+    #[cfg(feature = "parallel")]
+    leaves.par_iter_mut().enumerate().for_each(|(j, leaf)| {
+        leaf.write(hash_parts_leaf::<H>(table_digests.iter().map(|t| &t[j])));
+    });
+
+    #[cfg(not(feature = "parallel"))]
+    for (j, leaf) in leaves.iter_mut().enumerate() {
+        leaf.write(hash_parts_leaf::<H>(table_digests.iter().map(|t| &t[j])));
+    }
+}
+
+/// Hashes one pool leaf from the `0x02` tag followed
+/// by each table's digest of the column, in pool order.
+pub fn hash_parts_leaf<'a, H: Hasher>(digests: impl IntoIterator<Item = &'a [u8; 32]>) -> [u8; 32] {
+    let mut hasher = H::new();
+    hasher.update(&[2u8]);
+
+    for digest in digests {
+        hasher.update(digest);
+    }
+
+    hasher.finalize()
+}
+
+/// Digests of columns `first..first + out.len()`,
 /// their preimages assembled side by side in `scratch`.
 fn hash_tile<H: Hasher>(
     first: usize,
@@ -553,7 +586,7 @@ fn hash_tile<H: Hasher>(
     encoded_width: usize,
     code_views: &[(&[u8], usize)],
     scratch: &mut Vec<u8>,
-    out: &mut [MaybeUninit<[u8; 32]>],
+    out: &mut [[u8; 32]],
 ) {
     let stride = 1 + grid_rows * code_views.iter().map(|&(_, width)| width).sum::<usize>();
 
@@ -585,8 +618,8 @@ fn hash_tile<H: Hasher>(
         }
     }
 
-    for (leaf, preimage) in out.iter_mut().zip(scratch.chunks_exact(stride)) {
-        leaf.write(H::digest(preimage));
+    for (digest, preimage) in out.iter_mut().zip(scratch.chunks_exact(stride)) {
+        *digest = H::digest(preimage);
     }
 }
 
@@ -1084,13 +1117,10 @@ mod tests {
                         .map(|(column, &cell)| (column.as_slice(), cell))
                         .collect();
 
-                    let mut tiled = vec![MaybeUninit::new([0u8; 32]); width];
+                    let mut tiled = vec![[0u8; 32]; width];
                     hash_column_leaves::<H>(grid_rows, width, &views, &mut tiled);
 
-                    for (col, leaf) in tiled.iter().enumerate() {
-                        // SAFETY: every slot starts initialized
-                        let leaf = unsafe { leaf.assume_init() };
-
+                    for (col, &leaf) in tiled.iter().enumerate() {
                         assert_eq!(
                             leaf,
                             per_column_leaf(col, grid_rows, width, &views),
@@ -1127,6 +1157,30 @@ mod tests {
                 .collect();
 
             assert_eq!(built, expected, "{count} leaves");
+        }
+    }
+
+    #[test]
+    fn parts_leaves_hash_tagged_table_digests() {
+        let tables: Vec<Vec<[u8; 32]>> = (0..3u8)
+            .map(|t| (0..37u8).map(|j| [t.wrapping_mul(41) ^ j; 32]).collect())
+            .collect();
+
+        let views: Vec<&[[u8; 32]]> = tables.iter().map(Vec::as_slice).collect();
+
+        let mut leaves = vec![MaybeUninit::new([0u8; 32]); 37];
+        hash_parts_leaves::<H>(&views, &mut leaves);
+
+        for (j, leaf) in leaves.iter().enumerate() {
+            let mut preimage = vec![2u8];
+            for table in &tables {
+                preimage.extend_from_slice(&table[j]);
+            }
+
+            // SAFETY: every slot starts initialized
+            let leaf = unsafe { leaf.assume_init() };
+
+            assert_eq!(leaf, H::digest(&preimage));
         }
     }
 }
