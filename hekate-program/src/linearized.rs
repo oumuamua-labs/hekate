@@ -141,7 +141,7 @@ impl<F: HardwareField> RingGadget<F> {
         }
     }
 
-    /// Wire terms of the chain rows, in [`row_of`] order:
+    /// Wire terms of the chain rows, in [`Self::row_of`] order:
     /// `Lhs_j + Product_{j+1}` and `Rhs_j + Lhs_j`.
     pub fn wire_rows(&self) -> Vec<AffineRow<F>> {
         let one = Flat::from_raw(F::ONE);

@@ -3,29 +3,30 @@
 [![Crates.io](https://img.shields.io/crates/v/hekate-aes.svg)](https://crates.io/crates/hekate-aes)
 [![Docs.rs](https://docs.rs/hekate-aes/badge.svg)](https://docs.rs/hekate-aes)
 [![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](https://github.com/oumuamua-labs/hekate/blob/main/hekate-aes/LICENSE)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-AES-128 / AES-256 AIR chiplet for the [Hekate ZK](https://github.com/oumuamua-labs/hekate) proving system.
+AES-128 and AES-256 encryption in zero knowledge for [Hekate](https://oumuamua.dev/hekate), the Rust zero-knowledge
+proof engine. A round table proves the FIPS 197 round function (SubBytes, ShiftRows, MixColumns, AddRoundKey) as a
+binary-field AIR with an S-box ROM chiplet for the GF(2^8) inversion, and a LogUp bus wires the round table to your
+host table.
 
-Implements FIPS 197 round function (SubBytes, ShiftRows, MixColumns, AddRoundKey) as a binary-field AIR with an
-S-box ROM chiplet for the GF(2^8) inversion. Round-AIR trace is wired to the CPU AIR via LogUp bus.
+## ⚠️ Security Warning
 
+This crate has not been independently audited and may contain bugs and security flaws.
+
+USE AT YOUR OWN RISK!
+
+The proof binds at **100 bits**, below both AES parameter sets: the proof is the weaker link for AES-128 and AES-256
+alike, and the ciphertext is still full AES. Trace generation is constant-time: the S-box is field arithmetic, the
+GF(2^8) inverse plus the FIPS 197 affine map, with no key-dependent index, branch or memory access.
+
+## Usage
+
+```bash
+cargo add hekate-aes hekate-core hekate-math hekate-program
 ```
-Per-block proving cost (Apple M3 Max, zero-knowledge, 31,250 blocks per run):
-  AES-128: ~42 µs/block, 1,204 MiB peak, 4,674 KiB proof, 20.6 ms verify
-  AES-256: ~45 µs/block, 1,496 MiB peak, 4,959 KiB proof, 20.2 ms verify
-```
-
-Conditions and the base-protocol column are in the
-[workspace README](https://github.com/oumuamua-labs/hekate#performance).
-
-## Examples
-
-- [AES-128 / AES-256 proving and verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs)
-
-### Usage
 
 AES-256 over a run of plaintext blocks under one key, with both chiplets attached as their own tables:
 
@@ -103,30 +104,23 @@ fn encrypt(
 The host trace holds block `b`'s input `plaintext ⊕ round_keys[0]` and the key on row `2b` and its ciphertext
 `aes256_encrypt_block(&round_keys, &plaintext)` on row `2b + 1`, with `SELECTOR` set on both and `KEY_SELECTOR` on the
 first. `traces` holds the round table and the S-box ROM, the witness's chiplet traces in that order. The host publishes
-nothing, and its instance carries no public inputs.
+nothing, and its instance carries no public inputs. AES-128 runs on `Aes128Chiplet`, `AesRound128Air` and `Aes128Call`
+with a 16-byte key and round keys from `trace::expand_key`; the crate has no AES-128 block function, and `aes.rs` reads
+each ciphertext from the round table's trace.
 
----
+[`aes.rs`](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs) is a complete program for both
+key sizes.
 
-## ⚠️ Security Warning
+## Documentation
 
-This crate has not been audited and may contain bugs and security flaws.
-
-USE AT YOUR OWN RISK!
-
-### Proof soundness vs. AES
-
-The proof binds at **100 bits**, which is below both AES parameter sets, and the proof
-is the weaker link for AES-128 and AES-256 alike. The ciphertext is still full AES.
-
-### Constant-time trace generation
-
-No secret-indexed `SBOX[x]` table, the key cannot leak via cache timing. The S-box is
-field arithmetic, the GF(2⁸) inverse (`x²⁵⁴`) plus the FIPS 197 affine map, with no
-key-dependent index, branch, or memory access.
-
----
+- [AES-128 and AES-256 Encryption](https://oumuamua.dev/primitives/encryption/aes): what the proof states, what stays
+  outside it, and proving time, proof size and memory
+- [ML-KEM Sender / Receiver](https://oumuamua.dev/primitives/encryption/mlkem): AES-256-CTR under a key from ML-KEM,
+  joined in one proof
+- [API reference](https://docs.rs/hekate-aes)
 
 ## License
 
-AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+AGPL-3.0-only. See [LICENSE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-aes/LICENSE) and
+[NOTICE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-aes/NOTICE).
 Commercial licenses are available from Oumuamua Labs <info@oumuamua.dev>.

@@ -163,7 +163,7 @@ pub enum ConstraintExpr<F> {
     /// Sum of N sub-expressions.
     /// Exists specifically for Theta-style linear
     /// combinations to avoid deep Add chains.
-    /// Evaluates to sum of children[i].
+    /// Evaluates to sum of `children[i]`.
     Sum(Vec<ExprId>),
 }
 

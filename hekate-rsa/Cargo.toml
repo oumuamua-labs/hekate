@@ -1,11 +1,12 @@
 [package]
 name = "hekate-rsa"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 authors.workspace = true
-repository = "https://github.com/oumuamua-labs/hekate/tree/main/hekate-rsa"
+repository.workspace = true
 description = "RSA PKCS#1 v1.5 signature statements for the Hekate ZK proving system."
 keywords = ["zk", "cryptography", "rsa", "pkcs1", "no-std"]
 categories = ["cryptography", "no-std"]

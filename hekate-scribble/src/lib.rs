@@ -2,13 +2,18 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Trace mutation fuzzer for the Hekate ZK proving system.
+//! Trace mutation fuzzer for Hekate, the Rust zero-knowledge proof engine.
 //!
-//! Tampers valid execution traces and asserts
-//! `hekate_sdk::preflight` rejects every mutation.
-//! Scribble never invokes the prover or verifier,
-//! preflight (row-by-row constraint evaluation
-//! plus bus multiset checking) is the oracle.
+//! [`assert_all_caught`] tampers with a valid trace and panics
+//! with the smallest tamper that `hekate_sdk::preflight` misses,
+//! and [`check_single_mutation`] runs one tamper you choose.
+//! Scribble never invokes the prover or the verifier:
+//! preflight, row-by-row constraint evaluation plus
+//! bus multiset checking, is the oracle.
+//!
+//! - [Preflight: tests that tamper on purpose][tests]
+//!
+//! [tests]: https://oumuamua.dev/hekate/docs/basics/preflight#keep-it-in-your-tests
 
 #![forbid(unsafe_code)]
 

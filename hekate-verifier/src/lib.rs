@@ -2,6 +2,21 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+//! Verifier of Hekate, the Rust zero-knowledge proof engine, in pure Rust.
+//!
+//! [`HekateVerifier::verify`] checks one proof against the program, its instance,
+//! the pinned program id, and the prover's `Config` and transcript label.
+//!
+//! [`HekateVerifier::verify_prepared`] and [`HekateVerifier::verify_batch`]
+//! serve many proofs of one [`prepared::PreparedProgram`]. Only `Ok(true)`
+//! accepts a proof: `Ok(false)` and every error reject it.
+//!
+//! - [Verifier Logic][verifier]: the checks in order and reading the result
+//! - [Zero Knowledge][zk]
+//!
+//! [verifier]: https://oumuamua.dev/hekate/docs/basics/verifier-logic
+//! [zk]: https://oumuamua.dev/hekate/docs/advanced/zero-knowledge
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;

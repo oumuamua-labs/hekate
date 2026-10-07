@@ -2,6 +2,20 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+//! `Keccak-f[1600]` chiplet for Hekate, the Rust zero-knowledge proof engine.
+//!
+//! [`KeccakChiplet`] proves each output is the permutation of its input.
+//! [`sha3_256`], [`sha3_512`], [`shake128`] and [`shake256`] hash a message
+//! natively and return the permutation calls a host table requests,
+//! and [`generate_keccak_trace`] builds the chiplet's columns from them.
+//!
+//! - [`Keccak-f[1600]`][keccak]: what the proof states,
+//!   and binding a digest to a message
+//! - [Cryptographic Chiplets][chiplets]
+//!
+//! [keccak]: https://oumuamua.dev/primitives/hashing/keccak
+//! [chiplets]: https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets#inside-a-chiplet-keccak-f-1600
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -91,7 +105,7 @@ define_columns! {
     }
 }
 
-/// Keccak-f[1600] as 24 round rows plus one output row per block.
+/// `Keccak-f[1600]` as 24 round rows plus one output row per block.
 ///
 /// State lives in 1600 virtual bit columns; Chi stays degree 2.
 /// The 25 B64 lanes carrying the bus key are the same physical

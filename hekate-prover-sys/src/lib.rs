@@ -2,6 +2,25 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+//! The prover of Hekate, the Rust zero-knowledge
+//! proof engine, linked as a signed binary.
+//!
+//! The build script fetches the binary for the target,
+//! checks its SHA-256 and its Ed25519 and ML-DSA-65
+//! signatures against keys pinned in this crate, and links it.
+//! [`prove`] runs it, and a [`CancelToken`] stops it early.
+//! Exactly one of the `ct` and `public` features picks
+//! the constant-time or the variable-time binary.
+//!
+//! - [Installation][install]: variants, targets
+//!   and how the binary reaches the build
+//! - [Prover Releases][releases]
+//! - [Prover Engine][engine]: what the prover does with the tables
+//!
+//! [install]: https://oumuamua.dev/hekate/docs/getting-started/installation#how-the-prover-binary-reaches-your-build
+//! [releases]: https://oumuamua.dev/hekate/releases/prover
+//! [engine]: https://oumuamua.dev/hekate/docs/basics/prover-engine
+
 mod cancel;
 mod error;
 mod ffi;

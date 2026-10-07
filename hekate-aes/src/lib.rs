@@ -2,15 +2,17 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! AES chiplets: shared constants and
-//! level-specific Air implementations.
+//! AES-128 and AES-256 chiplets for Hekate, the Rust zero-knowledge proof engine.
 //!
-//! Shared:
-//! ShiftRows, MixColumns, RotWord.
+//! [`Aes128Chiplet`] and [`Aes256Chiplet`] pair a round table,
+//! [`AesRound128Air`] or [`AesRound256Air`], that proves the FIPS 197 round
+//! function with an S-box ROM for the GF(2^8) inversion. [`trace`] expands
+//! keys and builds the chiplet traces in constant time.
 //!
-//! Level-specific:
-//! - aes128 (AES-128)
-//! - aes256 (AES-256).
+//! - [AES-128 and AES-256 Encryption][aes]: what the
+//!   proof states and what stays outside it
+//!
+//! [aes]: https://oumuamua.dev/primitives/encryption/aes
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

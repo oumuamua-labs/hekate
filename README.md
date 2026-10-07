@@ -9,6 +9,8 @@ Zero-knowledge proof system over binary tower fields. Streaming architecture. Bo
 Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory.
 100 proven bits of soundness.
 
+Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
+
 > [!WARNING]  
 > This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
 > without notice. Do not deploy to mainnet.
@@ -16,19 +18,26 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 > [!NOTE]  
 > The verifier, core SDK, and cryptographic chiplets are open-source under AGPL-3.0-only. The prover
 > and compression engine stay proprietary, shipped as free binaries for macOS (Apple Silicon),
-> Linux (ARM64, glibc), and Android (ARM64). Linking the two is covered by the
-> [prover linking exception](LICENSE-EXCEPTION).
+> Linux (ARM64, glibc), iOS (ARM64, device and simulator), and Android (ARM64).
 
 > [!IMPORTANT]  
 > [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed
 > iOS `.xcframework` and Android `.aar` behind a typed Swift / Kotlin API, one `await` per proof, zero ZK
-> terminology across the boundary. Shipping ZK to edge devices? Start there.
+> terminology across the boundary. Shipping ZK to edge devices? Start there, with the Swift and Kotlin
+> guides at [oumuamua.dev/mobile](https://oumuamua.dev/mobile).
 
 ---
 
 ## ⚠️ Security Warning
 
 This workspace has not been independently audited and may contain bugs and security flaws.
+
+The failures fixed in 0.31.0 to 0.37.0 are written up as postmortems:
+[0.32](docs/postmortem-0.32.md), [0.33](docs/postmortem-0.33.md), [0.34](docs/postmortem-0.34.md),
+[0.35](docs/postmortem-0.35.md), [0.36](docs/postmortem-0.36.md) and [0.37](docs/postmortem-0.37.md). Each states
+what broke, how it was found, what fixed it and what the release still does not promise.
+[Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security) collects the
+guarantees a proof gives today and the checks that stay with you.
 
 USE AT YOUR OWN RISK!
 
@@ -41,8 +50,9 @@ and fuzzer ship as independent crates you compose as needed.
 
 | Crate                                                                                      | Role                                                                                                        |
 |:-------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------------------|
-| [`hekate-math`](https://github.com/oumuamua-labs/hekate-math)                              | Binary tower field arithmetic, constant-time, PMULL / PCLMULQDQ. The mathematical core.                     |
+| [`hekate-math`](https://github.com/oumuamua-labs/hekate-math)                              | Binary tower field arithmetic, constant-time, PMULL on aarch64. The mathematical core.                      |
 | [`hekate-prover-sys`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-prover-sys) | Open FFI shim. Links the signed prover cdylib over a stable C ABI; the only crate that can call the prover. |
+| [`hekate-gadgets`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-gadgets)       | Base AIR chiplets: 32- and 64-bit integer arithmetic, RAM, ROM and modular exponentiation.                  |
 | [`hekate-keccak`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-keccak)         | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~16x memory savings.                            |
 | [`hekate-aes`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-aes)               | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
 | [`hekate-sha2`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-sha2)             | SHA-256 compression chiplet (FIPS 180-4). Bit-expanded B32 columns, degree 2, 1-16 rounds per row.          |
@@ -51,24 +61,31 @@ and fuzzer ship as independent crates you compose as needed.
 | [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile)                          | Wraps a Rust prover into a signed iOS `.xcframework` / Android `.aar` with a typed Swift / Kotlin API.      |
 | [`hekate-scribble`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-scribble)     | Trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.                   |
 
-The in-workspace crates: `hekate-core`, `hekate-crypto`, `hekate-program`, `hekate-verifier`,
-`hekate-sdk` are shown in the stack above.
+The workspace also holds `hekate-core`, `hekate-crypto`, `hekate-program`, `hekate-verifier` and
+`hekate-sdk`. [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture#the-crates)
+draws all of them as one stack, and each chiplet has a page at
+[oumuamua.dev/primitives](https://oumuamua.dev/primitives) stating what it proves, which values a program can
+publish and what stays outside the proof.
 
 ---
 
 ## What It Does
 
 **Binary tower field arithmetic**, GF(2^8) through GF(2^128), recursive tower extension, hardware-accelerated via
-PMULL/CLMUL. Constant-time by default.
+PMULL on aarch64. Constant-time by default.
 
-**Chiplet architecture**, Independent AIR tables (Keccak, AES, RAM, NTT, ML-KEM, ML-DSA) with own traces and
-commitments. No column waste, no forced padding. Tables linked by LogUp bus.
+**Chiplet architecture**, Independent AIR tables (Keccak, AES, RAM, NTT, ML-KEM, ML-DSA) with own traces. No column
+waste, no forced padding. Tables linked by LogUp bus.
 
 **Virtual packing**, Keccak stores 1600 bits in 25 physical B64 columns instead of 1600 bit columns. Bits expand JIT in
 registers. 16x memory savings.
 
 **Linear-code commitments**, Brakedown PCS: O(N) prover, O(N) memory. MDS Reed-Solomon row code via additive
-binary-field FFT, exact distance δ = 1 − rate. Merkle tree over encoded columns only (raw trace never hashed, true ZK).
+binary-field FFT, exact distance δ = 1 − rate. Merkle tree over encoded columns only.
+
+**Zero knowledge**, on by default. A one-time pad covers every round, claim and bus sum a proof sends, the commitment's
+opened columns and leaves look random, and a zk-Ligero argument proves the checks the verifier cannot run on padded
+values. [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge) specifies all three.
 
 **Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) key generation,
 encapsulation and decapsulation, AES-128/256. AES and Keccak are native to binary fields; lattice arithmetic
@@ -84,204 +101,6 @@ mod q runs on bit-decomposed carry chains.
 
 ---
 
-## Quick Example
-
-Real 32-bit-integer Fibonacci. The CPU side holds five columns and the two Fibonacci transition
-constraints. Every `u32` ADD is offloaded to the `IntArithmeticChiplet`, its own trace, own
-commitment, own ZeroCheck, own evaluation argument, and is wired in by a LogUp bus
-(`(val_a, val_b, val_res, opcode)` keys; the `t`-th request meets the `t`-th response by emit
-rank). The result reaches the verdict through `publish`: a boundary pin to the public input on a
-row whose schedule a fixed column forces, with the transition chain determined from the pinned
-origins.
-
-```rust
-use hekate::core::errors;
-use hekate::math::{Block128, TowerField};
-use hekate_gadgets::IntArithmeticChiplet;
-use hekate_program::FixedShape;
-use hekate_program::chiplet::ChipletDef;
-use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::define_columns;
-
-type F = Block128;
-
-define_columns! {
-    ProgColumns {
-        VAL_A: B32,
-        VAL_B: B32,
-        VAL_RES: B32,
-        OPCODE: B32,
-        SELECTOR: Bit,
-    }
-}
-
-fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
-    let mut cx = Circuit::<F>::new("Fibonacci", num_rows)?;
-
-    let cpu = cx.schema(&ProgColumns::build_layout());
-    let selector = cpu.at(ProgColumns::SELECTOR);
-    let a = cpu.at(ProgColumns::VAL_A);
-    let b = cpu.at(ProgColumns::VAL_B);
-    let res = cpu.at(ProgColumns::VAL_RES);
-
-    let cs = cx.cs();
-
-    let s = cs.col(selector.index());
-    let val_b = cs.col(b.index());
-    let val_res = cs.col(res.index());
-    let next_a = cs.next(a.index());
-    let next_b = cs.next(b.index());
-
-    cs.constrain(s * (next_a + val_b));     // next_a = b
-    cs.constrain(s * (next_b + val_res));   // next_b = a + b (chiplet provides val_res)
-
-    cx.bus(
-        IntArithmeticChiplet::BUS_ID,
-        IntArithmeticChiplet::service().request(
-            &[
-                ProgColumns::VAL_A,
-                ProgColumns::VAL_B,
-                ProgColumns::VAL_RES,
-                ProgColumns::OPCODE,
-            ],
-            ProgColumns::SELECTOR,
-        )?,
-    );
-
-    cx.attach(ChipletDef::from_air(&IntArithmeticChiplet::new(
-        32,
-        num_rows,
-        num_rows - 1,
-    )?)?);
-
-    cx.fix(
-        selector,
-        FixedShape::Cadence {
-            stride: 1,
-            count: num_rows - 1,
-            origin: 0,
-            values: vec![F::ONE],
-        },
-    );
-
-    cx.boundary(a, 0, F::ZERO);
-    cx.boundary(b, 0, F::ONE);
-
-    cx.publish(b, num_rows - 1);
-
-    cx.compile()
-}
-```
-
-Trace generation builds the CPU columns and the chiplet trace independently; they meet on the bus.
-
-```rust
-use hekate::core::errors;
-use hekate::core::trace::{ColumnTrace, TraceBuilder};
-use hekate::math::{Bit, Block32, TowerField};
-use hekate_gadgets::{
-    ArithmeticOpcode, IntArithmeticLayout, IntArithmeticOp, generate_arithmetic_trace,
-};
-
-fn generate_traces(num_rows: usize) -> errors::Result<(ColumnTrace, ColumnTrace, u32)> {
-    let num_vars = num_rows.trailing_zeros() as usize;
-
-    let mut tb = TraceBuilder::new(&ProgColumns::build_layout(), num_vars)?;
-    let mut ops: Vec<IntArithmeticOp> = Vec::with_capacity(num_rows - 1);
-
-    let mut a: u32 = 0;
-    let mut b: u32 = 1;
-
-    for i in 0..num_rows - 1 {
-        let res = a.wrapping_add(b);
-
-        tb.set_b32(ProgColumns::VAL_A, i, Block32::from(a))?;
-        tb.set_b32(ProgColumns::VAL_B, i, Block32::from(b))?;
-        tb.set_b32(ProgColumns::VAL_RES, i, Block32::from(res))?;
-        tb.set_b32(ProgColumns::OPCODE, i, Block32::from(ArithmeticOpcode::ADD as u32))?;
-        tb.set_bit(ProgColumns::SELECTOR, i, Bit::ONE)?;
-
-        ops.push(IntArithmeticOp::U32 {
-            op: ArithmeticOpcode::ADD,
-            a,
-            b,
-        });
-
-        a = b;
-        b = res;
-    }
-
-    // Padding row:
-    // selector = 0, val_b carries fib[N-1] for the boundary pin.
-    tb.set_b32(ProgColumns::VAL_A, num_rows - 1, Block32::from(a))?;
-    tb.set_b32(ProgColumns::VAL_B, num_rows - 1, Block32::from(b))?;
-
-    let cpu_trace = tb.build();
-
-    let arith_layout = IntArithmeticLayout::compute(32);
-    let arith_trace = generate_arithmetic_trace(&ops, &arith_layout, num_rows)?;
-
-    Ok((cpu_trace, arith_trace, b))
-}
-```
-
-The chiplet enforces 32-bit ADD with carry, boolean-checks its own selectors, and zero-pins shadow
-columns when its row is idle. The CPU AIR only needs the two transition constraints above, the
-LogUp bus guarantees `val_res = a + b` for every row where `s = 1`.
-
-Wire up the program, instance, and witness, then prove with `hekate-prover-sys` and verify with
-`hekate-verifier`. The transcript label and `Config` must match across both sides, the driver builds
-one `config` and reuses it. `verify` returns `true` only if every Sumcheck round, the LogUp bus sums,
-and the evaluation openings hold.
-
-```rust
-use hekate::core::config::Config;
-use hekate::crypto::DefaultHasher;
-use hekate::crypto::transcript::Transcript;
-use hekate_program::{ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_verifier::HekateVerifier;
-use rand::{TryRngCore, rngs::OsRng};
-
-fn run(num_rows: usize, audited_id: &[u8; 32]) -> Result<bool, Box<dyn core::error::Error>> {
-    let (cpu, arith, fib_n) = generate_traces(num_rows)?;
-
-    let program = build_program(num_rows)?;
-    let instance = ProgramInstance::new(num_rows, vec![F::from(fib_n as u128)]);
-    let witness = ProgramWitness::new(cpu).with_chiplets(vec![arith]);
-
-    let config = Config::default();
-
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed)?;
-
-    let proof = prove(
-        b"Fibonacci",
-        &program,
-        &instance,
-        &witness,
-        &config,
-        blinding_seed,
-        None,
-    )?;
-
-    let mut transcript = Transcript::<DefaultHasher>::new(b"Fibonacci");
-
-    // `audited_id` is a constant of the verifying build,
-    // printed once by `digest::program_id_hex`.
-    Ok(HekateVerifier::<F, DefaultHasher>::verify(
-        audited_id,
-        &program,
-        &instance,
-        &proof,
-        &mut transcript,
-        &config,
-    )?)
-}
-```
-
----
-
 ## Examples
 
 End-to-end programs that prove and verify with `hekate-prover-sys` and `hekate-verifier`. Each file is a self-contained
@@ -289,6 +108,8 @@ binary you can run with `cargo run --release --example <name>`.
 
 - [ML-DSA signature verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs) (FIPS 204;
   44 / 65 / 87 levels)
+- [RSA-2048 PKCS#1 v1.5 verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/rsa_pkcs1.rs)
+  (RFC 8017, over the modexp and SHA-256 chiplets)
 - [ML-KEM sender](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_sender.rs) (FIPS 203
   Encaps with an AES-256-CTR payload; 512 / 768 / 1024 levels)
 - [ML-KEM receiver](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_receiver.rs) (FIPS 203
@@ -296,107 +117,60 @@ binary you can run with `cargo run --release --example <name>`.
 - [AES-128 / AES-256 block proving](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/aes.rs) (FIPS 197)
 - [Keccak kernel](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak.rs) (CPU AIR
   with embedded f1600 permutation)
+- [SHA-256 compression](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/sha256.rs) (FIPS 180-4;
+  1, 2, 4, 8 or 16 rounds per row)
 - [32-bit integer arithmetic](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/arith.rs) (add / sub /
   and / xor / not / lt via `IntArithmeticChiplet`)
+- [Fibonacci on a chiplet table](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/fibonacci.rs)
+  (`IntArithmeticChiplet` mounted as the program's own table, no bus)
+- [Raw 32-bit Fibonacci](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/fibonacci_raw.rs)
+  (a bit-sliced carry chain in the CPU AIR, no chiplet; the integer-arithmetic benchmark)
 - [RAM read/write proof](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/ram.rs) (offline-memory
   consistency via `RamChiplet`)
+- [ROM instruction fetch](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/rom.rs) (fetches
+  matched against a ROM table via `RomChiplet`)
+- [Three chiplets on one CPU](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/many_chiplets.rs)
+  (ROM, integer arithmetic and RAM, each on its own bus)
 
 ---
 
 ## Getting Started
 
-- [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), build from source, configure features
-- [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), first proof
-  end-to-end
-- [Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture), binary tower fields, Sumcheck, Brakedown,
-  LogUp
-- [Writing AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints), constraint DSL, boundary
-  conditions
-- [Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), independent tables, virtual packing, bus
-  integration
-- [Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial test suite,
-  Fiat-Shamir binding
+The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in reading order:
+
+- [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), the crates, the signed prover binary,
+  supported targets
+- [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), a private payment
+  proved end-to-end
+- [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture), binary tower fields, Sumcheck,
+  Brakedown, what the verifier trusts
+- [Prover Engine](https://oumuamua.dev/hekate/docs/basics/prover-engine), commit every table, prove the constraints
+  with Sumcheck, open the commitments
+- [AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints), constraints over two rows, boundaries,
+  gadgets, degree
+- [Execution Trace](https://oumuamua.dev/hekate/docs/basics/execution-trace), column types, padding rows, wiping
+  secrets
+- [Verifier Logic](https://oumuamua.dev/hekate/docs/basics/verifier-logic), pinning the program id, one proof, a
+  prepared program, a batch
+- [LogUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses), a multiset check as a sum of fractions, a bus of
+  your own
+- [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), the chiplet set, calling a
+  chiplet, a chiplet of your own
+- [PIOP Protocol](https://oumuamua.dev/hekate/docs/advanced/piop-protocol), multilinear columns, Sumcheck down to one
+  point, the commitment
+- [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge), how a proof hides the witness, and the
+  [ring-switching paper](https://oumuamua.dev/blog/zk-ring-switching) behind packed bit columns
+- [Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial
+  test suite, Fiat-Shamir binding
 
 ---
 
 ## Performance
 
-All numbers on Apple M3 Max (16 cores, 48 GB RAM), `--release`, features
-`std parallel blake3 table-math`, `Config::prod()`. Cells read zero-knowledge / base,
-the second value being the same run under `HEKATE_ZK=0`. Measured with the example
-binaries in `hekate/examples/` on an otherwise idle machine; every figure is the
-best of three runs. Peak memory is the larger of the process peak physical footprint
-and its peak resident set size.
-
-### Hashing
-
-| Workload                  | Input   | Proving         | Verify         | Proof Size        | Peak memory       |
-|:--------------------------|:--------|:----------------|:---------------|:------------------|:------------------|
-| Keccak-f[1600], 2^15 rows | ~178 KB | 191 / 170 ms    | 12.4 / 4.8 ms  | 851 / 672 KiB     | 166 / 136 MiB     |
-| Keccak-f[1600], 2^20 rows | ~5.4 MB | 3.92 / 3.69 s   | 17.5 / 9.3 ms  | 3,545 / 3,223 KiB | 2,418 / 2,417 MiB |
-| SHA-256, 2^11 rows        | 2.5 KB  | 70 / 48 ms      | 9.8 / 3.7 ms   | 538 / 321 KiB     | 63 / 56 MiB       |
-| SHA-256, 2^21 rows        | 8.4 MB  | 11.57 / 11.01 s | 22.5 / 14.9 ms | 5,479 / 5,174 KiB | 5,216 / 5,049 MiB |
-
-Keccak runs 1,310 permutations at 2^15 and 41,943 at 2^20. SHA-256 runs
-40 blocks at 2 rounds per row and 131,072 blocks at 4 rounds per row.
-
-```bash
-HEKATE_NUM_VARS=20 just example keccak public
-HEKATE_NUM_VARS=21 HEKATE_ROUNDS_PER_ROW=4 just example sha256 public
-```
-
-### Digital signatures
-
-| Workload             | Proving       | Verify         | Proof Size          | Peak memory   |
-|:---------------------|:--------------|:---------------|:--------------------|:--------------|
-| ML-DSA-44            | 558 / 467 ms  | 51.6 / 22.2 ms | 2,877 / 2,449 KiB   | 280 / 220 MiB |
-| ML-DSA-65            | 617 / 521 ms  | 53.8 / 23.5 ms | 2,958 / 2,543 KiB   | 274 / 239 MiB |
-| ML-DSA-87            | 776 / 689 ms  | 58.5 / 28.4 ms | 3,326 / 2,918 KiB   | 361 / 303 MiB |
-| RSA-2048 PKCS#1 v1.5 | 355 / 297 ms  | 31.2 / 11.9 ms | 14,585 / 14,348 KiB | 503 / 485 MiB |
-
-Each ML-DSA level runs 6 chiplet tables. RSA-2048 proves `s^65537 mod N == PKCS1-v1_5(H)`
-over a 200-byte message, with the modulus public and the signature witness.
-
-```bash
-HEKATE_LEVEL=65 just example mldsa public   # 44 | 65 | 87
-just example rsa_pkcs1 public
-```
-
-### Encryption and key exchange
-
-| Workload                     | Proving       | Verify         | Proof Size        | Peak memory       |
-|:-----------------------------|:--------------|:---------------|:------------------|:------------------|
-| ML-KEM-768 sender            | 573 / 450 ms  | 72.6 / 25.9 ms | 3,512 / 2,962 KiB | 248 / 165 MiB     |
-| ML-KEM-768 receiver          | 746 / 605 ms  | 90.3 / 34.2 ms | 3,895 / 3,359 KiB | 359 / 255 MiB     |
-| AES-128, 31,250 blocks       | 1.30 / 1.20 s | 20.6 / 15.4 ms | 4,674 / 4,362 KiB | 1,204 / 1,179 MiB |
-| AES-256, 31,250 blocks       | 1.41 / 1.33 s | 20.2 / 15.6 ms | 4,959 / 4,647 KiB | 1,496 / 1,469 MiB |
-
-The ML-KEM sender proves Encaps and AES-256-CTR over the default 87-byte message on 6 ML-KEM
-tables and 2 AES tables. The receiver proves KeyGen chained into Decaps on 7 tables. Each AES
-run covers ~500 KB of plaintext on a 2^16-row CPU trace with Round-AIR and S-box ROM chiplets
-at 2^19, which is ~42 µs per block for AES-128 and ~45 µs for AES-256.
-
-```bash
-HEKATE_LEVEL=768 just example mlkem_sender public     # HEKATE_MESSAGE=<text> sets the payload
-HEKATE_LEVEL=768 just example mlkem_receiver public   # 512 | 768 | 1024
-HEKATE_LEVEL=256 just example aes public              # 128 | 256
-```
-
-### Integer arithmetic
-
-The smallest circuit in the workspace and the scaling reference for the rest:
-each row is a bit-sliced 32-bit add with an explicit carry chain,
-virtual-expanded into 32 bit, 32 sum and 32 carry columns.
-
-| Scale     | Proving         | Verify         | Proof Size        | Peak memory        |
-|:----------|:----------------|:---------------|:------------------|:-------------------|
-| 2^20 rows | 336 / 294 ms    | 6.95 / 3.16 ms | 1,145 / 678 KiB   | 266 / 168 MiB      |
-| 2^24 rows | 5.45 / 4.75 s   | 12.7 / 7.43 ms | 4,097 / 2,538 KiB | 3,574 / 2,229 MiB  |
-| 2^26 rows | 23.83 / 19.58 s | 22.0 / 11.4 ms | 8,008 / 5,011 KiB | 13,312 / 8,293 MiB |
-
-```bash
-HEKATE_NUM_VARS=26 just example fibonacci_raw public
-```
+Proving time, verification time, proof size and peak memory for the hashing, signature, encryption and
+integer-arithmetic examples are at [oumuamua.dev/hekate/benchmarks](https://oumuamua.dev/hekate/benchmarks),
+in zero-knowledge and base mode (`HEKATE_ZK=0`), with the machine, the build features and the command behind
+each run.
 
 ---
 
@@ -407,6 +181,7 @@ AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 Linking against the proprietary prover shared library is covered by the
 [prover linking exception](LICENSE-EXCEPTION), an additional permission under AGPL section 7.
 
-Commercial licenses are available from Oumuamua Labs <info@oumuamua.dev>.
+Commercial licenses are available from Oumuamua Labs <info@oumuamua.dev>. The Free, Pro and Enterprise tiers
+are compared at [oumuamua.dev/hekate/pricing](https://oumuamua.dev/hekate/pricing).
 
 Hekate does not accept external code contributions. See [CONTRIBUTING](CONTRIBUTING.md).

@@ -3,29 +3,24 @@
 [![Crates.io](https://img.shields.io/crates/v/hekate-sha2.svg)](https://crates.io/crates/hekate-sha2)
 [![Docs.rs](https://docs.rs/hekate-sha2/badge.svg)](https://docs.rs/hekate-sha2)
 [![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](https://github.com/oumuamua-labs/hekate/blob/main/hekate-sha2/LICENSE)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-SHA-256 AIR chiplet for the [Hekate ZK](https://github.com/oumuamua-labs/hekate) proving system.
+SHA-256 in zero knowledge for [Hekate](https://oumuamua.dev/hekate), the Rust zero-knowledge proof engine. A chiplet
+proves the 64 rounds of the compression function, FIPS 180-4 §6.2.2, at 1, 2, 4, 8 or 16 rounds per row. Padding
+and chaining belong to the host program: `pad_message` pads in host code, your host table chains the blocks, and
+`CpuSha256Block` applies the feed-forward add `h_out = h_in + state_out` there.
 
-The chiplet proves the 64 rounds of FIPS 180-4 §6.2.2 over bit-expanded B32 columns: one committed carry word per
-32-bit add, `Ch` and `Maj` committed, every round root ungated (composition degree 2). A block is `64 / rounds_per_row`
-rows; the CPU table requests `(state_in, block) -> state_out` once per block over the `sha256_rounds` bus and applies
-the feed-forward add `h_out = h_in + state_out` itself through `CpuSha256Block`, the same split as the Keccak chiplet
-and its sponge. Padding and chaining are the CPU table's.
+## ⚠️ Security Warning
 
+This crate has not been independently audited and may contain bugs and security flaws.
+
+## Usage
+
+```bash
+cargo add hekate-sha2 hekate-core hekate-math hekate-program
 ```
-Apple M3 Max, ZK, chiplet mounted into the CPU table, best of three runs (hekate/examples/sha256.rs):
-  DSC SOD, 40 compressions (2.5 KB), 2 rounds/row, 2^11 rows: 70 ms prove, 9.8 ms verify, 538 KiB proof, 63 MiB
-  131,072 compressions (8.4 MB), 4 rounds/row, 2^21 rows:    11.57 s prove, 22.5 ms verify, 5,479 KiB proof, 5,216 MiB
-```
-
-## Examples
-
-- [SHA-256 scaling, mounted inline](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/sha256.rs)
-
-### Usage
 
 SHA-256 of one message, one compression per host row, with the chiplet attached as its own table:
 
@@ -100,8 +95,19 @@ Host row `b` holds `block.write(&mut tb, b, &calls[b])`, and the two bits after 
 `chain`, are one on rows `0..blocks` and `0..blocks - 1`. `calls[b]` pairs block `b` of `pad_message(message)` with
 `h_in` from `calls[b - 1].h_out()`, `IV` for the first, and `sha.trace(&calls)` is the chiplet trace.
 
----
+[`sha256.rs`](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/sha256.rs) is a complete program that
+scales the message size.
 
-## ⚠️ Security Warning
+## Documentation
 
-This crate has not been audited and may contain bugs and security flaws.
+- [SHA-256](https://oumuamua.dev/primitives/hashing/sha2): what the proof states, padding and chaining, and proving
+  time, proof size and memory
+- [RSA-2048 PKCS#1 v1.5 Verification](https://oumuamua.dev/primitives/signatures/rsa): this chiplet hashing the
+  signed message
+- [API reference](https://docs.rs/hekate-sha2)
+
+## License
+
+AGPL-3.0-only. See [LICENSE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-sha2/LICENSE) and
+[NOTICE](https://github.com/oumuamua-labs/hekate/blob/main/hekate-sha2/NOTICE).
+Commercial licenses are available from Oumuamua Labs <info@oumuamua.dev>.
