@@ -7,7 +7,7 @@
 //! 15 rows per block:
 //! 13 full rounds + 1 final + 1 output.
 //!
-//! KEY_AUX[16] carries the round key from
+//! `KEY_AUX[16]` carries the round key from
 //! 2 positions back (Nk=8 = 2 round keys).
 
 use alloc::boxed::Box;

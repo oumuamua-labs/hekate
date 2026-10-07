@@ -390,7 +390,7 @@ impl<F: TowerField> Opening<F> {
         self.columns.iter().map(|(col, _)| *col).collect()
     }
 
-    /// The verifier's view of a [`Stack`]: the parts' openings
+    /// The verifier's view of a stack: the parts' openings
     /// at the same columns, values concatenated per column.
     pub fn stack(parts: &[&Opening<F>]) -> Result<Self> {
         let first = parts.first().ok_or(Error::Protocol {

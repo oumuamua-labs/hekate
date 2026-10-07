@@ -2,13 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Emulated integer arithmetic
-//! over binary tower fields.
+//! Emulated integer arithmetic over binary tower fields.
 //!
-//! GF(2^k) addition is XOR with no integer
-//! carry. Proving mod-q operations requires
-//! bit-decomposed operands with explicit
-//! carry/borrow chain constraints.
+//! GF(2^k) addition is XOR with no integer carry.
+//! Proving mod-q operations requires bit-decomposed
+//! operands with explicit carry/borrow chain constraints.
 
 use alloc::vec::Vec;
 use hekate_math::TowerField;
@@ -18,11 +16,11 @@ use hekate_program::constraint::builder::{ConstraintSystem, Expr};
 /// a + b = result.
 ///
 /// GF(2) carry chain:
-/// result[i] = a[i] + b[i] + carry[i],
-/// carry[i+1] = a[i]*b[i] + a[i]*carry[i] + b[i]*carry[i].
+/// `result[i] = a[i] + b[i] + carry[i]`,
+/// `carry[i+1] = a[i]*b[i] + a[i]*carry[i] + b[i]*carry[i]`.
 ///
-/// carry_bits[0] forced to zero;
-/// carry_bits[n] is overflow.
+/// `carry_bits[0]` forced to zero;
+/// `carry_bits[n]` is overflow.
 ///
 /// Bit slices:
 /// length n.
@@ -75,7 +73,7 @@ pub fn add_carry_chain<'a, F: TowerField>(
     }
 }
 
-/// Like `add_carry_chain` but carry_bits[0]
+/// Like `add_carry_chain` but `carry_bits[0]`
 /// is not forced to zero, caller controls
 /// the initial carry for multi-word chaining.
 pub fn add_carry_chain_with_carry_in<'a, F: TowerField>(
@@ -181,12 +179,12 @@ pub fn add_carry_chain_with_carry_in_gated<'a, F: TowerField>(
 /// a - b = result.
 ///
 /// GF(2) borrow chain (!a = a+1):
-/// result[i] = a[i] + b[i] + borrow[i],
-/// borrow[i+1] = b[i] + a[i]*b[i] + borrow[i]
-///   + a[i]*borrow[i] + b[i]*borrow[i].
+/// `result[i] = a[i] + b[i] + borrow[i]`,
+/// `borrow[i+1] = b[i] + a[i]*b[i] + borrow[i]`
+///   `+ a[i]*borrow[i] + b[i]*borrow[i]`.
 ///
-/// borrow_bits[0] forced to zero;
-/// borrow_bits[n] = 1 means underflow (a < b).
+/// `borrow_bits[0]` forced to zero;
+/// `borrow_bits[n] = 1` means underflow (a < b).
 ///
 /// Bit slices:
 /// length n.
@@ -723,7 +721,7 @@ pub fn schoolbook_mul_layout(a_width: usize, b_width: usize) -> SchoolbookMulLay
 pub struct SchoolbookMulWitness<'a, 'b, F: TowerField> {
     /// Materialized first partial product
     /// (pp0_width bits).
-    /// pp0[k] = b[0]*a[k].
+    /// `pp0[k] = b[0]*a[k]`.
     pub pp0: &'b [Expr<'a, F>],
 
     /// Intermediate sum columns.
@@ -738,7 +736,7 @@ pub struct SchoolbookMulWitness<'a, 'b, F: TowerField> {
 /// Constrain schoolbook multiplication:
 /// product = a * b (unsigned integers).
 ///
-/// pp[j][k] = b[j] * a[k-j] (degree-2).
+/// `pp[j][k] = b[j] * a[k-j]` (degree-2).
 /// pp0 materialized as witness to keep
 /// constraint degree ≤ 3 (gated: ≤ 4).
 pub fn schoolbook_mul<'a, F: TowerField>(
