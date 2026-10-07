@@ -10,6 +10,10 @@ use crate::utils::support_floor_vars;
 /// Production soundness floor.
 pub const MIN_PRODUCTION_BITS: usize = 100;
 
+/// Most row variables one table may carry. The verifier
+/// rejects a proof that claims a taller table.
+pub const MAX_TABLE_VARS: usize = 32;
+
 /// Brakedown row-code rate `1/INV_RATE`;
 /// small grids fall back to `1/(2·INV_RATE)`.
 pub const INV_RATE: usize = 2;
@@ -35,9 +39,9 @@ pub enum Error {
         min_bits: usize,
     },
 
-    /// `ldt_support_size < num_queries`;
-    /// opened columns exhaust the noise
-    /// budget and witness data leaks.
+    /// `ldt_support_size <= num_queries`;
+    /// the openings use up the support and
+    /// the unopened leaves leak the witness.
     InsufficientSupport {
         ldt_support_size: usize,
         num_queries: usize,
@@ -71,7 +75,7 @@ impl fmt::Display for Error {
                 num_queries,
             } => write!(
                 f,
-                "ldt_support_size ({ldt_support_size}) must be >= num_queries ({num_queries})",
+                "ldt_support_size ({ldt_support_size}) must be > num_queries ({num_queries})",
             ),
             Self::EmptyOuterStatement => {
                 write!(f, "outer statement masks no scalars")
@@ -105,8 +109,8 @@ pub struct SecurityMetrics {
 }
 
 /// Fold the proximity term is stated over: the committed
-/// grid, the eq-tensor's row count and the `eta` walk's
-/// unit count. Both sides derive it from `RingSwitchPlan`.
+/// grid, the eq-tensor's row count and the exponent count
+/// of the `eta` and `lambda` walks, from `PoolLayout`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FoldShape {
     pub grid_cols: usize,
@@ -114,7 +118,7 @@ pub struct FoldShape {
     pub units: usize,
 }
 
-/// Per-table row-code geometry chosen by `Config::table_geom`.
+/// Row-code geometry chosen by `Config::table_geom`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TableGeom {
     /// Random low-coord support (LDT opening mask) length.
@@ -158,7 +162,7 @@ impl Config {
     pub fn prod() -> Self {
         Self {
             num_queries: 287,
-            ldt_support_size: 287,
+            ldt_support_size: 288,
             min_security_bits: MIN_PRODUCTION_BITS,
             outer_queries: 121,
             zero_knowledge: true,
@@ -182,13 +186,12 @@ impl Config {
         usize::from(self.zero_knowledge)
     }
 
-    /// Fewest rows a table needs for its grid to hold the
-    /// LDT support; `check_security` rejects shorter tables.
+    /// Fewest rows whose unpacked grid holds the LDT support.
     pub fn min_table_rows(&self) -> usize {
         1 << support_floor_vars(self.ldt_support_size)
     }
 
-    /// Committed row-code width for the chosen per-table mode.
+    /// Committed row-code width for the chosen mode.
     pub fn encoded_width(&self, grid_cols: usize) -> usize {
         self.table_geom(grid_cols).encoded_width
     }
@@ -229,7 +232,7 @@ impl Config {
 
     /// `(log2(rows) + units - 1) · n / |F|`: BCIKS20's `n / |F|`,
     /// Diamond-Gruen 2024/1351's eq-tensor factor over the rows,
-    /// BCIKS20 Thm 1.5's curve factor over the `eta` walk.
+    /// BCIKS20 Thm 1.5's curve factor over the `eta` and `lambda` walks.
     pub fn proximity_gap_bits(&self, field_bits: usize, shape: FoldShape) -> usize {
         let width = self.table_geom(shape.grid_cols).encoded_width;
 
@@ -260,7 +263,7 @@ impl Config {
     pub fn check_security(&self, field_bits: usize, shape: FoldShape) -> errors::Result<()> {
         // dev (min_security_bits == 0) waives the ZK floor
         let support = self.table_geom(shape.grid_cols).support_size;
-        if self.min_security_bits > 0 && support < self.num_queries {
+        if self.min_security_bits > 0 && support <= self.num_queries {
             return Err(Error::InsufficientSupport {
                 ldt_support_size: support,
                 num_queries: self.num_queries,
@@ -464,7 +467,7 @@ mod tests {
     fn prod_queries_sit_on_fractional_mode_edge() {
         let at = |t: usize| Config {
             num_queries: t,
-            ldt_support_size: t,
+            ldt_support_size: t + 1,
             ..Config::prod()
         };
 
@@ -544,5 +547,50 @@ mod tests {
 
         assert_eq!(dev.min_security_bits, 0);
         assert!(dev.check_logup_security(128, 1 << 60).is_ok());
+    }
+
+    #[test]
+    fn support_below_queries_rejected() {
+        let config = Config {
+            ldt_support_size: 32,
+            ..Config::prod()
+        };
+
+        assert!(matches!(
+            config.check_security(128, flat(1 << 12)),
+            Err(errors::Error::Config(Error::InsufficientSupport { .. }))
+        ));
+    }
+
+    #[test]
+    fn support_equal_to_queries_rejected() {
+        let config = Config {
+            ldt_support_size: Config::prod().num_queries,
+            ..Config::prod()
+        };
+
+        assert!(matches!(
+            config.check_security(128, flat(1 << 12)),
+            Err(errors::Error::Config(Error::InsufficientSupport { .. }))
+        ));
+    }
+
+    #[test]
+    fn support_one_above_queries_accepted() {
+        let prod = Config::prod();
+
+        assert_eq!(prod.ldt_support_size, prod.num_queries + 1);
+        assert!(prod.check_security(128, flat(1 << 12)).is_ok());
+    }
+
+    #[test]
+    fn support_below_queries_waived_in_dev() {
+        let config = Config {
+            ldt_support_size: 32,
+            min_security_bits: 0,
+            ..Config::prod()
+        };
+
+        assert!(config.check_security(128, flat(1 << 12)).is_ok());
     }
 }
