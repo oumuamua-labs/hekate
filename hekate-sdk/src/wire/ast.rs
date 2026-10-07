@@ -94,11 +94,15 @@ pub fn deserialize_ast<F: TowerField>(
         None => Vec::new(),
     };
 
-    Ok(ConstraintAst {
+    let ast = ConstraintAst {
         arena,
         roots,
         labels,
-    })
+    };
+
+    ast.validate_order()?;
+
+    Ok(ast)
 }
 
 fn serialize_expr<'a, F: TowerField, A: Allocator + 'a>(
@@ -235,4 +239,68 @@ fn block128_from_bytes(bytes: &[u8]) -> fb::Block128 {
 
 fn field_from_block128<F: TowerField>(block: &fb::Block128) -> Result<F> {
     super::field::lo_hi_to_field(block.lo(), block.hi())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hekate_math::Block128;
+
+    type F = Block128;
+
+    #[test]
+    fn decode_rejects_misordered_asts() {
+        let cell = |col| ConstraintExpr::Cell(ProgramCell::current(col));
+
+        let cases: [(&str, &str, [ConstraintExpr<F>; 3], u32); 3] = [
+            (
+                "forward child",
+                "child does not precede its node",
+                [
+                    cell(0),
+                    ConstraintExpr::Sum(vec![ExprId(0), ExprId(2)]),
+                    cell(1),
+                ],
+                1,
+            ),
+            (
+                "self reference",
+                "child does not precede its node",
+                [cell(0), ConstraintExpr::Mul(ExprId(0), ExprId(1)), cell(1)],
+                1,
+            ),
+            (
+                "root past the arena",
+                "root outside the arena",
+                [cell(0), cell(1), ConstraintExpr::Add(ExprId(0), ExprId(1))],
+                3,
+            ),
+        ];
+
+        for (case, expected, nodes, root) in cases {
+            let mut arena = ConstraintArena::new();
+            for node in nodes {
+                arena.alloc(node);
+            }
+
+            let ast = ConstraintAst {
+                arena,
+                roots: vec![ExprId(root)],
+                labels: vec![None],
+            };
+
+            let mut fbb = FlatBufferBuilder::new();
+            let offset = serialize_ast(&mut fbb, &ast);
+
+            fbb.finish(offset, None);
+
+            let fb_ast =
+                flatbuffers::root::<fb::ConstraintAst>(fbb.finished_data()).expect("flatbuffer");
+
+            match deserialize_ast::<F>(fb_ast, &mut Interner::new()) {
+                Err(Error::Protocol { message, .. }) => assert_eq!(message, expected, "{case}"),
+                other => panic!("{case}: {:?}", other.map(|_| ())),
+            }
+        }
+    }
 }

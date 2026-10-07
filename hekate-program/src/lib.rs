@@ -7,6 +7,7 @@
 extern crate alloc;
 extern crate core;
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -291,6 +292,11 @@ pub struct InlineKernelHint {
 // FIXED COLUMNS
 // =================================================================
 
+/// Most variables [`ShapeEvaluator`] builds eq tables for:
+/// a proof picks a chiplet's height, and the larger
+/// table holds `2^⌈num_vars / 2⌉` cells.
+const EQ_TABLE_MAX_VARS: usize = 32;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CadenceSegment<F> {
     pub stride: usize,
@@ -559,6 +565,158 @@ impl<F> FixedColumn<F> {
     }
 }
 
+/// One table's fixed shapes at one point, sharing
+/// residue sums and eq tables across the shapes.
+pub struct ShapeEvaluator<'a, F> {
+    r: &'a [Flat<F>],
+    eq: Option<EqTables<F>>,
+    sums: BTreeMap<(usize, usize), Vec<Flat<F>>>,
+}
+
+impl<'a, F: HardwareField> ShapeEvaluator<'a, F> {
+    pub fn new(r: &'a [Flat<F>]) -> Self {
+        Self {
+            r,
+            eq: (r.len() <= EQ_TABLE_MAX_VARS).then(|| EqTables::new(r)),
+            sums: BTreeMap::new(),
+        }
+    }
+
+    /// MLE of `shape` at the point; equals
+    /// [`FixedShape::evaluate`] on every input.
+    pub fn evaluate(&mut self, shape: &FixedShape<F>) -> Flat<F> {
+        let zero = Flat::from_raw(F::ZERO);
+
+        match shape {
+            FixedShape::Sparse(entries) => {
+                let mut acc = zero;
+                for &(row, value) in entries {
+                    acc += scaled(value, self.eq(row));
+                }
+
+                acc
+            }
+            FixedShape::Dense(values) => {
+                let mut acc = zero;
+                for (row, &value) in values.iter().enumerate() {
+                    acc += scaled(value, self.eq(row));
+                }
+
+                acc
+            }
+            FixedShape::Cadence {
+                stride,
+                count,
+                origin,
+                values,
+            } => self.cadence(*stride, *count, *origin, values),
+            FixedShape::Segments(segments) => {
+                let mut acc = zero;
+                for seg in segments {
+                    acc += self.cadence(seg.stride, seg.count, seg.origin, &seg.values);
+                }
+
+                acc
+            }
+            FixedShape::LastRow
+            | FixedShape::FirstRow
+            | FixedShape::Custom(_)
+            | FixedShape::Periodic { .. } => shape.evaluate(self.r),
+        }
+    }
+
+    /// `eq(r, row)`, ignoring the bits of
+    /// `row` past `r.len()` as `eq_index` does.
+    fn eq(&self, row: usize) -> Flat<F> {
+        match &self.eq {
+            Some(tables) => tables.eq(row),
+            None => eq_index(self.r, row),
+        }
+    }
+
+    /// MLE of one cadence block: an interval of the eq
+    /// tables at stride 1, cached residue sums otherwise.
+    fn cadence(&mut self, stride: usize, count: usize, origin: usize, values: &[F]) -> Flat<F> {
+        let zero = Flat::from_raw(F::ZERO);
+
+        if stride == 0 || values.len() != stride {
+            return zero;
+        }
+
+        let end = origin.saturating_add(stride.saturating_mul(count));
+
+        let Self { r, eq, sums } = self;
+
+        match (stride, eq) {
+            (1, Some(tables)) => scaled(values[0], tables.below(end) + tables.below(origin)),
+            _ => {
+                for limit in [end, origin] {
+                    sums.entry((stride, limit))
+                        .or_insert_with(|| residue_sums(r, limit, stride, None));
+                }
+
+                let upper = &sums[&(stride, end)];
+                let lower = &sums[&(stride, origin)];
+                let shift = stride - origin % stride;
+
+                let mut acc = zero;
+                for (c, (&u, &l)) in upper.iter().zip(lower).enumerate() {
+                    acc += scaled(values[(c + shift) % stride], u + l);
+                }
+
+                acc
+            }
+        }
+    }
+}
+
+/// `eq(r, ·)` over the low and the high
+/// half of `r`, each with its prefix sums.
+struct EqTables<F> {
+    low_bits: usize,
+    eq_low: Vec<Flat<F>>,
+    eq_high: Vec<Flat<F>>,
+    below_low: Vec<Flat<F>>,
+    below_high: Vec<Flat<F>>,
+}
+
+impl<F: HardwareField> EqTables<F> {
+    fn new(r: &[Flat<F>]) -> Self {
+        let low_bits = r.len() / 2;
+        let eq_low = eq_table(&r[..low_bits]);
+        let eq_high = eq_table(&r[low_bits..]);
+
+        Self {
+            low_bits,
+            below_low: running_sums(&eq_low),
+            below_high: running_sums(&eq_high),
+            eq_low,
+            eq_high,
+        }
+    }
+
+    /// `eq(r, row)`, ignoring the bits of `row` past `r.len()`.
+    fn eq(&self, row: usize) -> Flat<F> {
+        let low = row & (self.eq_low.len() - 1);
+        let high = (row >> self.low_bits) & (self.eq_high.len() - 1);
+
+        self.eq_low[low] * self.eq_high[high]
+    }
+
+    /// `Σ_{x < limit} eq(r, x)`; one once `limit` reaches `2^r.len()`.
+    fn below(&self, limit: usize) -> Flat<F> {
+        let high = limit >> self.low_bits;
+
+        if high >= self.eq_high.len() {
+            return Flat::from_raw(F::ONE);
+        }
+
+        let low = limit & (self.eq_low.len() - 1);
+
+        self.below_high[high] + self.eq_high[high] * self.below_low[low]
+    }
+}
+
 /// Declares a fixed column from a shape.
 pub fn fix<F>(col_idx: usize, shape: FixedShape<F>) -> FixedColumn<F> {
     FixedColumn { col_idx, shape }
@@ -596,12 +754,12 @@ pub fn validate_fixed_columns<F: TowerField>(
 }
 
 /// `Σ_{x < limit, x ≡ c (mod stride)} eq(r, x) · W^⌊x / stride⌋`
-/// per residue `c`, from `steps[t] = W^(2^t)`.
+/// per residue `c`, from `steps[t] = W^(2^t)`; `W = 1` without steps.
 fn residue_sums<F: HardwareField>(
     r: &[Flat<F>],
     limit: usize,
     stride: usize,
-    steps: &[Flat<F>],
+    steps: Option<&[Flat<F>]>,
 ) -> Vec<Flat<F>> {
     let one = Flat::from_raw(F::ONE);
     let zero = Flat::from_raw(F::ZERO);
@@ -622,32 +780,33 @@ fn residue_sums<F: HardwareField>(
     }
 
     for t in (0..r.len()).rev() {
-        let bit_one = r[t];
-        let bit_zero = one + r[t];
-        let step = steps[t];
+        let r_t = r[t];
+        let step = steps.map(|steps| steps[t]);
 
         next.fill(zero);
 
         for (residue, &weight) in free.iter().enumerate() {
             let low = 2 * residue;
+            let hi = weight * r_t;
 
-            let (at, w) = division_step(low, weight * bit_zero, stride, step);
+            let (at, w) = division_step(low, weight + hi, stride, step);
             next[at] += w;
 
-            let (at, w) = division_step(low + 1, weight * bit_one, stride, step);
+            let (at, w) = division_step(low + 1, hi, stride, step);
             next[at] += w;
         }
 
         let low = 2 * tight_residue;
+        let hi = tight * r_t;
 
         (tight_residue, tight) = match (limit >> t) & 1 {
             1 => {
-                let (at, w) = division_step(low, tight * bit_zero, stride, step);
+                let (at, w) = division_step(low, tight + hi, stride, step);
                 next[at] += w;
 
-                division_step(low + 1, tight * bit_one, stride, step)
+                division_step(low + 1, hi, stride, step)
             }
-            _ => division_step(low, tight * bit_zero, stride, step),
+            _ => division_step(low, tight + hi, stride, step),
         };
 
         core::mem::swap(&mut free, &mut next);
@@ -660,11 +819,12 @@ fn division_step<F: HardwareField>(
     value: usize,
     weight: Flat<F>,
     stride: usize,
-    step: Flat<F>,
+    step: Option<Flat<F>>,
 ) -> (usize, Flat<F>) {
-    match value >= stride {
-        true => (value - stride, weight * step),
-        false => (value, weight),
+    match (value >= stride, step) {
+        (true, Some(step)) => (value - stride, weight * step),
+        (true, None) => (value - stride, weight),
+        (false, _) => (value, weight),
     }
 }
 
@@ -680,10 +840,9 @@ fn cadence_mle<F: HardwareField>(
     }
 
     let end = origin.saturating_add(stride.saturating_mul(count));
-    let unit = vec![Flat::from_raw(F::ONE); r.len()];
 
-    let mut class_sums = residue_sums(r, end, stride, &unit);
-    let start_sums = residue_sums(r, origin, stride, &unit);
+    let mut class_sums = residue_sums(r, end, stride, None);
+    let start_sums = residue_sums(r, origin, stride, None);
 
     for (c, s) in start_sums.iter().enumerate() {
         class_sums[c] += *s;
@@ -733,6 +892,51 @@ fn eq_index<F: HardwareField>(r: &[Flat<F>], index: usize) -> Flat<F> {
     }
 
     prod
+}
+
+/// `eq(r, x)` for every `x < 2^r.len()`,
+/// bit `k` of `x` paired with `r[k]`.
+fn eq_table<F: HardwareField>(r: &[Flat<F>]) -> Vec<Flat<F>> {
+    let mut table = Vec::with_capacity(1 << r.len());
+    table.push(Flat::from_raw(F::ONE));
+
+    for &r_k in r {
+        for i in 0..table.len() {
+            let hi = table[i] * r_k;
+
+            table[i] += hi;
+            table.push(hi);
+        }
+    }
+
+    table
+}
+
+/// `sums[k] = Σ_{i < k} values[i]` for `k = 0..=len`.
+fn running_sums<F: HardwareField>(values: &[Flat<F>]) -> Vec<Flat<F>> {
+    let mut sums = Vec::with_capacity(values.len() + 1);
+    let mut acc = Flat::from_raw(F::ZERO);
+
+    sums.push(acc);
+
+    for &v in values {
+        acc += v;
+
+        sums.push(acc);
+    }
+
+    sums
+}
+
+/// `value · x`, skipping the basis conversion when `value` is zero or one.
+fn scaled<F: HardwareField>(value: F, x: Flat<F>) -> Flat<F> {
+    if value == F::ZERO {
+        Flat::from_raw(F::ZERO)
+    } else if value == F::ONE {
+        x
+    } else {
+        value.to_hardware() * x
+    }
 }
 
 fn validate_shape<F: TowerField>(
@@ -788,13 +992,14 @@ fn validate_shape<F: TowerField>(
                 }
             }
 
-            for (i, &(row, _)) in entries.iter().enumerate() {
-                if entries[..i].iter().any(|&(prior, _)| prior == row) {
-                    return Err(errors::Error::Protocol {
-                        protocol: "fixed_column",
-                        message: "duplicate Sparse row",
-                    });
-                }
+            let mut rows: Vec<usize> = entries.iter().map(|&(row, _)| row).collect();
+            rows.sort_unstable();
+
+            if rows.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(errors::Error::Protocol {
+                    protocol: "fixed_column",
+                    message: "duplicate Sparse row",
+                });
             }
 
             check_bit_domain(entries.iter().map(|&(_, v)| v), col_type)

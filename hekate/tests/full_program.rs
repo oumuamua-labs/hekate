@@ -7,6 +7,7 @@ use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
+use hekate_core::errors::Error;
 use hekate_core::trace::{IntoTraceColumn, Trace};
 use hekate_math::{Bit, Block32};
 use hekate_program::circuit::{Circuit, CircuitProgram};
@@ -14,6 +15,7 @@ use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::prepared::{PreparedProgram, VerifierScratch};
 use proptest::prelude::*;
 use rand::{TryRngCore, rngs::OsRng};
 
@@ -261,6 +263,154 @@ fn zk_air_happy_path() {
     .unwrap();
 
     assert!(ok, "ZK Program verification failed");
+}
+
+#[test]
+fn prepared_verify_matches_verify_across_reuse() {
+    let mut config = test_config();
+    config.zero_knowledge = true;
+
+    let mut scratch = VerifierScratch::<F>::new();
+
+    for num_vars in [8, 10] {
+        let num_rows = 1 << num_vars;
+        let air = fib_program(num_rows);
+        let id = program_id(&air).unwrap();
+        let prepared = PreparedProgram::new(&air, &config).unwrap();
+
+        assert_eq!(prepared.program_id(), &id);
+
+        let trace = generate_fib_trace(num_vars);
+        let expected_pub = trace.get_element(1, num_rows - 1).unwrap().to_tower();
+
+        let honest = ProgramInstance::new(num_rows, vec![expected_pub]);
+        let forged = ProgramInstance::new(num_rows, vec![expected_pub + F::ONE]);
+
+        let proof = prove(
+            b"FibAir_Prepared",
+            &air,
+            &honest,
+            &ProgramWitness::new(trace),
+            &config,
+            [0x5A; 32],
+            None,
+        )
+        .unwrap();
+
+        for (instance, accepts) in [(&honest, true), (&forged, false), (&honest, true)] {
+            let fresh = HekateVerifier::<F, H>::verify(
+                &id,
+                &air,
+                instance,
+                &proof,
+                &mut Transcript::<H>::new(b"FibAir_Prepared"),
+                &config,
+            );
+
+            let reused = HekateVerifier::<F, H>::verify_prepared(
+                &id,
+                &prepared,
+                instance,
+                &proof,
+                &mut Transcript::<H>::new(b"FibAir_Prepared"),
+                &mut scratch,
+            );
+
+            assert_eq!(fresh.as_ref().ok(), reused.as_ref().ok(), "2^{num_vars}");
+            assert_eq!(matches!(reused, Ok(true)), accepts, "2^{num_vars}");
+        }
+    }
+}
+
+#[test]
+fn prepared_program_rejects_another_programs_id() {
+    let config = test_config();
+    let num_vars = 8;
+    let num_rows = 1 << num_vars;
+
+    let air = fib_program(num_rows);
+    let other = fib_program(2 * num_rows);
+    let other_id = program_id(&other).unwrap();
+
+    let prepared = PreparedProgram::new(&air, &config).unwrap();
+
+    assert_ne!(prepared.program_id(), &other_id);
+
+    let trace = generate_fib_trace(num_vars);
+    let expected_pub = trace.get_element(1, num_rows - 1).unwrap().to_tower();
+
+    let instance = ProgramInstance::new(num_rows, vec![expected_pub]);
+
+    let proof = prove(
+        b"FibAir_OtherId",
+        &air,
+        &instance,
+        &ProgramWitness::new(trace),
+        &config,
+        [0x3C; 32],
+        None,
+    )
+    .unwrap();
+
+    let outcome = HekateVerifier::<F, H>::verify_prepared(
+        &other_id,
+        &prepared,
+        &instance,
+        &proof,
+        &mut Transcript::<H>::new(b"FibAir_OtherId"),
+        &mut VerifierScratch::new(),
+    );
+
+    assert!(matches!(outcome, Err(Error::ProgramIdMismatch { .. })));
+}
+
+#[test]
+fn verify_batch_rejects_exactly_forged_position() {
+    let mut config = test_config();
+    config.zero_knowledge = true;
+
+    let num_vars = 8;
+    let num_rows = 1 << num_vars;
+
+    let air = fib_program(num_rows);
+    let id = program_id(&air).unwrap();
+    let prepared = PreparedProgram::new(&air, &config).unwrap();
+
+    let trace = generate_fib_trace(num_vars);
+    let expected_pub = trace.get_element(1, num_rows - 1).unwrap().to_tower();
+
+    let honest = ProgramInstance::new(num_rows, vec![expected_pub]);
+    let forged = ProgramInstance::new(num_rows, vec![expected_pub + F::ONE]);
+
+    let proof = prove(
+        b"FibAir_Batch",
+        &air,
+        &honest,
+        &ProgramWitness::new(trace),
+        &config,
+        [0x77; 32],
+        None,
+    )
+    .unwrap();
+
+    for bad in 0..4 {
+        let batch: Vec<_> = (0..4)
+            .map(|i| match i == bad {
+                true => (&forged, &proof),
+                false => (&honest, &proof),
+            })
+            .collect();
+
+        let results = HekateVerifier::<F, H>::verify_batch(&id, &prepared, b"FibAir_Batch", &batch);
+
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(
+                matches!(result, Ok(true)),
+                i != bad,
+                "forged at {bad}, item {i}"
+            );
+        }
+    }
 }
 
 proptest! {

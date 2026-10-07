@@ -3,12 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::chiplet::ChipletDef;
-use crate::constraint::{ConstraintAst, ConstraintExpr, ExprId};
+use crate::constraint::{BoundaryConstraint, ConstraintAst, ConstraintExpr, ExprId};
 use crate::expander::{RING_BLIND_BITS, RingSwitchPlan, claim_weights, eq_tensor_b};
 use crate::linearized::{self, RingGadget, linearized_coeffs};
-use crate::permutation::{BusKind, RankClock, Source, eval_row_idx_byte_mle, eval_row_idx_le_mle};
-use crate::predicate::{AffineRow, ClaimLayout, Form, PredicateRows, Unknown, WireRole, compile};
-use crate::{Air, ProgramInstance};
+use crate::permutation::{
+    BusKind, PermutationCheckSpec, RankClock, Source, eval_row_idx_byte_mle, eval_row_idx_le_mle,
+};
+use crate::predicate::{AffineRow, ClaimLayout, Form, Unknown, WireRole, compile};
+use crate::{Air, FixedColumn, ProgramInstance, ShapeEvaluator};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
@@ -64,6 +66,53 @@ pub struct ConsistencyInputs<F> {
     pub val_final_masked: Flat<F>,
 }
 
+impl<F: HardwareField> ConsistencyInputs<F> {
+    /// `α^k · eq_zc` for `k` in `0..roots`, the
+    /// weight root `k` carries in the consistency row.
+    fn root_weights(&self, roots: usize) -> impl Iterator<Item = Flat<F>> + '_ {
+        core::iter::successors(Some(self.eq_zc), |w| Some(*w * self.alpha)).take(roots)
+    }
+}
+
+/// One table's AST, bus specs, fixed pins and boundary
+/// constraints, borrowed where the `Air` getters clone.
+#[derive(Clone, Copy)]
+pub struct TableStatics<'a, F: TowerField> {
+    pub ast: &'a ConstraintAst<F>,
+    pub specs: &'a [(String, PermutationCheckSpec)],
+    pub fixed: &'a [FixedColumn<F>],
+    pub boundary: &'a [BoundaryConstraint<F>],
+}
+
+/// The parts behind [`TableStatics`], read once from an
+/// `Air` that does not hold them, such as a `Program`.
+pub struct TableParts<F: TowerField> {
+    pub ast: ConstraintAst<F>,
+    pub specs: Vec<(String, PermutationCheckSpec)>,
+    pub fixed: Vec<FixedColumn<F>>,
+    pub boundary: Vec<BoundaryConstraint<F>>,
+}
+
+impl<F: TowerField> TableParts<F> {
+    pub fn of(air: &impl Air<F>) -> Self {
+        Self {
+            ast: air.constraint_ast(),
+            specs: air.permutation_checks(),
+            fixed: air.fixed_columns(),
+            boundary: air.boundary_constraints(),
+        }
+    }
+
+    pub fn statics(&self) -> TableStatics<'_, F> {
+        TableStatics {
+            ast: &self.ast,
+            specs: &self.specs,
+            fixed: &self.fixed,
+            boundary: &self.boundary,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TableShape {
     pub num_vars: usize,
@@ -81,13 +130,16 @@ impl TableShape {
     pub fn from_air<F: TowerField>(
         air: &impl Air<F>,
         num_vars: usize,
-        ast: &ConstraintAst<F>,
+        statics: &TableStatics<'_, F>,
     ) -> errors::Result<Self> {
-        let num_buses = air.permutation_checks().len();
+        let ast = statics.ast;
+        let num_buses = statics.specs.len();
+
+        ast.validate_order()?;
 
         let mut sumcheck_degree = ast.max_degree() + 1;
 
-        if !air.boundary_constraints().is_empty() {
+        if !statics.boundary.is_empty() {
             sumcheck_degree = sumcheck_degree.max(2);
         }
 
@@ -187,14 +239,15 @@ impl OuterStatement {
             });
         }
 
+        let main_parts = TableParts::of(main);
         let mut shapes = vec![TableShape::from_air(
             main,
             main_num_vars,
-            &main.constraint_ast(),
+            &main_parts.statics(),
         )?];
 
         for (def, &num_vars) in chiplets.iter().zip(chiplet_num_vars) {
-            shapes.push(TableShape::from_air(def, num_vars, &def.constraint_ast())?);
+            shapes.push(TableShape::from_air(def, num_vars, &def.statics())?);
         }
 
         Ok(Self::new(&shapes, blinding_columns))
@@ -295,9 +348,9 @@ pub struct EvalRecord<F> {
 }
 
 /// One table's share of the statement, in transcript order.
-pub struct TableRecord<F> {
+pub struct TableRecord<'s, F> {
     pub claims_masked: Vec<Flat<F>>,
-    pub predicate: PredicateRows<F>,
+    pub ast: &'s ConstraintAst<F>,
     pub consistency: ConsistencyInputs<F>,
 
     /// `(pad, claim, public value)` per fixed column.
@@ -309,15 +362,67 @@ pub struct TableRecord<F> {
     /// `(bus id, pad, masked claimed sum)` per bus.
     pub claimed_sums: Vec<(String, u32, Flat<F>)>,
 
-    pub mul_wires: u32,
+    pub shape: TableShape,
 }
 
-/// The assembled statement: affine rows, and the ring
-/// gadgets whose tie coefficients [`linear_weights`]
-/// streams onto their chain rows.
-pub struct OuterRows<F> {
+impl<F: TowerField + HardwareField> TableRecord<'_, F> {
+    fn affine_rows(&self) -> usize {
+        let buses = self.consistency.buses.len();
+        let chain = match self.gadget {
+            Some(_) => linearized::CHAIN_ROWS,
+            None => 0,
+        };
+
+        2 * self.shape.mul_nodes + 2 + 3 * buses + self.fixed.len() + chain
+    }
+
+    /// `f` on each row between the predicate
+    /// and chain rows, in statement order; the
+    /// consistency row comes without its root terms.
+    fn for_each_tail_row(&self, mut f: impl FnMut(AffineRow<F>)) {
+        let consistency = &self.consistency;
+        let pad_first = consistency.pad_first;
+
+        f(consistency_row(self.ast.roots.len(), consistency));
+
+        for bus in &consistency.buses {
+            let [lhs, rhs] = bus_operand_rows(bus, pad_first, consistency.beta);
+
+            f(lhs);
+            f(rhs);
+        }
+
+        for &(pad, claim, public) in &self.fixed {
+            f(fixed_column_row(pad, claim, public));
+        }
+
+        f(eval_final_row(
+            &self.trace_eval.mask_form,
+            self.trace_eval.claim_masked,
+            self.trace_eval.fin,
+        ));
+
+        let half = (self.claims_masked.len() / 2) as u32;
+        let num_buses = consistency.buses.len() as u32;
+
+        for (k, bus) in consistency.buses.iter().enumerate() {
+            let claim = half - num_buses + k as u32;
+
+            f(h_claim_pin_row(
+                bus.h_pad,
+                bus.h_masked,
+                pad_first + claim,
+                claim,
+            ));
+        }
+    }
+}
+
+/// The assembled statement: affine rows, and each ring
+/// gadget with the statement row its chain starts at.
+pub struct OuterRows<'r, F> {
     pub affine: Vec<AffineRow<F>>,
-    pub gadgets: Vec<RingGadget<F>>,
+    pub gadgets: Vec<(usize, &'r RingGadget<F>)>,
 }
 
 /// `H_0` of an eval sumcheck over the pad.
@@ -357,12 +462,10 @@ pub struct EvalOutput<F> {
 
 /// Everything a table's record is built from; both
 /// sides hold all of it after the table's eval phase.
-pub struct TableInputs<'a, F: TowerField, A> {
-    pub air: &'a A,
-    pub ast: &'a ConstraintAst<F>,
+pub struct TableInputs<'a, 's, F: TowerField> {
+    pub statics: TableStatics<'s, F>,
+    pub shape: TableShape,
     pub instance: &'a ProgramInstance<F>,
-    pub num_vars: usize,
-    pub trace_width: usize,
     pub blinding_columns: usize,
 
     pub alpha: Flat<F>,
@@ -381,6 +484,192 @@ pub struct TableInputs<'a, F: TowerField, A> {
     pub pads: TablePads,
     pub trace_eval: EvalRecord<F>,
     pub gadget: Option<RingGadget<F>>,
+}
+
+/// Weight rows and target of the linear
+/// test, summed over scaled affine rows.
+struct Accumulator<'l, F> {
+    layout: &'l OuterLayout,
+    weights: Vec<Vec<Flat<F>>>,
+    target: Flat<F>,
+}
+
+impl<'l, F: TowerField + HardwareField> Accumulator<'l, F> {
+    fn new(layout: &'l OuterLayout) -> Self {
+        Self {
+            layout,
+            weights: vec![vec![Flat::from_raw(F::ZERO); layout.message_len]; layout.total_rows()],
+            target: Flat::from_raw(F::ZERO),
+        }
+    }
+
+    fn add(&mut self, unknown: Unknown, value: Flat<F>) {
+        let (row, col) = self.layout.slot(unknown);
+        self.weights[row][col] += value;
+    }
+
+    /// Adds `scale` times one table's `row`: claims read
+    /// from `claims`, wires shifted by `mul_offset`.
+    fn row(&mut self, row: &AffineRow<F>, scale: Flat<F>, claims: &[Flat<F>], mul_offset: u32) {
+        for &(unknown, coeff) in &row.unknowns {
+            self.add(unknown.shifted(mul_offset), scale * coeff);
+        }
+
+        let mut constant = row.constant;
+        for &(idx, coeff) in &row.claims {
+            constant += coeff * claims[idx as usize];
+        }
+
+        self.target += scale * constant;
+    }
+
+    /// The weight rows that hold a nonzero
+    /// entry, with their oracle row indices.
+    fn batch(mut self) -> LinearBatch<F> {
+        let zero = Flat::from_raw(F::ZERO);
+        let rows: Vec<usize> = (0..self.weights.len())
+            .filter(|&r| self.weights[r].iter().any(|v| *v != zero))
+            .collect();
+
+        let weights = rows
+            .iter()
+            .map(|&r| mem::take(&mut self.weights[r]))
+            .collect();
+
+        LinearBatch {
+            weights,
+            rows,
+            target: self.target,
+        }
+    }
+}
+
+struct Sweep<F> {
+    live: Vec<bool>,
+    adjoint: Vec<Flat<F>>,
+}
+
+impl<F: TowerField + HardwareField> Sweep<F> {
+    fn new() -> Self {
+        Self {
+            live: Vec::new(),
+            adjoint: Vec::new(),
+        }
+    }
+
+    /// Adds the table's predicate rows at `scales` and its
+    /// root terms at `consistency` in one pass from the last
+    /// node to the first, each node handing down its adjoint.
+    fn run(
+        &mut self,
+        acc: &mut Accumulator<'_, F>,
+        record: &TableRecord<'_, F>,
+        scales: &[Flat<F>],
+        consistency: Flat<F>,
+        mul_offset: u32,
+    ) -> errors::Result<()> {
+        let ast = record.ast;
+        let claims = &record.claims_masked;
+
+        let layout = ClaimLayout {
+            pad_first: record.consistency.pad_first,
+            half: (claims.len() / 2) as u32,
+        };
+
+        let n = ast.arena.len();
+
+        self.live.clear();
+        self.live.resize(n, false);
+        self.adjoint.clear();
+        self.adjoint.resize(n, Flat::from_raw(F::ZERO));
+
+        let roots = record.consistency.root_weights(ast.roots.len());
+        for (root, weight) in ast.roots.iter().zip(roots) {
+            self.pass(*root, consistency * weight);
+        }
+
+        let mut muls = scales.len() / 2;
+
+        // Children sit at lower indices than their parent
+        for i in (0..n).rev() {
+            if !self.live[i] {
+                continue;
+            }
+
+            let adjoint = self.adjoint[i];
+
+            match ast.arena.get(ExprId(i as u32)) {
+                ConstraintExpr::Cell(cell) => {
+                    let idx = layout.index(*cell);
+
+                    acc.add(Unknown::Pad(layout.pad_first + idx), adjoint);
+
+                    acc.target += adjoint * claims[idx as usize];
+                }
+                ConstraintExpr::Const(v) => acc.target += adjoint * v.to_hardware(),
+                ConstraintExpr::Add(a, b) => {
+                    self.pass(*a, adjoint);
+                    self.pass(*b, adjoint);
+                }
+                ConstraintExpr::Scale(coeff, a) => self.pass(*a, adjoint * coeff.to_hardware()),
+                ConstraintExpr::Sum(children) => {
+                    for c in children {
+                        self.pass(*c, adjoint);
+                    }
+                }
+                ConstraintExpr::Mul(a, b) => {
+                    muls = muls.checked_sub(1).ok_or(errors::Error::Protocol {
+                        protocol: "outer",
+                        message: "table shape undercounts the AST's Mul nodes",
+                    })?;
+
+                    let lhs = scales[2 * muls];
+                    let rhs = scales[2 * muls + 1];
+                    let mul = mul_offset + muls as u32;
+
+                    acc.add(
+                        Unknown::Wire {
+                            mul,
+                            role: WireRole::Lhs,
+                        },
+                        lhs,
+                    );
+                    acc.add(
+                        Unknown::Wire {
+                            mul,
+                            role: WireRole::Rhs,
+                        },
+                        rhs,
+                    );
+                    acc.add(
+                        Unknown::Wire {
+                            mul,
+                            role: WireRole::Product,
+                        },
+                        adjoint,
+                    );
+
+                    self.pass(*a, lhs);
+                    self.pass(*b, rhs);
+                }
+            }
+        }
+
+        match muls {
+            0 => Ok(()),
+            _ => Err(errors::Error::Protocol {
+                protocol: "outer",
+                message: "table shape overcounts the AST's Mul nodes",
+            }),
+        }
+    }
+
+    fn pass(&mut self, child: ExprId, value: Flat<F>) {
+        let c = child.0 as usize;
+
+        self.live[c] = true;
+        self.adjoint[c] += value;
+    }
 }
 
 pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
@@ -420,6 +709,7 @@ pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
         .collect();
 
     let gadget = RingGadget::new(ring, mu, first_wire);
+
     form.extend(gadget.delta_form());
 
     Ok(InitialForm {
@@ -458,20 +748,20 @@ where
     })
 }
 
-pub fn table_record<F, A>(inputs: TableInputs<'_, F, A>) -> errors::Result<TableRecord<F>>
+pub fn table_record<'s, F>(inputs: TableInputs<'_, 's, F>) -> errors::Result<TableRecord<'s, F>>
 where
     F: TowerField + HardwareField,
-    A: Air<F>,
 {
-    let air = inputs.air;
-    let ast = inputs.ast;
+    let TableStatics {
+        ast,
+        specs: bus_specs,
+        fixed: fixed_columns,
+        boundary: boundary_constraints,
+    } = inputs.statics;
 
-    let boundary_constraints = air.boundary_constraints();
-    let bus_specs = air.permutation_checks();
-    let shape = TableShape::from_air(air, inputs.num_vars, ast)?;
-
-    let num_vars = inputs.num_vars;
-    let trace_width = inputs.trace_width;
+    let shape = inputs.shape;
+    let num_vars = shape.num_vars;
+    let trace_width = shape.num_columns;
     let r_final = inputs.r_final;
     let pad_first = inputs.pads.claims;
     let half = shape.eval_claims(inputs.blinding_columns) as u32;
@@ -485,8 +775,10 @@ where
 
     let eq_row_checker = TensorProduct::new(r_final.to_vec());
 
+    let mut shapes = ShapeEvaluator::new(r_final);
     let mut fixed = Vec::new();
-    for fc in &air.fixed_columns() {
+
+    for fc in fixed_columns {
         if fc.col_idx >= trace_width {
             return Err(errors::Error::Protocol {
                 protocol: "outer",
@@ -497,12 +789,12 @@ where
         fixed.push((
             pad_first + fc.col_idx as u32,
             fc.col_idx as u32,
-            fc.shape.evaluate(r_final),
+            shapes.evaluate(&fc.shape),
         ));
     }
 
     let mut boundary = Vec::with_capacity(boundary_constraints.len());
-    for bc in &boundary_constraints {
+    for bc in boundary_constraints {
         if bc.col_idx >= trace_width || bc.row_idx >= 1 << num_vars {
             return Err(errors::Error::Protocol {
                 protocol: "outer",
@@ -583,8 +875,8 @@ where
     }
 
     let logup_alpha_offset = ast.roots.len() + boundary_constraints.len() + inputs.blinding_columns;
-    let mut alpha_pow = Flat::from_raw(F::ONE);
 
+    let mut alpha_pow = Flat::from_raw(F::ONE);
     for _ in 0..logup_alpha_offset {
         alpha_pow *= inputs.alpha;
     }
@@ -592,6 +884,7 @@ where
     let mut initial = Vec::with_capacity(bus_specs.len());
     for k in 0..bus_specs.len() as u32 {
         initial.push((Unknown::Pad(inputs.pads.claimed_sums + k), alpha_pow));
+
         alpha_pow *= inputs.alpha;
     }
 
@@ -626,7 +919,7 @@ where
 
     Ok(TableRecord {
         claims_masked: inputs.claims_masked,
-        predicate: compile(ast, ClaimLayout { pad_first, half }),
+        ast,
         consistency,
         fixed,
         trace_eval: inputs.trace_eval,
@@ -643,78 +936,50 @@ where
                 )
             })
             .collect(),
-        mul_wires: shape.mul_wires() as u32,
+        shape,
     })
 }
 
 /// Every affine row of the statement, claims folded
 /// into constants and wire indices offset per table.
-pub fn assemble<F: TowerField + HardwareField>(
-    records: Vec<TableRecord<F>>,
+pub fn assemble<'r, F: TowerField + HardwareField>(
+    records: &'r [TableRecord<'_, F>],
     statement: &OuterStatement,
-) -> errors::Result<OuterRows<F>> {
+) -> errors::Result<OuterRows<'r, F>> {
     let mut affine = Vec::new();
     let mut gadgets = Vec::new();
     let mut offset = 0u32;
-    let mut buses: BTreeMap<String, Vec<(u32, Flat<F>)>> = BTreeMap::new();
 
-    for mut record in records {
+    for record in records {
         let first = affine.len();
 
-        affine.append(&mut record.predicate.affine);
-        affine.push(consistency_row(
-            &record.predicate.roots,
-            &record.consistency,
-        ));
+        let layout = ClaimLayout {
+            pad_first: record.consistency.pad_first,
+            half: (record.claims_masked.len() / 2) as u32,
+        };
 
-        for bus in &record.consistency.buses {
-            let [lhs, rhs] =
-                bus_operand_rows(bus, record.consistency.pad_first, record.consistency.beta);
+        let predicate = compile(record.ast, layout);
+        let consistency = first + predicate.affine.len();
 
-            affine.push(lhs);
-            affine.push(rhs);
+        affine.extend(predicate.affine);
+
+        record.for_each_tail_row(|row| affine.push(row));
+
+        let weights = record.consistency.root_weights(predicate.roots.len());
+        for (form, weight) in predicate.roots.iter().zip(weights) {
+            scale_into(&mut affine[consistency], form, weight);
         }
 
-        for &(pad, claim, public) in &record.fixed {
-            affine.push(fixed_column_row(pad, claim, public));
-        }
-
-        affine.push(eval_final_row(
-            &record.trace_eval.mask_form,
-            record.trace_eval.claim_masked,
-            record.trace_eval.fin,
-        ));
-
-        let half = (record.claims_masked.len() / 2) as u32;
-        let num_buses = record.consistency.buses.len() as u32;
-        let pad_first = record.consistency.pad_first;
-
-        for (k, bus) in record.consistency.buses.iter().enumerate() {
-            let claim = half - num_buses + k as u32;
-
-            affine.push(h_claim_pin_row(
-                bus.h_pad,
-                bus.h_masked,
-                pad_first + claim,
-                claim,
-            ));
-        }
-
-        if let Some(mut gadget) = record.gadget {
-            gadget.first_row = affine.len();
+        if let Some(gadget) = &record.gadget {
+            gadgets.push((affine.len(), gadget));
             affine.extend(gadget.wire_rows());
-            gadgets.push(gadget);
         }
 
         for row in &mut affine[first..] {
             resolve_table_row(row, &record.claims_masked, offset);
         }
 
-        offset += record.mul_wires;
-
-        for (bus_id, pad, masked) in record.claimed_sums {
-            buses.entry(bus_id).or_default().push((pad, masked));
-        }
+        offset += record.shape.mul_wires() as u32;
     }
 
     if offset as usize != statement.mul_wires {
@@ -724,11 +989,31 @@ pub fn assemble<F: TowerField + HardwareField>(
         });
     }
 
-    for endpoints in buses.values() {
+    for endpoints in bus_endpoints(records).values() {
         affine.push(bus_sum_row(endpoints));
     }
 
     Ok(OuterRows { affine, gadgets })
+}
+
+/// Affine rows of the statement [`assemble`] builds:
+/// every table's, then one bus-sum row per bus id.
+pub fn statement_rows<F: TowerField + HardwareField>(
+    records: &[TableRecord<'_, F>],
+    statement: &OuterStatement,
+) -> errors::Result<usize> {
+    let wires: usize = records.iter().map(|r| r.shape.mul_wires()).sum();
+
+    if wires != statement.mul_wires {
+        return Err(errors::Error::Protocol {
+            protocol: "outer",
+            message: "table wire counts do not sum to the statement",
+        });
+    }
+
+    let tables: usize = records.iter().map(TableRecord::affine_rows).sum();
+
+    Ok(tables + bus_endpoints(records).len())
 }
 
 pub fn reachable<F: TowerField>(ast: &ConstraintAst<F>) -> Vec<bool> {
@@ -770,8 +1055,10 @@ pub fn mul_node_count<F: TowerField>(ast: &ConstraintAst<F>) -> usize {
         .count()
 }
 
+/// The consistency row without its root terms:
+/// root `k` enters at `α^k · eq_zc`.
 pub fn consistency_row<F: TowerField + HardwareField>(
-    roots: &[Form<F>],
+    roots: usize,
     inputs: &ConsistencyInputs<F>,
 ) -> AffineRow<F> {
     let mut row = AffineRow {
@@ -782,8 +1069,7 @@ pub fn consistency_row<F: TowerField + HardwareField>(
 
     let mut alpha_pow = Flat::from_raw(F::ONE);
 
-    for form in roots {
-        scale_into(&mut row, form, alpha_pow * inputs.eq_zc);
+    for _ in 0..roots {
         alpha_pow *= inputs.alpha;
     }
 
@@ -955,9 +1241,7 @@ pub fn resolve_table_row<F: TowerField + HardwareField>(
     row.claims.clear();
 
     for (unknown, _) in row.unknowns.iter_mut() {
-        if let Unknown::Wire { mul, .. } = unknown {
-            *mul += mul_offset;
-        }
+        *unknown = unknown.shifted(mul_offset);
     }
 }
 
@@ -1103,8 +1387,8 @@ pub fn build_aux_rows<F: TowerField + HardwareField>(
     let (zero_sum_fill, rest) = rest.split_at(code_len - 1);
 
     let zero_sum = layout.linear_mask() - layout.pad_rows;
-    let mut acc = Flat::from_raw(F::ZERO);
 
+    let mut acc = Flat::from_raw(F::ZERO);
     for (slot, &v) in rows[zero_sum][..code_len - 1].iter_mut().zip(zero_sum_fill) {
         *slot = v;
         acc += v;
@@ -1139,16 +1423,39 @@ pub fn aux_filler_len(layout: &OuterLayout, code_len: usize) -> usize {
 /// Challenge count for `outer_r_lin`. The tensor
 /// batches the affine rows at `k / |F|`, not the
 /// `1 / |F|` of one challenge per row.
-pub fn linear_tensor_vars<F>(rows: &OuterRows<F>) -> usize {
-    rows.affine.len().next_power_of_two().ilog2() as usize
+pub fn linear_tensor_vars(rows: usize) -> usize {
+    rows.next_power_of_two().ilog2() as usize
 }
 
-pub fn linear_weights<F: TowerField + HardwareField>(
+/// Weights and target of the linear test on
+/// the rows [`assemble`] builds, computed
+/// from the records without building them.
+pub fn linear_weights<F: TowerField + HardwareField + Into<Block128>>(
     layout: &OuterLayout,
-    rows: &OuterRows<F>,
+    statement: &OuterStatement,
+    records: &[TableRecord<'_, F>],
     tensor: &[F],
 ) -> errors::Result<LinearBatch<F>> {
+    let rows = statement_rows(records, statement)?;
+
     if tensor.len() != linear_tensor_vars(rows) {
+        return Err(errors::Error::Protocol {
+            protocol: "outer",
+            message: "linear batch takes ceil(log2(affine rows)) challenges",
+        });
+    }
+
+    weigh_records(layout, records, &expand_batch_tensor(tensor, rows))
+}
+
+/// Weights and target of the linear test on built rows:
+/// the reference [`linear_weights`] is tested against.
+pub fn linear_weights_of_rows<F: TowerField + HardwareField + Into<Block128>>(
+    layout: &OuterLayout,
+    rows: &OuterRows<'_, F>,
+    tensor: &[F],
+) -> errors::Result<LinearBatch<F>> {
+    if tensor.len() != linear_tensor_vars(rows.affine.len()) {
         return Err(errors::Error::Protocol {
             protocol: "outer",
             message: "linear batch takes ceil(log2(affine rows)) challenges",
@@ -1162,41 +1469,11 @@ pub fn linear_weights<F: TowerField + HardwareField>(
         });
     }
 
-    let scales = expand_batch_tensor(tensor, rows.affine.len());
-
-    let mut weights = vec![vec![Flat::from_raw(F::ZERO); layout.message_len]; layout.total_rows()];
-    let mut target = Flat::from_raw(F::ZERO);
-
-    for (row, &scale) in rows.affine.iter().zip(&scales) {
-        for &(unknown, coeff) in &row.unknowns {
-            let (orow, ocol) = layout.slot(unknown);
-            weights[orow][ocol] += scale * coeff;
-        }
-
-        target += scale * row.constant;
-    }
-
-    for gadget in &rows.gadgets {
-        gadget.for_each_tie_row(|j, tie| {
-            let scale = scales[gadget.row_of(j)];
-            for (&(pad, _), &t) in gadget.ring.iter().zip(tie) {
-                let (orow, ocol) = layout.slot(Unknown::Pad(pad));
-                weights[orow][ocol] += scale * t;
-            }
-        });
-    }
-
-    let used: Vec<usize> = (0..layout.total_rows())
-        .filter(|&r| weights[r].iter().any(|v| *v != Flat::from_raw(F::ZERO)))
-        .collect();
-
-    let selected = used.iter().map(|&r| mem::take(&mut weights[r])).collect();
-
-    Ok(LinearBatch {
-        weights: selected,
-        rows: used,
-        target,
-    })
+    Ok(weigh_rows(
+        layout,
+        rows,
+        &expand_batch_tensor(tensor, rows.affine.len()),
+    ))
 }
 
 fn push_claim<F: TowerField>(row: &mut AffineRow<F>, pad_first: u32, idx: u32, coeff: Flat<F>) {
@@ -1248,11 +1525,119 @@ fn lagrange_weights<F: TowerField + HardwareField>(degree: usize, r: Flat<F>) ->
         .collect()
 }
 
+fn weigh_records<F: TowerField + HardwareField + Into<Block128>>(
+    layout: &OuterLayout,
+    records: &[TableRecord<'_, F>],
+    scales: &[Flat<F>],
+) -> errors::Result<LinearBatch<F>> {
+    let buses = bus_endpoints(records);
+    let tables: usize = records.iter().map(TableRecord::affine_rows).sum();
+
+    if scales.len() != tables + buses.len() {
+        return Err(errors::Error::Protocol {
+            protocol: "outer",
+            message: "scale count does not match the statement rows",
+        });
+    }
+
+    let mut acc = Accumulator::new(layout);
+    let mut sweep = Sweep::new();
+
+    let mut first = 0;
+    let mut mul_offset = 0u32;
+
+    for record in records {
+        let end = first + record.affine_rows();
+
+        weigh_table(
+            &mut acc,
+            &mut sweep,
+            record,
+            &scales[first..end],
+            mul_offset,
+        )?;
+
+        first = end;
+        mul_offset += record.shape.mul_wires() as u32;
+    }
+
+    for (endpoints, &scale) in buses.values().zip(&scales[first..]) {
+        acc.row(&bus_sum_row(endpoints), scale, &[], 0);
+    }
+
+    Ok(acc.batch())
+}
+
+fn weigh_table<F: TowerField + HardwareField + Into<Block128>>(
+    acc: &mut Accumulator<'_, F>,
+    sweep: &mut Sweep<F>,
+    record: &TableRecord<'_, F>,
+    scales: &[Flat<F>],
+    mul_offset: u32,
+) -> errors::Result<()> {
+    let (predicate, tail) = scales.split_at(2 * record.shape.mul_nodes);
+
+    sweep.run(acc, record, predicate, tail[0], mul_offset)?;
+
+    let mut next = 0;
+    record.for_each_tail_row(|row| {
+        acc.row(&row, tail[next], &record.claims_masked, mul_offset);
+
+        next += 1;
+    });
+
+    if let Some(gadget) = &record.gadget {
+        let chain = &tail[next..next + linearized::CHAIN_ROWS];
+        for (row, &scale) in gadget.wire_rows().iter().zip(chain) {
+            acc.row(row, scale, &record.claims_masked, mul_offset);
+        }
+
+        gadget.for_each_tie_weight(chain, |pad, weight| acc.add(Unknown::Pad(pad), weight));
+    }
+
+    Ok(())
+}
+
+fn weigh_rows<F: TowerField + HardwareField + Into<Block128>>(
+    layout: &OuterLayout,
+    rows: &OuterRows<'_, F>,
+    scales: &[Flat<F>],
+) -> LinearBatch<F> {
+    let mut acc = Accumulator::new(layout);
+    for (row, &scale) in rows.affine.iter().zip(scales) {
+        acc.row(row, scale, &[], 0);
+    }
+
+    for &(first, gadget) in &rows.gadgets {
+        let chain = &scales[first..first + linearized::CHAIN_ROWS];
+        gadget.for_each_tie_weight(chain, |pad, weight| acc.add(Unknown::Pad(pad), weight));
+    }
+
+    acc.batch()
+}
+
+fn bus_endpoints<'r, F: TowerField>(
+    records: &'r [TableRecord<'_, F>],
+) -> BTreeMap<&'r str, Vec<(u32, Flat<F>)>> {
+    let mut buses: BTreeMap<&str, Vec<(u32, Flat<F>)>> = BTreeMap::new();
+    for record in records {
+        for (bus_id, pad, masked) in &record.claimed_sums {
+            buses
+                .entry(bus_id.as_str())
+                .or_default()
+                .push((*pad, *masked));
+        }
+    }
+
+    buses
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ProgramCell;
     use crate::constraint::ConstraintArena;
+    use core::ops::Range;
     use hekate_math::Block128;
 
     type F = Block128;
@@ -1283,46 +1668,44 @@ mod tests {
         .to_hardware()
     }
 
-    /// One table:
-    /// `c0 · c1` as the only constraint, two columns,
-    /// one Permutation bus over `[Claim(0), Public(77)]`
-    /// with selector `c1`.
-    fn bus_record(claims_masked: Vec<Flat<F>>, h_masked: Flat<F>, beta: Flat<F>) -> TableRecord<F> {
+    fn bus_ast() -> ConstraintAst<F> {
         let mut arena = ConstraintArena::<F>::new();
 
         let a = arena.cell(ProgramCell::current(0));
         let b = arena.cell(ProgramCell::current(1));
         let root = arena.mul(a, b);
 
-        let ast = ConstraintAst {
+        ConstraintAst {
             arena,
             roots: vec![root],
             labels: vec![None],
-        };
+        }
+    }
 
-        let predicate = compile(
-            &ast,
-            ClaimLayout {
-                pad_first: BUS_PAD_FIRST,
-                half: 2,
-            },
-        );
+    /// One table over [`bus_ast`]: `c0 · c1` as the only
+    /// constraint, two columns, one Permutation bus over
+    /// `[Claim(0), Public(77)]` with selector `c1`.
+    fn bus_record(
+        ast: &ConstraintAst<F>,
+        claims_masked: Vec<Flat<F>>,
+        h_masked: Flat<F>,
+        beta: Flat<F>,
+    ) -> TableRecord<'_, F> {
+        let mul_nodes = mul_node_count(ast);
 
         let bus = BusRow {
             h_pad: BUS_H_PAD,
             h_masked,
-            h_wire: predicate.mul_nodes,
+            h_wire: mul_nodes as u32,
             sources: vec![BusSource::Claim(0), BusSource::Public(mix(BUS_PUBLIC))],
             selector: Some(1),
             recv_selector: None,
             eq_lookup: Flat::from_raw(F::ONE),
         };
 
-        let mul_wires = predicate.mul_nodes + 1;
-
         TableRecord {
             claims_masked,
-            predicate,
+            ast,
             consistency: ConsistencyInputs {
                 pad_first: BUS_PAD_FIRST,
                 eq_zc: mix(1),
@@ -1343,7 +1726,10 @@ mod tests {
             },
             gadget: None,
             claimed_sums: vec![(String::from("bus"), 0, mix(7))],
-            mul_wires,
+            shape: TableShape {
+                mul_nodes,
+                ..shape(1, 2, 3, 1)
+            },
         }
     }
 
@@ -1355,6 +1741,225 @@ mod tests {
                     .any(|&(u, _)| u == Unknown::Wire { mul, role })
             })
             .count()
+    }
+
+    fn rich_ast() -> ConstraintAst<F> {
+        let mut arena = ConstraintArena::<F>::new();
+
+        let c0 = arena.cell(ProgramCell::current(0));
+        let c1 = arena.cell(ProgramCell::current(1));
+        let c2 = arena.cell(ProgramCell::current(2));
+        let n0 = arena.cell(ProgramCell::next(0));
+
+        let k = arena.constant(F::from(0x55u128));
+
+        let prod = arena.mul(c0, c1);
+        let square = arena.mul(c2, c2);
+
+        arena.mul(c1, n0);
+
+        let scaled = arena.scale(F::from(0x1234u128), prod);
+        let sum = arena.sum(vec![scaled, n0, k, n0, square]);
+        let nested = arena.mul(sum, prod);
+        let root = arena.add(nested, c2);
+
+        ConstraintAst {
+            arena,
+            roots: vec![root, prod, root, square],
+            labels: vec![None; 4],
+        }
+    }
+
+    fn linear_ast() -> ConstraintAst<F> {
+        let mut arena = ConstraintArena::<F>::new();
+
+        let c0 = arena.cell(ProgramCell::current(0));
+        let n1 = arena.cell(ProgramCell::next(1));
+        let k = arena.constant(F::from(7u128));
+        let scaled = arena.scale(F::from(3u128), n1);
+        let root = arena.sum(vec![c0, scaled, k]);
+
+        ConstraintAst {
+            arena,
+            roots: vec![root],
+            labels: vec![None],
+        }
+    }
+
+    fn empty_ast() -> ConstraintAst<F> {
+        ConstraintAst {
+            arena: ConstraintArena::new(),
+            roots: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
+
+    fn weighted_record(
+        ast: &ConstraintAst<F>,
+        base: u32,
+        columns: u32,
+        buses: u32,
+        fixed: bool,
+        ring: bool,
+    ) -> TableRecord<'_, F> {
+        let seed = base as u128;
+        let one = Flat::from_raw(F::ONE);
+        let half = columns + buses;
+        let mul_nodes = mul_node_count(ast);
+        let first_wire = mul_nodes as u32 + buses;
+
+        let free = base + 2 * half;
+        let sums_pad = free + buses;
+        let mask_pad = sums_pad + buses;
+        let ring_pad = mask_pad + 6;
+
+        let bus_rows = (0..buses)
+            .map(|k| BusRow {
+                h_pad: free + k,
+                h_masked: mix(seed + 10 + k as u128),
+                h_wire: mul_nodes as u32 + k,
+                sources: vec![
+                    BusSource::Claim(0),
+                    BusSource::Public(mix(seed + 20 + k as u128)),
+                    BusSource::Claim(columns - 1),
+                ],
+                selector: (k % 2 == 0).then_some(1),
+                recv_selector: (k == 1).then_some(0),
+                eq_lookup: match k % 2 {
+                    0 => one,
+                    _ => mix(seed + 30 + k as u128),
+                },
+            })
+            .collect();
+
+        let mut mask_form: Vec<(Unknown, Flat<F>)> = (0..3)
+            .map(|j| (Unknown::Pad(mask_pad + 3 + j), mix(seed + 40 + j as u128)))
+            .collect();
+
+        let gadget = ring.then(|| {
+            let entries = (0..4)
+                .map(|c| (ring_pad + c, mix(seed + 50 + c as u128)))
+                .collect();
+            let mu = (0..linearized::BITS as u128)
+                .map(|j| mix(seed + 100 + j))
+                .collect();
+
+            RingGadget::new(entries, mu, first_wire)
+        });
+
+        if let Some(gadget) = &gadget {
+            mask_form.extend(gadget.delta_form());
+        }
+
+        TableRecord {
+            claims_masked: (0..2 * half as u128).map(|i| mix(seed + 300 + i)).collect(),
+            ast,
+            consistency: ConsistencyInputs {
+                pad_first: base,
+                eq_zc: mix(seed + 1),
+                alpha: mix(seed + 2),
+                gamma: mix(seed + 3),
+                beta: mix(seed + 4),
+                boundary: vec![
+                    (1, mix(seed + 5), mix(seed + 6)),
+                    (0, mix(seed + 7), mix(seed + 8)),
+                ],
+                telescope: vec![(columns - 1, half + columns - 1)],
+                buses: bus_rows,
+                val_final_form: (0..3)
+                    .map(|j| (Unknown::Pad(mask_pad + j), mix(seed + 60 + j as u128)))
+                    .collect(),
+                val_final_masked: mix(seed + 9),
+            },
+            fixed: match fixed {
+                true => vec![(base, 0, mix(seed + 70)), (base + 1, 1, mix(seed + 71))],
+                false => Vec::new(),
+            },
+            trace_eval: EvalRecord {
+                mask_form,
+                claim_masked: mix(seed + 80),
+                fin: mix(seed + 81),
+            },
+            gadget,
+            claimed_sums: (0..buses)
+                .map(|k| {
+                    let id = match k {
+                        0 => String::from("shared"),
+                        _ => alloc::format!("table {base} bus {k}"),
+                    };
+
+                    (id, sums_pad + k, mix(seed + 90 + k as u128))
+                })
+                .collect(),
+            shape: TableShape {
+                num_vars: 3,
+                num_columns: columns as usize,
+                sumcheck_degree: 3,
+                num_buses: buses as usize,
+                mul_nodes,
+                ring_units: ring,
+            },
+        }
+    }
+
+    /// Three tables over `asts`: the first carries every
+    /// row class, the bus id `shared` spans two tables.
+    fn weighted_statement(
+        asts: &[ConstraintAst<F>; 3],
+    ) -> (Vec<TableRecord<'_, F>>, OuterStatement, OuterLayout) {
+        let records = vec![
+            weighted_record(&asts[0], 0, 4, 2, true, true),
+            weighted_record(&asts[1], 600, 3, 1, false, false),
+            weighted_record(&asts[2], 1200, 2, 0, true, false),
+        ];
+
+        let statement = OuterStatement {
+            masked_scalars: 2048,
+            mul_wires: records.iter().map(|r| r.shape.mul_wires()).sum(),
+        };
+
+        let geom = hekate_core::config::Config::prod()
+            .outer_geom(statement.masked_scalars, statement.mul_wires, 128)
+            .unwrap();
+
+        let layout =
+            OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires).unwrap();
+
+        (records, statement, layout)
+    }
+
+    /// Statement rows of each nonempty row class, in [`assemble`] order.
+    fn row_classes(records: &[TableRecord<'_, F>]) -> Vec<(&'static str, Range<usize>)> {
+        let mut classes = Vec::new();
+        let mut at = 0;
+
+        for record in records {
+            let buses = record.consistency.buses.len();
+            let chain = match record.gadget {
+                Some(_) => linearized::CHAIN_ROWS,
+                None => 0,
+            };
+
+            for (class, len) in [
+                ("predicate", 2 * record.shape.mul_nodes),
+                ("consistency", 1),
+                ("bus operands", 2 * buses),
+                ("fixed", record.fixed.len()),
+                ("eval final", 1),
+                ("h pins", buses),
+                ("chain", chain),
+            ] {
+                if len > 0 {
+                    classes.push((class, at..at + len));
+                }
+
+                at += len;
+            }
+        }
+
+        classes.push(("bus sums", at..at + bus_endpoints(records).len()));
+
+        classes
     }
 
     #[test]
@@ -1538,13 +2143,15 @@ mod tests {
     #[test]
     fn every_hadamard_wire_operand_is_pinned_by_row() {
         let claims: Vec<Flat<F>> = (0..4).map(|i| mix(100 + i)).collect();
-        let record = bus_record(claims, mix(8), mix(9));
+        let ast = bus_ast();
+        let record = bus_record(&ast, claims, mix(8), mix(9));
         let statement = OuterStatement {
             masked_scalars: 32,
-            mul_wires: record.mul_wires as usize,
+            mul_wires: record.shape.mul_wires(),
         };
 
-        let rows = assemble(vec![record], &statement).unwrap();
+        let records = [record];
+        let rows = assemble(&records, &statement).unwrap();
 
         for mul in 0..statement.mul_wires as u32 {
             for role in [WireRole::Lhs, WireRole::Rhs, WireRole::Product] {
@@ -1571,7 +2178,8 @@ mod tests {
         let h_masked = h + pad[BUS_H_PAD as usize];
         let key = plain[0] + beta * mix(BUS_PUBLIC);
 
-        let record = bus_record(claims_masked.clone(), h_masked, beta);
+        let ast = bus_ast();
+        let record = bus_record(&ast, claims_masked.clone(), h_masked, beta);
         let bus = &record.consistency.buses[0];
         let [lhs, rhs] = bus_operand_rows(bus, BUS_PAD_FIRST, beta);
 
@@ -1622,7 +2230,8 @@ mod tests {
         let h_masked = h + pad[BUS_H_PAD as usize];
         let key = plain[0] + beta * mix(BUS_PUBLIC);
 
-        let record = bus_record(claims_masked.clone(), h_masked, beta);
+        let ast = bus_ast();
+        let record = bus_record(&ast, claims_masked.clone(), h_masked, beta);
         let bus = &record.consistency.buses[0];
         let [lhs, _] = bus_operand_rows(bus, BUS_PAD_FIRST, beta);
 
@@ -1785,13 +2394,15 @@ mod tests {
                 .map(|(i, &c)| c + pad[BUS_PAD_FIRST as usize + i])
                 .collect();
 
-            let record = bus_record(claims_masked.clone(), h_masked, mix(9));
+            let ast = bus_ast();
+            let record = bus_record(&ast, claims_masked.clone(), h_masked, mix(9));
             let statement = OuterStatement {
                 masked_scalars: 32,
-                mul_wires: record.mul_wires as usize,
+                mul_wires: record.shape.mul_wires(),
             };
 
-            let rows = assemble(vec![record], &statement).unwrap();
+            let records = [record];
+            let rows = assemble(&records, &statement).unwrap();
             let pins: Vec<&AffineRow<F>> = rows
                 .affine
                 .iter()
@@ -1835,6 +2446,116 @@ mod tests {
 
         for len in 1..=4 {
             assert_eq!(expand_batch_tensor(&[a, b], len), full[..len]);
+        }
+    }
+
+    #[test]
+    fn reverse_pass_reproduces_assembled_weights() {
+        let asts = [rich_ast(), linear_ast(), empty_ast()];
+        let (records, statement, layout) = weighted_statement(&asts);
+
+        let rows = statement_rows(&records, &statement).unwrap();
+        let assembled = assemble(&records, &statement).unwrap();
+
+        assert_eq!(assembled.affine.len(), rows);
+
+        let tensor: Vec<F> = (0..linear_tensor_vars(rows) as u128)
+            .map(|i| mix(9000 + i).to_tower())
+            .collect();
+
+        let got = linear_weights(&layout, &statement, &records, &tensor).unwrap();
+        let want = linear_weights_of_rows(&layout, &assembled, &tensor).unwrap();
+
+        assert_eq!(got.rows, want.rows);
+        assert_eq!(got.weights, want.weights);
+        assert_eq!(got.target, want.target);
+    }
+
+    #[test]
+    fn dropping_row_class_breaks_equality() {
+        let asts = [rich_ast(), linear_ast(), empty_ast()];
+        let (records, statement, layout) = weighted_statement(&asts);
+
+        let assembled = assemble(&records, &statement).unwrap();
+        let scales: Vec<Flat<F>> = (0..assembled.affine.len() as u128)
+            .map(|i| mix(7000 + i))
+            .collect();
+
+        let want = weigh_rows(&layout, &assembled, &scales);
+        let full = weigh_records(&layout, &records, &scales).unwrap();
+
+        assert_eq!(full.weights, want.weights);
+        assert_eq!(full.target, want.target);
+
+        for (class, rows) in row_classes(&records) {
+            let mut cut = scales.clone();
+            cut[rows].fill(Flat::from_raw(F::ZERO));
+
+            let got = weigh_records(&layout, &records, &cut).unwrap();
+
+            assert!(
+                got.weights != want.weights || got.target != want.target,
+                "{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn miscounted_mul_nodes_are_rejected() {
+        let ast = rich_ast();
+
+        for (delta, message) in [
+            (-1, "table shape undercounts the AST's Mul nodes"),
+            (1, "table shape overcounts the AST's Mul nodes"),
+        ] {
+            let mut record = weighted_record(&ast, 0, 4, 2, true, true);
+            record.shape.mul_nodes = record.shape.mul_nodes.saturating_add_signed(delta);
+
+            let statement = OuterStatement {
+                masked_scalars: 2048,
+                mul_wires: record.shape.mul_wires(),
+            };
+
+            let geom = hekate_core::config::Config::prod()
+                .outer_geom(statement.masked_scalars, statement.mul_wires, 128)
+                .unwrap();
+
+            let layout =
+                OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires).unwrap();
+
+            let records = [record];
+            let rows = statement_rows(&records, &statement).unwrap();
+            let tensor: Vec<F> = (0..linear_tensor_vars(rows) as u128)
+                .map(|i| mix(8000 + i).to_tower())
+                .collect();
+
+            match linear_weights(&layout, &statement, &records, &tensor) {
+                Err(errors::Error::Protocol { message: got, .. }) => assert_eq!(got, message),
+                _ => panic!("{message}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mismatched_scale_count_is_rejected() {
+        let asts = [rich_ast(), linear_ast(), empty_ast()];
+        let (records, statement, layout) = weighted_statement(&asts);
+
+        let rows = statement_rows(&records, &statement).unwrap();
+        let scales: Vec<Flat<F>> = (0..=rows as u128).map(|i| mix(6000 + i)).collect();
+
+        assert!(weigh_records(&layout, &records, &scales[..rows]).is_ok());
+
+        for len in [0, rows - 1, rows + 1] {
+            match weigh_records(&layout, &records, &scales[..len]) {
+                Err(errors::Error::Protocol { message, .. }) => {
+                    assert_eq!(
+                        message, "scale count does not match the statement rows",
+                        "{len}"
+                    )
+                }
+                _ => panic!("{len}"),
+            }
         }
     }
 }

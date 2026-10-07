@@ -131,8 +131,7 @@ fn shipped_tables_fit_outer_statement() {
 
         let mut table_wires = 0;
         for def in &defs {
-            let ast = def.constraint_ast();
-            let shape = TableShape::from_air(def, num_vars, &ast).unwrap();
+            let shape = TableShape::from_air(def, num_vars, &def.statics()).unwrap();
 
             table_wires += shape.mul_wires();
             masked_scalars += shape.masked_scalars(blind_units);

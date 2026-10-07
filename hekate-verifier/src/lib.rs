@@ -12,11 +12,14 @@ mod sumcheck;
 
 pub mod evaluator;
 pub mod logup;
+pub mod prepared;
 
 pub use sumcheck::verify;
 
-use crate::evaluator::{EvalVerifyContext, EvaluatorVerifier};
+use crate::evaluator::{Claims, EvalVerifyContext, EvaluatorVerifier};
 use crate::outer::PadCursor;
+use crate::prepared::{PreparedProgram, VerifierScratch};
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
@@ -34,18 +37,21 @@ use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::constraint::ConstraintAst;
 use hekate_program::expander::RingSwitchPlan;
 use hekate_program::outer::{
-    EvalInputs, OuterStatement, TableInputs, TablePads, TableRecord, TableShape, eval_record,
-    table_record,
+    EvalInputs, OuterStatement, TableInputs, TablePads, TableRecord, TableShape, TableStatics,
+    eval_record, table_record,
 };
 use hekate_program::permutation::{
-    self, BusKind, RankClock, RankTable, TableHeight, eval_row_idx_byte_mle, eval_row_idx_le_mle,
-    rank_clocks, validate_fixed_selectors,
+    self, BusKind, PermutationCheckSpec, RankClock, RankTable, TableHeight, eval_row_idx_byte_mle,
+    eval_row_idx_le_mle, rank_clocks,
 };
-use hekate_program::{Air, FixedColumn, Program, ProgramInstance, digest, validate_fixed_columns};
-use tracing::{debug, info, instrument, warn};
+use hekate_program::{
+    Air, FixedColumn, Program, ProgramInstance, ShapeEvaluator, validate_fixed_columns,
+};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use tracing::{debug, info, instrument, trace_span, warn};
 
 struct ZerocheckMasked<F: HardwareField> {
     claimed_sums_first: u32,
@@ -65,19 +71,17 @@ struct ZerocheckOutcome<F: HardwareField> {
 /// before the replay and read by every phase.
 struct ChipletTable<'a, F: TowerField> {
     def: &'a ChipletDef<F>,
-    ast: ConstraintAst<F>,
     shape: TableShape,
-    plan: RingSwitchPlan,
+    plan: &'a RingSwitchPlan,
 }
 
 /// One table's static shape shared by its
 /// ZeroCheck, eval opening and outer record.
 #[derive(Clone, Copy)]
-struct TableView<'a, F: TowerField, A> {
-    air: &'a A,
+struct TableView<'a, 's, F: TowerField> {
     instance: &'a ProgramInstance<F>,
     plan: &'a RingSwitchPlan,
-    ast: &'a ConstraintAst<F>,
+    statics: TableStatics<'s, F>,
     shape: &'a TableShape,
     clocks: &'a [Option<RankClock>],
 }
@@ -126,7 +130,7 @@ where
     /// 5. Verify the main AIR ZeroCheck (with LogUp).
     /// 6. Verify the main eval at `r_final`.
     /// 7. Check that LogUp `claimed_sum` totals cancel per `bus_id`.
-    #[instrument(skip_all, name = "Hekate::verify")]
+    #[instrument(skip_all, level = "trace", name = "Hekate::verify")]
     pub fn verify<P: Program<F> + Sync>(
         program_id: &[u8; 32],
         program: &P,
@@ -135,6 +139,75 @@ where
         transcript: &mut Transcript<H>,
         config: &Config,
     ) -> errors::Result<bool> {
+        let prepared = PreparedProgram::new(program, config)?;
+
+        Self::verify_prepared(
+            program_id,
+            &prepared,
+            instance,
+            proof,
+            transcript,
+            &mut VerifierScratch::new(),
+        )
+    }
+
+    /// [`Self::verify_prepared`] on each `(instance, proof)`, one
+    /// proof per pool thread with its own scratch and a transcript
+    /// opened with `label`; results come back in input order.
+    pub fn verify_batch(
+        program_id: &[u8; 32],
+        prepared: &PreparedProgram<F>,
+        label: &'static [u8],
+        proofs: &[(&ProgramInstance<F>, &InnerProof<F>)],
+    ) -> Vec<errors::Result<bool>> {
+        let verify =
+            |scratch: &mut VerifierScratch<F>,
+             &(instance, proof): &(&ProgramInstance<F>, &InnerProof<F>)| {
+                Self::verify_prepared(
+                    program_id,
+                    prepared,
+                    instance,
+                    proof,
+                    &mut Transcript::new(label),
+                    scratch,
+                )
+            };
+
+        #[cfg(feature = "parallel")]
+        let results = {
+            proofs
+                .par_iter()
+                .map_init(VerifierScratch::new, verify)
+                .collect()
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let results = {
+            let mut scratch = VerifierScratch::new();
+
+            proofs
+                .iter()
+                .map(|item| verify(&mut scratch, item))
+                .collect()
+        };
+
+        results
+    }
+
+    /// [`Self::verify`] against a program prepared once, under
+    /// the `Config` it was built with; `program_id` is checked
+    /// against the id computed when `prepared` was built.
+    #[instrument(skip_all, level = "trace", name = "verify_prepared")]
+    pub fn verify_prepared(
+        program_id: &[u8; 32],
+        prepared: &PreparedProgram<F>,
+        instance: &ProgramInstance<F>,
+        proof: &InnerProof<F>,
+        transcript: &mut Transcript<H>,
+        scratch: &mut VerifierScratch<F>,
+    ) -> errors::Result<bool> {
+        let config = &prepared.config;
+
         let num_rows = instance.num_rows();
         let num_vars = num_rows.trailing_zeros() as usize;
 
@@ -163,20 +236,17 @@ where
             });
         }
 
-        if instance.public_inputs().len() != program.num_public_inputs() {
+        if instance.public_inputs().len() != prepared.num_public_inputs {
             return Err(errors::Error::Protocol {
                 protocol: "verifier",
                 message: "instance public input count does not match the program",
             });
         }
 
-        let main_entries = program.virtual_expander().map(|e| e.expansion_entries());
-        let main_plan = RingSwitchPlan::new(
-            program.column_layout(),
-            main_entries.as_deref(),
-            config.blind_units(),
-            program.permutation_checks().len(),
-        )?;
+        let main_statics = prepared.main.statics();
+        let main_perm = main_statics.specs;
+        let main_fixed = main_statics.fixed;
+        let main_plan = &prepared.main_plan;
 
         let field_bits = F::BITS;
         let main_split = main_plan.split_vars(num_vars, field_bits, config);
@@ -201,12 +271,12 @@ where
             });
         }
 
-        let combined_hw = canonical_slice_to_flat(combined_vals);
-        let trace_values = &combined_hw[0..expected_trace_len];
-        let trace_values_next = &combined_hw[expected_trace_len..];
+        let claims = Claims::new(combined_vals);
 
-        let main_perm = program.permutation_checks();
-        let chiplet_defs = program.chiplet_defs()?;
+        let trace_values = &claims.flat()[0..expected_trace_len];
+        let trace_values_next = &claims.flat()[expected_trace_len..];
+
+        let chiplet_defs = &prepared.chiplets;
 
         if proof.chiplet_commitments.len() != chiplet_defs.len() {
             return Err(errors::Error::Protocol {
@@ -215,24 +285,21 @@ where
             });
         }
 
-        let mut chiplet_asts = Vec::with_capacity(chiplet_defs.len());
+        validate_fixed_columns(main_fixed, &prepared.virtual_column_layout, Some(num_vars))?;
 
-        for def in &chiplet_defs {
-            validate_fixed_selectors(&def.permutation_checks, def.pins())?;
+        let main_shape = TableShape {
+            num_vars,
+            ..prepared.main_shape
+        };
 
-            chiplet_asts.push(def.constraint_ast());
-        }
-
-        let main_ast = program.constraint_ast();
-        let main_fixed = program.fixed_columns();
-
-        validate_fixed_selectors(&main_perm, &main_fixed)?;
-        validate_fixed_columns(&main_fixed, program.virtual_column_layout(), Some(num_vars))?;
-
-        let main_shape = TableShape::from_air(program, num_vars, &main_ast)?;
         let mut chiplet_tables = Vec::with_capacity(chiplet_defs.len());
 
-        for (def, ast) in chiplet_defs.iter().zip(chiplet_asts) {
+        let prepared_chiplets = chiplet_defs
+            .iter()
+            .zip(&prepared.chiplet_plans)
+            .zip(&prepared.chiplet_shapes);
+
+        for ((def, plan), shape) in prepared_chiplets {
             let c_num_rows = proof.chiplet_commitments[chiplet_tables.len()].num_rows;
 
             if c_num_rows == 0 || !c_num_rows.is_power_of_two() {
@@ -245,23 +312,17 @@ where
             let c_num_vars = c_num_rows.trailing_zeros() as usize;
 
             validate_fixed_columns(
-                &Air::<F>::fixed_columns(def),
+                def.pins(),
                 Air::<F>::virtual_column_layout(def),
                 Some(c_num_vars),
             )?;
 
-            let c_entries = Air::<F>::virtual_expander(def).map(|e| e.expansion_entries());
-            let plan = RingSwitchPlan::new(
-                Air::<F>::column_layout(def),
-                c_entries.as_deref(),
-                config.blind_units(),
-                def.permutation_checks.len(),
-            )?;
-
             chiplet_tables.push(ChipletTable {
                 def,
-                shape: TableShape::from_air(def, c_num_vars, &ast)?,
-                ast,
+                shape: TableShape {
+                    num_vars: c_num_vars,
+                    ..*shape
+                },
                 plan,
             });
         }
@@ -269,8 +330,8 @@ where
         let mut rank_tables = Vec::with_capacity(1 + chiplet_tables.len());
 
         rank_tables.push(RankTable {
-            specs: &main_perm,
-            fixed: &main_fixed,
+            specs: main_perm,
+            fixed: main_fixed,
             height: TableHeight::Main(num_vars),
         });
 
@@ -284,18 +345,24 @@ where
 
         let clocks = rank_clocks(&rank_tables)?;
 
+        let main_view = TableView {
+            instance,
+            plan: main_plan,
+            statics: main_statics,
+            shape: &main_shape,
+            clocks: &clocks[0],
+        };
+
         // =========================================================
         // PHASE 1: TRACE COMMITMENT & FIAT-SHAMIR BINDING
         // =========================================================
-        let actual = digest::program_id_of(program, &chiplet_defs, &program.inline_chiplets()?);
+        let actual = prepared.program_id;
 
         if actual != *program_id {
             return Err(errors::Error::ProgramIdMismatch { actual });
         }
 
-        Self::verify_trace_commitment(
-            actual, program, instance, proof, transcript, config, &main_plan,
-        )?;
+        Self::verify_trace_commitment(actual, &main_view, proof, transcript, config)?;
 
         if config.zero_knowledge != proof.pad_root.is_some()
             || config.zero_knowledge != proof.outer.is_some()
@@ -348,7 +415,7 @@ where
         let beta = transcript.challenge_field::<F>(b"bus_beta")?.to_hardware();
 
         let lookup_bus_points =
-            Self::draw_lookup_bus_points(program, &chiplet_defs, proof, transcript)?;
+            Self::draw_lookup_bus_points(main_perm, chiplet_defs, proof, transcript)?;
 
         let logup = LogUpContext {
             gamma,
@@ -373,15 +440,6 @@ where
         // =========================================================
         // PHASE 5: MAIN AIR ZEROCHECK + LogUp
         // =========================================================
-        let main_view = TableView {
-            air: program,
-            instance,
-            plan: &main_plan,
-            ast: &main_ast,
-            shape: &main_shape,
-            clocks: &clocks[0],
-        };
-
         let main_proof = TableProof {
             commitment: &proof.trace_commitment,
             sc_proof: &proof.zerocheck_proof,
@@ -411,7 +469,7 @@ where
             &main_proof,
             transcript,
             config,
-            &combined_hw,
+            &claims,
             zerocheck,
             &logup,
             pad_cursor.as_mut(),
@@ -431,7 +489,9 @@ where
 
             let statement = OuterStatement::new(&shapes, config.blind_units());
 
-            return outer::verify_outer(proof, transcript, config, statement, records, cursor);
+            return outer::verify_outer(
+                proof, transcript, config, statement, &records, cursor, scratch,
+            );
         }
 
         let mut endpoints: Vec<(String, F)> = Vec::new();
@@ -454,7 +514,7 @@ where
     /// Absorb each chiplet's structure +
     /// root into the transcript (no ZeroCheck).
     /// Mirrors prover's commit_chiplets_only.
-    #[instrument(skip_all, name = "verify_chiplet_commitments_only")]
+    #[instrument(skip_all, level = "trace", name = "verify_chiplet_commitments_only")]
     fn verify_chiplet_commitments_only(
         chiplet_tables: &[ChipletTable<'_, F>],
         proof: &InnerProof<F>,
@@ -472,7 +532,7 @@ where
                 &c_comm.root,
             );
 
-            for bc in &Air::<F>::boundary_constraints(def) {
+            for bc in def.boundaries() {
                 bc.absorb_into(transcript);
             }
         }
@@ -481,17 +541,17 @@ where
     /// PHASE 4:
     /// Per-chiplet fused verification.
     /// Mirrors prover's fused_chiplet_loop.
-    #[instrument(skip_all, name = "verify_chiplet_fused")]
+    #[instrument(skip_all, level = "trace", name = "verify_chiplet_fused")]
     #[allow(clippy::too_many_arguments)]
-    fn verify_chiplet_fused(
-        chiplet_tables: &[ChipletTable<'_, F>],
+    fn verify_chiplet_fused<'s>(
+        chiplet_tables: &[ChipletTable<'s, F>],
         chiplet_clocks: &[Vec<Option<RankClock>>],
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
         logup: &LogUpContext<'_, F>,
         mut cursor: Option<&mut PadCursor>,
-        records: &mut Vec<TableRecord<F>>,
+        records: &mut Vec<TableRecord<'s, F>>,
     ) -> errors::Result<()> {
         if proof.chiplet_zerocheck_proofs.len() != chiplet_tables.len() {
             return Err(errors::Error::Protocol {
@@ -533,17 +593,17 @@ where
                 });
             }
 
-            let c_combined_hw = canonical_slice_to_flat(c_combined);
-            let c_trace_values = &c_combined_hw[0..c_trace_width];
-            let c_trace_values_next = &c_combined_hw[c_trace_width..];
+            let c_claims = Claims::new(c_combined);
+
+            let c_trace_values = &c_claims.flat()[0..c_trace_width];
+            let c_trace_values_next = &c_claims.flat()[c_trace_width..];
 
             let c_instance = ProgramInstance::new(c_num_rows, vec![]);
 
             let view = TableView {
-                air: def,
                 instance: &c_instance,
-                plan: &table.plan,
-                ast: &table.ast,
+                plan: table.plan,
+                statics: def.statics(),
                 shape: &table.shape,
                 clocks: &chiplet_clocks[c_idx],
             };
@@ -580,7 +640,7 @@ where
                 &table_proof,
                 transcript,
                 config,
-                &c_combined_hw,
+                &c_claims,
                 zerocheck,
                 logup,
                 cursor.as_deref_mut(),
@@ -609,24 +669,23 @@ where
     /// A table's eval at `r_final` after its ZeroCheck.
     /// Mirrors the prover's `prove_eval_at_r_final`; with
     /// a pad cursor it also completes the table's record.
-    #[instrument(skip_all, name = "verify_table_eval")]
+    #[instrument(skip_all, level = "trace", name = "verify_table_eval")]
     #[allow(clippy::too_many_arguments)]
-    fn verify_table_eval<A: Air<F>>(
-        view: &TableView<'_, F, A>,
+    fn verify_table_eval<'s>(
+        view: &TableView<'_, 's, F>,
         proof: &TableProof<'_, F>,
         transcript: &mut Transcript<H>,
         config: &Config,
-        claimed_values: &[Flat<F>],
+        claims: &Claims<'_, F>,
         zerocheck: ZerocheckOutcome<F>,
         logup: &LogUpContext<'_, F>,
         mut cursor: Option<&mut PadCursor>,
-        records: &mut Vec<TableRecord<F>>,
+        records: &mut Vec<TableRecord<'s, F>>,
     ) -> errors::Result<bool> {
         let TableView {
-            air,
             instance,
             plan: ring_plan,
-            ast,
+            statics,
             shape,
             clocks,
         } = *view;
@@ -647,11 +706,11 @@ where
             });
         }
 
-        let claims_first = cursor.as_deref_mut().map(|c| c.take(claimed_values.len()));
+        let claims_first = cursor.as_deref_mut().map(|c| c.take(claims.flat().len()));
 
         let ctx = EvalVerifyContext {
             point: &r_final,
-            claimed_values,
+            claims,
             num_vars,
             ring_plan,
             shifted_claims: true,
@@ -674,7 +733,7 @@ where
 
         let eval_rounds_first = cursor.take(2 * num_vars);
 
-        let claim_pads: Vec<u32> = (0..claimed_values.len() as u32)
+        let claim_pads: Vec<u32> = (0..claims.flat().len() as u32)
             .map(|c| claims_first + c)
             .collect();
 
@@ -692,11 +751,9 @@ where
         })?;
 
         records.push(table_record(TableInputs {
-            air,
-            ast,
+            statics,
+            shape: *shape,
             instance,
-            num_vars,
-            trace_width: air.num_columns(),
             blinding_columns: config.blind_units(),
             alpha: masked.alpha,
             gamma: logup.gamma,
@@ -708,7 +765,7 @@ where
             claimed_sums_masked: &logup_aux.claimed_sums,
             h_evals_masked: &logup_aux.h_evals,
             val_final_masked: masked.val_final,
-            claims_masked: claimed_values.to_vec(),
+            claims_masked: claims.flat().to_vec(),
             pads: TablePads {
                 claimed_sums: masked.claimed_sums_first,
                 zerocheck: masked.zerocheck_first,
@@ -725,18 +782,16 @@ where
     /// Mirrors `commit_main_trace` on the verifier side:
     /// absorbs every public parameter and the
     /// trace root before the first challenge.
-    #[instrument(skip_all, name = "verify_trace_commitment")]
-    fn verify_trace_commitment<A: Air<F>>(
+    #[instrument(skip_all, level = "trace", name = "verify_trace_commitment")]
+    fn verify_trace_commitment(
         program_id: [u8; 32],
-        main: &A,
-        instance: &ProgramInstance<F>,
+        main: &TableView<'_, '_, F>,
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
-        main_plan: &RingSwitchPlan,
     ) -> errors::Result<()> {
-        let num_rows = instance.num_rows();
-        let num_cols = main.num_columns();
+        let num_rows = main.instance.num_rows();
+        let num_cols = main.shape.num_columns;
 
         transcript.append_message(b"program_id", &program_id);
         transcript.append_u64(b"num_columns", num_cols as u64);
@@ -745,15 +800,11 @@ where
         transcript.append_u64(b"zero_knowledge", u64::from(config.zero_knowledge));
         transcript.append_u64(b"num_queries", config.num_queries as u64);
         transcript.append_u64(b"outer_queries", config.outer_queries as u64);
-        transcript.append_u64(b"main_row_bytes", main_plan.opened_row_bytes() as u64);
-
-        for val in instance.public_inputs() {
-            transcript.append_field(b"public_input", *val);
-        }
-
+        transcript.append_u64(b"main_row_bytes", main.plan.opened_row_bytes() as u64);
+        transcript.append_field_each(b"public_input", main.instance.public_inputs());
         transcript.append_message(b"trace_root", &proof.trace_commitment.root);
 
-        for bc in &main.boundary_constraints() {
+        for bc in main.statics.boundary {
             bc.absorb_into(transcript);
         }
 
@@ -766,10 +817,10 @@ where
     /// not zero. The consistency check at `r_final` covers AIR, boundary,
     /// ZK blinding, and LogUp contributions; with a pad cursor the
     /// values are masked and the check becomes the table's record.
-    #[instrument(skip_all, name = "verify_zerocheck")]
+    #[instrument(skip_all, level = "trace", name = "verify_zerocheck")]
     #[allow(clippy::too_many_arguments)]
-    fn verify_zerocheck<A: Air<F>>(
-        view: &TableView<'_, F, A>,
+    fn verify_zerocheck(
+        view: &TableView<'_, '_, F>,
         proof: &TableProof<'_, F>,
         transcript: &mut Transcript<H>,
         config: &Config,
@@ -779,9 +830,8 @@ where
         mut cursor: Option<&mut PadCursor>,
     ) -> errors::Result<Option<ZerocheckOutcome<F>>> {
         let TableView {
-            air,
             instance,
-            ast,
+            statics,
             shape,
             clocks,
             ..
@@ -797,9 +847,9 @@ where
             lookup_bus_points,
         } = *logup;
 
-        let bus_specs = air.permutation_checks();
-        let bus_specs = bus_specs.as_slice();
-        let trace_width = air.num_columns();
+        let ast = statics.ast;
+        let bus_specs = statics.specs;
+        let trace_width = shape.num_columns;
 
         let num_rows = instance.num_rows();
         let num_vars = num_rows.trailing_zeros() as usize;
@@ -885,7 +935,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let boundary_constraints = air.boundary_constraints();
+        let boundary_constraints = statics.boundary;
         let sumcheck_degree = shape.sumcheck_degree;
 
         // LogUp α_pow offset must match the prover's
@@ -937,6 +987,8 @@ where
 
         debug!("Verifying AIR constraint consistency at r_final");
 
+        let _final = trace_span!("zerocheck_final").entered();
+
         if let (Some(claimed_sums_first), Some(zerocheck_first), Some(h_evals_first)) =
             (claimed_sums_first, zc_first, h_first)
         {
@@ -976,9 +1028,9 @@ where
         // MLE at r_final, substituted into the row ast.evaluate
         // sees so constraints use the verified value.
         let mut current_row_subst: Vec<Flat<F>> = current_row.to_vec();
+        let mut shapes = ShapeEvaluator::new(&r_final);
 
-        let fixed = air.fixed_columns();
-        for fc in &fixed {
+        for fc in statics.fixed {
             let FixedColumn { col_idx, shape } = fc;
 
             if *col_idx >= trace_width {
@@ -988,7 +1040,7 @@ where
                 });
             }
 
-            let expected = shape.evaluate(&r_final);
+            let expected = shapes.evaluate(shape);
 
             if current_row[*col_idx] != expected {
                 warn!(
@@ -1170,15 +1222,15 @@ where
 
     /// Aggregates lookup-bus heights from main + chiplet commitments
     /// and draws one `r_bus` per bus_id in sorted order.
-    fn draw_lookup_bus_points<A: Air<F>>(
-        main: &A,
+    fn draw_lookup_bus_points(
+        main_specs: &[(String, PermutationCheckSpec)],
         chiplet_defs: &[ChipletDef<F>],
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
     ) -> errors::Result<BTreeMap<String, Vec<Flat<F>>>> {
         let mut heights: BTreeMap<String, u64> = BTreeMap::new();
         permutation::accumulate_lookup_heights(
-            &main.permutation_checks(),
+            main_specs,
             proof.trace_commitment.num_rows as u64,
             &mut heights,
         );
@@ -1202,14 +1254,14 @@ where
     }
 }
 
+pub(crate) fn flat_matches_canonical<F: HardwareField>(value: Flat<F>, canonical: F) -> bool {
+    value.to_tower() == canonical
+}
+
 fn canonical_slice_to_flat<F: HardwareField>(values: &[F]) -> Vec<Flat<F>> {
     values
         .iter()
         .copied()
         .map(|value| value.to_hardware())
         .collect()
-}
-
-pub(crate) fn flat_matches_canonical<F: HardwareField>(value: Flat<F>, canonical: F) -> bool {
-    value.to_tower() == canonical
 }

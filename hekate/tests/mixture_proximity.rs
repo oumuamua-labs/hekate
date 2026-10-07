@@ -7,7 +7,7 @@
 //! Proximity layer only; a false statement needs the other checks.
 
 use hekate::core::config::Config;
-use hekate_math::{AdditiveFft, Block128, CantorBasis, Flat, HardwareField, TowerField};
+use hekate_math::{AdditiveFft, Block128, CantorBasis, Flat, TowerField};
 
 type F = Block128;
 
@@ -74,13 +74,14 @@ fn shapes() -> [Shape; 3] {
     ]
 }
 
-/// Mirrors `hekate-verifier` `rs_encode_row`;
+/// Mirrors `hekate-verifier` `rs_encode_at`;
 /// layout drift there voids this probe.
 fn encode(msg: &[Flat<F>], width: usize) -> Vec<Flat<F>> {
     let mut buf = vec![Flat::from_raw(F::ZERO); width];
     buf[..msg.len()].copy_from_slice(msg);
 
     AdditiveFft::<F>::new(width.trailing_zeros())
+        .unwrap()
         .forward_scalar(&mut buf)
         .unwrap();
 
@@ -88,22 +89,9 @@ fn encode(msg: &[Flat<F>], width: usize) -> Vec<Flat<F>> {
 }
 
 fn domain(width: usize) -> Vec<Flat<F>> {
-    let betas: Vec<Flat<F>> = (0..width.trailing_zeros() as usize)
-        .map(|j| F::from(CantorBasis::beta_tower(j).0 as u128).to_hardware())
-        .collect();
+    let basis = CantorBasis::<F>::new(width.trailing_zeros() as usize).unwrap();
 
-    (0..width)
-        .map(|x| {
-            let mut point = Flat::from_raw(F::ZERO);
-            for (j, beta) in betas.iter().enumerate() {
-                if (x >> j) & 1 == 1 {
-                    point += *beta;
-                }
-            }
-
-            point
-        })
-        .collect()
+    (0..width).map(|x| basis.point(x).unwrap()).collect()
 }
 
 /// Degree `msg_len - 1` keeps it inside the code.

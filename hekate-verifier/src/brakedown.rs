@@ -14,6 +14,11 @@ use hekate_crypto::transcript::Transcript;
 use hekate_math::{Block8, HardwareField, PackableField};
 use tracing::instrument;
 
+/// Mean bytes per opened column from
+/// which leaves hash on the thread pool.
+#[cfg(feature = "parallel")]
+const LEAF_POOL_MIN_BYTES: usize = 512;
+
 pub type OpenedRows<'a> = &'a [Vec<u8>];
 
 /// One eval argument's Fiat-Shamir column queries;
@@ -36,7 +41,7 @@ where
 {
     /// Draws `num_queries` columns of the codeword domain;
     /// every tree of the table opens at this one set.
-    #[instrument(skip_all, name = "Brakedown::draw_queries")]
+    #[instrument(skip_all, level = "trace", name = "Brakedown::draw_queries")]
     pub fn draw_queries(
         transcript: &mut Transcript<H>,
         config: &Config,
@@ -87,7 +92,7 @@ where
     /// Verifies one tree's opening at the drawn queries:
     /// hashes each distinct opened column to a leaf and
     /// replays the octopus multiproof against the root.
-    #[instrument(skip_all, name = "Brakedown::verify_opening")]
+    #[instrument(skip_all, level = "trace", name = "Brakedown::verify_opening")]
     pub fn verify_opening<'a>(
         commitment: &BrakedownCommitment,
         proof: &'a BrakedownProof<F>,
@@ -106,19 +111,21 @@ where
         let leaves: Vec<(usize, [u8; 32])> = {
             use rayon::prelude::*;
 
-            distinct
-                .par_iter()
-                .zip(proof.opened_columns.par_iter())
-                .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
-                .collect()
+            let opened_bytes: usize = proof.opened_columns.iter().map(Vec::len).sum();
+
+            if opened_bytes >= LEAF_POOL_MIN_BYTES * distinct.len() {
+                distinct
+                    .par_iter()
+                    .zip(proof.opened_columns.par_iter())
+                    .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
+                    .collect()
+            } else {
+                hash_leaves::<H>(distinct, &proof.opened_columns)
+            }
         };
 
         #[cfg(not(feature = "parallel"))]
-        let leaves: Vec<(usize, [u8; 32])> = distinct
-            .iter()
-            .zip(proof.opened_columns.iter())
-            .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
-            .collect();
+        let leaves = hash_leaves::<H>(distinct, &proof.opened_columns);
 
         let padded_leaves = queries.encoded_width.next_power_of_two();
 
@@ -144,6 +151,15 @@ fn hash_leaf<H: Hasher>(code: &[u8]) -> [u8; 32] {
     h.update(code);
 
     h.finalize()
+}
+
+/// `(column, leaf)` per opened column, on this thread.
+fn hash_leaves<H: Hasher>(distinct: &[usize], columns: &[Vec<u8>]) -> Vec<(usize, [u8; 32])> {
+    distinct
+        .iter()
+        .zip(columns)
+        .map(|(&col_idx, col)| (col_idx, hash_leaf::<H>(col)))
+        .collect()
 }
 
 #[cfg(test)]

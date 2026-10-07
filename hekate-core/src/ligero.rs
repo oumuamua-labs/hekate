@@ -10,14 +10,17 @@ use alloc::vec::Vec;
 use hekate_crypto::Hasher;
 use hekate_crypto::merkle::MerkleTree;
 use hekate_math::fft::vanish_eval;
-use hekate_math::{AdditiveFft, BinaryFieldExtras, Flat, HardwareField, TowerField};
+use hekate_math::{
+    AdditiveFft, BinaryFieldExtras, CantorBasis, FftError, Flat, HardwareField, TowerField,
+};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 const MAX_LOG: u32 = 63;
 
 /// Mask of a product-code response: `low` covers
-/// degrees `< k`, `high` rides `vanisher` for the rest.
+/// degrees `< k`, `high` rides `vanisher` for the rest,
+/// `Z_k` at each position its consumer reads.
 pub struct ProductMask<'a, F> {
     pub low: usize,
     pub high: usize,
@@ -29,8 +32,8 @@ impl<F: TowerField + HardwareField> ProductMask<'_, F> {
         self.low < rows && self.high < rows
     }
 
-    pub fn at(&self, col: usize, values: &[Flat<F>]) -> Flat<F> {
-        values[self.low] + self.vanisher[col] * values[self.high]
+    pub fn at(&self, position: usize, values: &[Flat<F>]) -> Flat<F> {
+        values[self.low] + self.vanisher[position] * values[self.high]
     }
 }
 
@@ -38,6 +41,7 @@ pub struct RowEncoder<F> {
     message: AdditiveFft<F>,
     code: AdditiveFft<F>,
     product: AdditiveFft<F>,
+    basis: CantorBasis<F>,
     code_shift: Flat<F>,
     code_len: usize,
     domain_len: usize,
@@ -62,27 +66,37 @@ impl<F: BinaryFieldExtras + HardwareField> RowEncoder<F> {
             });
         }
 
-        // beta_{log_n} lies outside W_{log_n}
-        let mut beta = F::ONE;
-        for _ in 0..log_n {
-            beta = F::solve_quadratic(beta).ok_or(Error::Protocol {
-                protocol: "ligero",
-                message: "Cantor chain has no next basis element",
-            })?;
-        }
+        let basis = CantorBasis::<F>::new(log_n as usize + 1).map_err(|_| Error::Protocol {
+            protocol: "ligero",
+            message: "Cantor chain has no next basis element",
+        })?;
 
-        if vanish_eval(log_n as usize, beta) == F::ZERO {
+        // beta_{log_n} lies outside W_{log_n}
+        let code_shift = basis.betas()[log_n as usize];
+
+        if vanish_eval(log_n as usize, code_shift.to_tower()) == F::ZERO {
             return Err(Error::Protocol {
                 protocol: "ligero",
                 message: "coset shift landed inside the message subspace",
             });
         }
 
+        let plan = |log: u32| {
+            AdditiveFft::new(log).map_err(|e| Error::Protocol {
+                protocol: "ligero",
+                message: match e {
+                    FftError::TwiddleAlloc { .. } => "transform twiddle table allocation failed",
+                    _ => "transform size has no Cantor basis",
+                },
+            })
+        };
+
         Ok(Self {
-            message: AdditiveFft::new(log_k),
-            code: AdditiveFft::new(log_n),
-            product: AdditiveFft::new(log_k + 1),
-            code_shift: beta.to_hardware(),
+            message: plan(log_k)?,
+            code: plan(log_n)?,
+            product: plan(log_k + 1)?,
+            basis,
+            code_shift,
             code_len: geom.code_len,
             domain_len: geom.domain_len,
         })
@@ -115,27 +129,47 @@ impl<F: BinaryFieldExtras + HardwareField> RowEncoder<F> {
         Ok(())
     }
 
-    /// Coset-domain values of a novel-basis
-    /// coefficient vector, zero-extended.
-    pub fn evaluate(&self, coeffs: &[Flat<F>]) -> Result<Vec<Flat<F>>> {
-        if coeffs.len() > self.domain_len {
-            return Err(Error::Protocol {
-                protocol: "ligero",
-                message: "coefficient vector exceeds the code domain",
-            });
-        }
+    /// Coset-domain values at sorted `columns`
+    /// of `2^m` novel-basis coefficients.
+    pub fn evaluate_at(&self, coeffs: &[Flat<F>], columns: &[usize]) -> Result<Vec<Flat<F>>> {
+        let zero = Flat::from_raw(F::ZERO);
 
-        let mut buf = vec![Flat::from_raw(F::ZERO); self.domain_len];
-        buf[..coeffs.len()].copy_from_slice(coeffs);
+        let mut scratch = vec![zero; coeffs.len().saturating_sub(1)];
+        let mut out = vec![zero; columns.len()];
 
-        self.code
-            .forward_coset_scalar(&mut buf, self.code_shift)
-            .map_err(|_| Error::Protocol {
-                protocol: "ligero",
-                message: "coefficient evaluation rejected its length",
-            })?;
+        self.values_at(coeffs, columns, &mut scratch, &mut out)?;
 
-        Ok(buf)
+        Ok(out)
+    }
+
+    /// `Z_k` at `columns`, as [`Self::message_vanisher`]
+    /// holds it: `σ^{log k}` of each column's point.
+    pub fn vanisher_at(&self, columns: &[usize]) -> Result<Vec<Flat<F>>> {
+        let log_k = self.code_len.trailing_zeros();
+
+        columns
+            .iter()
+            .map(|&col| {
+                let point = match col < self.domain_len {
+                    true => self.basis.point(col).ok(),
+                    false => None,
+                };
+
+                let Some(point) = point else {
+                    return Err(Error::Protocol {
+                        protocol: "ligero",
+                        message: "vanisher column outside the code domain",
+                    });
+                };
+
+                let mut z = self.code_shift + point;
+                for _ in 0..log_k {
+                    z = z * z + z;
+                }
+
+                Ok(z)
+            })
+            .collect()
     }
 
     /// Novel-basis coefficients
@@ -246,6 +280,60 @@ impl<F: BinaryFieldExtras + HardwareField> RowEncoder<F> {
     pub fn domain_len(&self) -> usize {
         self.domain_len
     }
+
+    fn values_at(
+        &self,
+        coeffs: &[Flat<F>],
+        columns: &[usize],
+        scratch: &mut [Flat<F>],
+        out: &mut [Flat<F>],
+    ) -> Result<()> {
+        if coeffs.len() > self.domain_len || columns.last().is_some_and(|&c| c >= self.domain_len) {
+            return Err(Error::Protocol {
+                protocol: "ligero",
+                message: "coefficients or columns exceed the code domain",
+            });
+        }
+
+        self.basis
+            .evaluate_at(coeffs, self.code_shift, columns, scratch, out)
+            .map_err(|_| Error::Protocol {
+                protocol: "ligero",
+                message: "evaluation needs sorted columns and 2^m coefficients",
+            })
+    }
+
+    fn encode_at(
+        &self,
+        message: &[Flat<F>],
+        columns: &[usize],
+        coeffs: &mut [Flat<F>],
+        scratch: &mut [Flat<F>],
+    ) -> Result<Vec<Flat<F>>> {
+        if message.len() > self.code_len {
+            return Err(Error::Protocol {
+                protocol: "ligero",
+                message: "weight message exceeds the code length",
+            });
+        }
+
+        let zero = Flat::from_raw(F::ZERO);
+
+        coeffs[..message.len()].copy_from_slice(message);
+        coeffs[message.len()..].fill(zero);
+
+        self.message
+            .inverse_scalar(coeffs)
+            .map_err(|_| Error::Protocol {
+                protocol: "ligero",
+                message: "message interpolation rejected its length",
+            })?;
+
+        let mut out = vec![zero; columns.len()];
+        self.values_at(coeffs, columns, scratch, &mut out)?;
+
+        Ok(out)
+    }
 }
 
 pub struct Opening<F> {
@@ -296,6 +384,10 @@ impl<F: TowerField> Opening<F> {
                 .collect(),
             siblings: self.siblings.clone(),
         }
+    }
+
+    pub fn column_indices(&self) -> Vec<usize> {
+        self.columns.iter().map(|(col, _)| *col).collect()
     }
 
     /// The verifier's view of a [`Stack`]: the parts' openings
@@ -370,29 +462,33 @@ pub fn verify_interleaved<F: BinaryFieldExtras + HardwareField + TowerField>(
         return false;
     }
 
-    let Ok(response) = encoder.evaluate(coeffs) else {
+    let Ok(response) = encoder.evaluate_at(coeffs, &opening.column_indices()) else {
         return false;
     };
 
-    opening.columns.iter().all(|(col, values)| {
-        if mask >= values.len() || r_int.len() != values.len() - 1 {
-            return false;
-        }
-
-        let mut acc = values[mask];
-        let mut next = 0;
-
-        for (r, v) in values.iter().enumerate() {
-            if r == mask {
-                continue;
+    opening
+        .columns
+        .iter()
+        .zip(&response)
+        .all(|((_, values), &expected)| {
+            if mask >= values.len() || r_int.len() != values.len() - 1 {
+                return false;
             }
 
-            acc += r_int[next] * *v;
-            next += 1;
-        }
+            let mut acc = values[mask];
+            let mut next = 0;
 
-        acc == response[*col]
-    })
+            for (r, v) in values.iter().enumerate() {
+                if r == mask {
+                    continue;
+                }
+
+                acc += r_int[next] * *v;
+                next += 1;
+            }
+
+            acc == expected
+        })
 }
 
 pub fn verify_linear<F: BinaryFieldExtras + HardwareField + TowerField>(
@@ -405,7 +501,7 @@ pub fn verify_linear<F: BinaryFieldExtras + HardwareField + TowerField>(
     opening: &Opening<F>,
 ) -> bool {
     if coeffs.len() != 2 * encoder.code_len()
-        || mask.vanisher.len() != encoder.domain_len()
+        || mask.vanisher.len() != opening.columns.len()
         || weights.rows.len() != rows_used.len()
         || !weights.covers(opening)
     {
@@ -424,25 +520,26 @@ pub fn verify_linear<F: BinaryFieldExtras + HardwareField + TowerField>(
         return false;
     }
 
-    let Ok(response) = encoder.evaluate(coeffs) else {
+    let Ok(response) = encoder.evaluate_at(coeffs, &opening.column_indices()) else {
         return false;
     };
 
     opening
         .columns
         .iter()
+        .zip(&response)
         .enumerate()
-        .all(|(i, (col, values))| {
+        .all(|(i, ((_, values), &expected))| {
             if !mask.covers(values.len()) || rows_used.iter().any(|&r| r >= values.len()) {
                 return false;
             }
 
-            let mut acc = mask.at(*col, values);
+            let mut acc = mask.at(i, values);
             for (weight_row, &row) in weights.rows.iter().zip(rows_used) {
                 acc += weight_row[i] * values[row];
             }
 
-            acc == response[*col]
+            acc == expected
         })
 }
 
@@ -456,7 +553,7 @@ pub fn verify_quadratic<F: BinaryFieldExtras + HardwareField + TowerField>(
     opening: &Opening<F>,
 ) -> bool {
     if coeffs.len() != 2 * encoder.code_len()
-        || mask.vanisher.len() != encoder.domain_len()
+        || mask.vanisher.len() != opening.columns.len()
         || r_quad.len() != triples.len()
     {
         return false;
@@ -473,22 +570,27 @@ pub fn verify_quadratic<F: BinaryFieldExtras + HardwareField + TowerField>(
         return false;
     }
 
-    let Ok(response) = encoder.evaluate(coeffs) else {
+    let Ok(response) = encoder.evaluate_at(coeffs, &opening.column_indices()) else {
         return false;
     };
 
-    opening.columns.iter().all(|(col, values)| {
-        if !mask.covers(values.len()) || triples.iter().flatten().any(|&r| r >= values.len()) {
-            return false;
-        }
+    opening
+        .columns
+        .iter()
+        .zip(&response)
+        .enumerate()
+        .all(|(i, ((_, values), &expected))| {
+            if !mask.covers(values.len()) || triples.iter().flatten().any(|&r| r >= values.len()) {
+                return false;
+            }
 
-        let mut acc = mask.at(*col, values);
-        for (t, [x, y, z]) in triples.iter().enumerate() {
-            acc += r_quad[t] * (values[*x] * values[*y] - values[*z]);
-        }
+            let mut acc = mask.at(i, values);
+            for (t, [x, y, z]) in triples.iter().enumerate() {
+                acc += r_quad[t] * (values[*x] * values[*y] - values[*z]);
+            }
 
-        acc == response[*col]
-    })
+            acc == expected
+        })
 }
 
 /// Checks the wire opening against `root`;
@@ -508,16 +610,7 @@ pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
         .columns
         .iter()
         .zip(opening.values.chunks_exact(rows))
-        .map(|(&col, values)| {
-            let mut hasher = H::new();
-            hasher.update(&[0u8]);
-
-            for v in values {
-                hasher.update(&v.to_bytes());
-            }
-
-            (col as usize, hasher.finalize())
-        })
+        .map(|(&col, values)| (col as usize, column_leaf::<F, H>(values.iter().copied())))
         .collect();
 
     MerkleTree::<F, H>::verify_batch(root, domain_len, &leaves, &opening.siblings)
@@ -525,7 +618,7 @@ pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
 
 pub fn weights_at_columns<F: BinaryFieldExtras + HardwareField + TowerField>(
     encoder: &RowEncoder<F>,
-    messages: Vec<Vec<Flat<F>>>,
+    messages: &[Vec<Flat<F>>],
     columns: &[usize],
 ) -> Result<OpenedWeights<F>> {
     if columns.iter().any(|&c| c >= encoder.domain_len()) {
@@ -535,28 +628,27 @@ pub fn weights_at_columns<F: BinaryFieldExtras + HardwareField + TowerField>(
         });
     }
 
+    let zero = Flat::from_raw(F::ZERO);
+    let k = encoder.code_len();
+    let buffers = || (vec![zero; k], vec![zero; k - 1]);
+
     #[cfg(feature = "parallel")]
-    let iter = messages.into_par_iter();
-    #[cfg(not(feature = "parallel"))]
-    let iter = messages.into_iter();
-
-    let rows = iter
-        .map(|message| {
-            if message.len() > encoder.code_len() {
-                return Err(Error::Protocol {
-                    protocol: "ligero",
-                    message: "weight message exceeds the code length",
-                });
-            }
-
-            let mut row = vec![Flat::from_raw(F::ZERO); encoder.domain_len()];
-            row[..message.len()].copy_from_slice(&message);
-
-            encoder.encode(&mut row)?;
-
-            Ok(columns.iter().map(|&c| row[c]).collect())
+    let rows = messages
+        .par_iter()
+        .map_init(buffers, |(coeffs, scratch), message| {
+            encoder.encode_at(message, columns, coeffs, scratch)
         })
         .collect::<Result<Vec<_>>>()?;
+
+    #[cfg(not(feature = "parallel"))]
+    let rows = {
+        let (mut coeffs, mut scratch) = buffers();
+
+        messages
+            .iter()
+            .map(|message| encoder.encode_at(message, columns, &mut coeffs, &mut scratch))
+            .collect::<Result<Vec<_>>>()?
+    };
 
     Ok(OpenedWeights {
         columns: columns.to_vec(),
@@ -565,15 +657,10 @@ pub fn weights_at_columns<F: BinaryFieldExtras + HardwareField + TowerField>(
 }
 
 /// Leaf of one column, its rows top to bottom.
-pub fn column_leaf<F: TowerField + HardwareField, H: Hasher>(
-    column: impl Iterator<Item = Flat<F>>,
-) -> [u8; 32] {
+pub fn column_leaf<F: TowerField, H: Hasher>(column: impl Iterator<Item = F>) -> [u8; 32] {
     let mut hasher = H::new();
     hasher.update(&[0u8]);
-
-    for v in column {
-        hasher.update(&v.to_tower().to_bytes());
-    }
+    hasher.update_fields(&[], column);
 
     hasher.finalize()
 }
@@ -592,6 +679,15 @@ mod tests {
 
     fn geometry() -> OuterGeometry {
         Config::prod().outer_geom(4_075, 2_384, 128).unwrap()
+    }
+
+    fn geometries() -> Vec<OuterGeometry> {
+        let config = Config::prod();
+
+        [(1, 0), (4_075, 2_384), (41_025, 34_648)]
+            .iter()
+            .map(|&(scalars, wires)| config.outer_geom(scalars, wires, 128).unwrap())
+            .collect()
     }
 
     fn mix(seed: u128) -> Flat<F> {
@@ -797,6 +893,7 @@ mod tests {
         evals[..geom.code_len].copy_from_slice(&coeffs);
 
         AdditiveFft::<F>::new(geom.code_len.ilog2())
+            .unwrap()
             .forward_scalar(&mut evals[..geom.code_len])
             .unwrap();
 
@@ -804,6 +901,7 @@ mod tests {
         direct[..geom.code_len].copy_from_slice(&coeffs);
 
         AdditiveFft::<F>::new(geom.domain_len.ilog2())
+            .unwrap()
             .forward_coset_scalar(&mut direct, encoder.code_shift)
             .unwrap();
 
@@ -819,9 +917,11 @@ mod tests {
         let geom = geometry();
         let encoder = RowEncoder::<F>::new(&geom).unwrap();
 
+        let all: Vec<usize> = (0..geom.domain_len).collect();
+
         for len in [geom.code_len, 2 * geom.code_len] {
             let coeffs: Vec<Flat<F>> = (0..len).map(|i| mix((i + len) as u128 + 5)).collect();
-            let codeword = encoder.evaluate(&coeffs).unwrap();
+            let codeword = encoder.evaluate_at(&coeffs, &all).unwrap();
             let back = encoder.coefficients(&codeword).unwrap();
 
             assert_eq!(codeword.len(), geom.domain_len, "{len}");
@@ -967,11 +1067,13 @@ mod tests {
             })
             .collect();
 
-        let opened_weights = weights_at_columns(&encoder, weight_msgs, &OPENED).unwrap();
+        let opened_weights = weights_at_columns(&encoder, &weight_msgs, &OPENED).unwrap();
+        let opened_vanisher = encoder.vanisher_at(&OPENED).unwrap();
+
         let mask = ProductMask {
             low: 2,
             high: 3,
-            vanisher: &vanisher,
+            vanisher: &opened_vanisher,
         };
 
         let response: Vec<Flat<F>> = (0..geom.domain_len)
@@ -1061,10 +1163,12 @@ mod tests {
             (rows, response)
         };
 
+        let opened_vanisher = encoder.vanisher_at(&OPENED).unwrap();
+
         let mask = ProductMask {
             low: 3,
             high: 4,
-            vanisher: &vanisher,
+            vanisher: &opened_vanisher,
         };
 
         let triples = [[0usize, 1, 2]];
@@ -1151,5 +1255,96 @@ mod tests {
             assert_eq!(&split_low, a);
             assert_eq!(&split_high, b);
         }
+    }
+
+    #[test]
+    fn evaluate_at_matches_full_coset_transform() {
+        for geom in geometries() {
+            let encoder = RowEncoder::<F>::new(&geom).unwrap();
+            let code = AdditiveFft::<F>::new(geom.domain_len.ilog2()).unwrap();
+
+            let mut spread = spread_columns(&geom);
+            spread.sort_unstable();
+
+            let all: Vec<usize> = (0..geom.domain_len).collect();
+            let edges = vec![0, geom.domain_len - 1];
+
+            for len in [geom.code_len, 2 * geom.code_len] {
+                let coeffs: Vec<Flat<F>> = (0..len).map(|i| mix((i + 3 * len) as u128)).collect();
+
+                let mut full = vec![Flat::from_raw(F::ZERO); geom.domain_len];
+                full[..len].copy_from_slice(&coeffs);
+
+                code.forward_coset_scalar(&mut full, encoder.code_shift)
+                    .unwrap();
+
+                for columns in [&OPENED.to_vec(), &spread, &edges, &all] {
+                    let want: Vec<Flat<F>> = columns.iter().map(|&c| full[c]).collect();
+
+                    assert_eq!(
+                        encoder.evaluate_at(&coeffs, columns).unwrap(),
+                        want,
+                        "n {} len {len}",
+                        geom.domain_len
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn weights_at_columns_match_encoded_rows() {
+        let geom = geometry();
+        let encoder = RowEncoder::<F>::new(&geom).unwrap();
+
+        let messages: Vec<Vec<Flat<F>>> = [geom.message_len, geom.code_len, 1]
+            .iter()
+            .enumerate()
+            .map(|(r, &len)| (0..len).map(|c| mix((c + 7_000 * r) as u128)).collect())
+            .collect();
+
+        let mut spread = spread_columns(&geom);
+        spread.sort_unstable();
+
+        let opened = weights_at_columns(&encoder, &messages, &spread).unwrap();
+
+        for (message, row) in messages.iter().zip(&opened.rows) {
+            let mut full = vec![Flat::from_raw(F::ZERO); geom.domain_len];
+            full[..message.len()].copy_from_slice(message);
+
+            encoder.encode(&mut full).unwrap();
+
+            let want: Vec<Flat<F>> = spread.iter().map(|&c| full[c]).collect();
+
+            assert_eq!(*row, want);
+        }
+    }
+
+    #[test]
+    fn vanisher_at_matches_message_vanisher() {
+        for geom in geometries() {
+            let encoder = RowEncoder::<F>::new(&geom).unwrap();
+
+            let all: Vec<usize> = (0..geom.domain_len).collect();
+
+            assert_eq!(
+                encoder.vanisher_at(&all).unwrap(),
+                encoder.message_vanisher().unwrap(),
+                "n {}",
+                geom.domain_len
+            );
+        }
+    }
+
+    #[test]
+    fn evaluation_rejects_unsorted_or_outside_columns() {
+        let geom = geometry();
+        let encoder = RowEncoder::<F>::new(&geom).unwrap();
+        let coeffs: Vec<Flat<F>> = (0..geom.code_len).map(|i| mix(i as u128)).collect();
+
+        assert!(encoder.evaluate_at(&coeffs, &[9, 1]).is_err());
+        assert!(encoder.evaluate_at(&coeffs, &[1, geom.domain_len]).is_err());
+        assert!(encoder.vanisher_at(&[geom.domain_len]).is_err());
+        assert!(weights_at_columns(&encoder, core::slice::from_ref(&coeffs), &[40, 9]).is_err());
     }
 }

@@ -6,22 +6,23 @@
 //! the pad cursor that mirrors the prover's masking order,
 //! and the zk-Ligero segment over the assembled statement.
 
+use crate::prepared::VerifierScratch;
 use alloc::vec::Vec;
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::ligero::{
-    Opening, ProductMask, RowEncoder, verify_interleaved, verify_linear, verify_opening,
-    verify_quadratic, weights_at_columns,
+    Opening, ProductMask, verify_interleaved, verify_linear, verify_opening, verify_quadratic,
+    weights_at_columns,
 };
 use hekate_core::proofs::{InnerProof, OuterOpening};
 use hekate_core::protocol;
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{BinaryFieldExtras, Flat, HardwareField, TowerField};
+use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, TowerField};
 use hekate_program::outer::{
-    OuterLayout, OuterStatement, TableRecord, assemble, linear_tensor_vars, linear_weights,
+    OuterLayout, OuterStatement, TableRecord, linear_tensor_vars, linear_weights, statement_rows,
 };
-use tracing::{debug_span, instrument, warn};
+use tracing::{instrument, trace_span, warn};
 
 /// Next unconsumed pad index;
 /// advanced in the prover's masking order.
@@ -41,18 +42,19 @@ impl PadCursor {
 /// FS challenges after `aux_root`, both oracles opened
 /// at the same columns, and the three Ligero tests
 /// over the assembled rows.
-#[instrument(skip_all, name = "verify_outer")]
+#[instrument(skip_all, level = "trace", name = "verify_outer")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_outer<F, H>(
     proof: &InnerProof<F>,
     transcript: &mut Transcript<H>,
     config: &Config,
     statement: OuterStatement,
-    records: Vec<TableRecord<F>>,
+    records: &[TableRecord<'_, F>],
     cursor: PadCursor,
+    scratch: &mut VerifierScratch<F>,
 ) -> errors::Result<bool>
 where
-    F: HardwareField + BinaryFieldExtras + TowerField,
+    F: HardwareField + BinaryFieldExtras + TowerField + Into<Block128>,
     H: Hasher,
 {
     if cursor.0 as usize != statement.masked_scalars {
@@ -76,8 +78,7 @@ where
     let geom = config.outer_geom(statement.masked_scalars, statement.mul_wires, field_bits)?;
     let layout = OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires)?;
 
-    let encoder = RowEncoder::<F>::new(&geom)?;
-    let vanisher = encoder.message_vanisher()?;
+    let encoder = scratch.encoder(&geom)?;
 
     transcript.append_message(b"aux_root", &outer.aux_root);
 
@@ -89,15 +90,14 @@ where
 
     transcript.append_field_list(b"outer_w", &outer.interleaved);
 
-    let rows = assemble(records, &statement)?;
-    let lin_vars = linear_tensor_vars(&rows);
+    let rows = statement_rows(records, &statement)?;
+    let lin_vars = linear_tensor_vars(rows);
 
-    let r_lin: Vec<F> =
-        debug_span!("r_lin", rows = rows.affine.len(), lin_vars).in_scope(|| {
-            (0..lin_vars)
-                .map(|_| transcript.challenge_field::<F>(b"outer_r_lin"))
-                .collect::<Result<_, _>>()
-        })?;
+    let r_lin: Vec<F> = trace_span!("r_lin", rows, lin_vars).in_scope(|| {
+        (0..lin_vars)
+            .map(|_| transcript.challenge_field::<F>(b"outer_r_lin"))
+            .collect::<Result<_, _>>()
+    })?;
 
     transcript.append_field_list(b"outer_q", &outer.linear);
 
@@ -127,95 +127,135 @@ where
         return Ok(false);
     }
 
-    let openings_hold = debug_span!("openings").in_scope(|| {
-        verify_opening::<F, H>(
-            pad_root,
-            geom.domain_len,
-            layout.pad_rows,
-            &outer.pad_opening,
-        ) && verify_opening::<F, H>(
-            &outer.aux_root,
-            geom.domain_len,
-            aux_rows,
-            &outer.aux_opening,
-        )
-    });
+    let openings = || {
+        trace_span!("openings").in_scope(|| {
+            let (pad, aux) = join(
+                || {
+                    verify_opening::<F, H>(
+                        pad_root,
+                        geom.domain_len,
+                        layout.pad_rows,
+                        &outer.pad_opening,
+                    )
+                },
+                || {
+                    verify_opening::<F, H>(
+                        &outer.aux_root,
+                        geom.domain_len,
+                        aux_rows,
+                        &outer.aux_opening,
+                    )
+                },
+            );
+
+            pad && aux
+        })
+    };
+
+    let tests = || -> errors::Result<[(errors::Result<bool>, &'static str); 3]> {
+        let pad_opening = Opening::from_wire(&outer.pad_opening, layout.pad_rows)?;
+        let aux_opening = Opening::from_wire(&outer.aux_opening, aux_rows)?;
+
+        let stacked = Opening::stack(&[&pad_opening, &aux_opening])?;
+        let vanisher = encoder.vanisher_at(&columns)?;
+
+        let interleaved = || {
+            trace_span!("interleaved").in_scope(|| {
+                verify_interleaved(
+                    encoder,
+                    &to_flat(&outer.interleaved),
+                    &to_flat(&r_int),
+                    layout.interleaved_mask(),
+                    &stacked,
+                )
+            })
+        };
+
+        let linear = || -> errors::Result<bool> {
+            let batch = trace_span!("linear_weights")
+                .in_scope(|| linear_weights(&layout, &statement, records, &r_lin))?;
+            let encoded = trace_span!("encode_weights", rows = batch.rows.len())
+                .in_scope(|| weights_at_columns(encoder, &batch.weights, &columns))?;
+
+            let mask = ProductMask {
+                low: layout.linear_mask(),
+                high: layout.linear_mask_hi(),
+                vanisher: &vanisher,
+            };
+
+            Ok(trace_span!("linear").in_scope(|| {
+                verify_linear(
+                    encoder,
+                    &to_flat(&outer.linear),
+                    &encoded,
+                    &batch.rows,
+                    &mask,
+                    batch.target,
+                    &stacked,
+                )
+            }))
+        };
+
+        let quadratic = || {
+            let mask = ProductMask {
+                low: layout.quadratic_mask(),
+                high: layout.quadratic_mask_hi(),
+                vanisher: &vanisher,
+            };
+
+            trace_span!("quadratic").in_scope(|| {
+                verify_quadratic(
+                    encoder,
+                    &to_flat(&outer.quadratic),
+                    &triples,
+                    &to_flat(&r_quad),
+                    &mask,
+                    layout.message_len,
+                    &stacked,
+                )
+            })
+        };
+
+        let (interleaved, (linear, quadratic)) = join(interleaved, || join(linear, quadratic));
+
+        Ok([
+            (Ok(interleaved), "outer interleaved test failed"),
+            (linear, "outer linear test failed"),
+            (Ok(quadratic), "outer quadratic test failed"),
+        ])
+    };
+
+    let (openings_hold, tests) = join(openings, tests);
 
     if !openings_hold {
         warn!("outer opening rejected");
         return Ok(false);
     }
 
-    let pad_opening = Opening::from_wire(&outer.pad_opening, layout.pad_rows)?;
-    let aux_opening = Opening::from_wire(&outer.aux_opening, aux_rows)?;
-
-    let stacked = Opening::stack(&[&pad_opening, &aux_opening])?;
-
-    let interleaved_holds = debug_span!("interleaved").in_scope(|| {
-        verify_interleaved(
-            &encoder,
-            &to_flat(&outer.interleaved),
-            &to_flat(&r_int),
-            layout.interleaved_mask(),
-            &stacked,
-        )
-    });
-
-    if !interleaved_holds {
-        warn!("outer interleaved test failed");
-        return Ok(false);
-    }
-
-    let batch =
-        debug_span!("linear_weights").in_scope(|| linear_weights(&layout, &rows, &r_lin))?;
-    let encoded = debug_span!("encode_weights", rows = batch.rows.len())
-        .in_scope(|| weights_at_columns(&encoder, batch.weights, &columns))?;
-
-    let linear_mask = ProductMask {
-        low: layout.linear_mask(),
-        high: layout.linear_mask_hi(),
-        vanisher: &vanisher,
-    };
-
-    let linear_holds = debug_span!("linear").in_scope(|| {
-        verify_linear(
-            &encoder,
-            &to_flat(&outer.linear),
-            &encoded,
-            &batch.rows,
-            &linear_mask,
-            batch.target,
-            &stacked,
-        )
-    });
-
-    if !linear_holds {
-        warn!("outer linear test failed");
-        return Ok(false);
-    }
-
-    let quadratic_mask = ProductMask {
-        low: layout.quadratic_mask(),
-        high: layout.quadratic_mask_hi(),
-        vanisher: &vanisher,
-    };
-
-    let quadratic_holds = debug_span!("quadratic").in_scope(|| {
-        verify_quadratic(
-            &encoder,
-            &to_flat(&outer.quadratic),
-            &triples,
-            &to_flat(&r_quad),
-            &quadratic_mask,
-            layout.message_len,
-            &stacked,
-        )
-    });
-
-    if !quadratic_holds {
-        warn!("outer quadratic test failed");
-        return Ok(false);
+    for (holds, failure) in tests? {
+        if !holds? {
+            warn!("{failure}");
+            return Ok(false);
+        }
     }
 
     Ok(true)
+}
+
+/// Both closures always run: on the pool with
+/// `parallel`, one after the other without it.
+fn join<A, B, RA, RB>(a: A, b: B) -> (RA, RB)
+where
+    A: FnOnce() -> RA + Send,
+    B: FnOnce() -> RB + Send,
+    RA: Send,
+    RB: Send,
+{
+    #[cfg(feature = "parallel")]
+    let pair = rayon::join(a, b);
+
+    #[cfg(not(feature = "parallel"))]
+    let pair = (a(), b());
+
+    pair
 }

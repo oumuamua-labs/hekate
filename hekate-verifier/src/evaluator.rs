@@ -15,10 +15,10 @@ use hekate_core::trace::{ColumnType, TraceCompatibleField};
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{
-    AdditiveFft, BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField,
+    BinaryFieldExtras, Block128, CantorBasis, Flat, HardwareField, PackableField, TowerField,
 };
 use hekate_program::expander::{RingSwitchPlan, eq_tensor_b, ring_target};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument, trace_span, warn};
 
 #[cfg(feature = "parallel")]
 const PARALLEL_PROXIMITY_THRESHOLD: usize = 1 << 18;
@@ -29,9 +29,34 @@ pub struct EvaluatorVerifier<F, H: Hasher> {
     _marker: PhantomData<(F, H)>,
 }
 
+/// Claimed evaluations as the proof carries them, and their
+/// flat form derived from them in `new`: the transcript
+/// absorbs exactly the values the checks read.
+pub struct Claims<'a, F> {
+    canonical: &'a [F],
+    flat: Vec<Flat<F>>,
+}
+
+impl<'a, F: HardwareField> Claims<'a, F> {
+    pub fn new(canonical: &'a [F]) -> Self {
+        Self {
+            canonical,
+            flat: canonical.iter().map(|c| c.to_hardware()).collect(),
+        }
+    }
+
+    pub fn canonical(&self) -> &'a [F] {
+        self.canonical
+    }
+
+    pub fn flat(&self) -> &[Flat<F>] {
+        &self.flat
+    }
+}
+
 pub struct EvalVerifyContext<'a, F: HardwareField> {
     pub point: &'a [Flat<F>],
-    pub claimed_values: &'a [Flat<F>],
+    pub claims: &'a Claims<'a, F>,
     pub num_vars: usize,
     pub ring_plan: &'a RingSwitchPlan,
 
@@ -68,7 +93,7 @@ where
     /// to `r_final`; the final check pairs the transparent weight
     /// evals at `r'` with the two master evaluations, which the
     /// λ-line fold and the proximity test bind to the codewords.
-    #[instrument(skip_all, name = "Evaluator::verify")]
+    #[instrument(skip_all, level = "trace", name = "Evaluator::verify")]
     pub fn verify(
         commitment: &BrakedownCommitment,
         proof: &EvalBatchProof<F>,
@@ -80,7 +105,7 @@ where
         F: BinaryFieldExtras + Into<Block128> + From<u128>,
     {
         let point = ctx.point;
-        let claims = ctx.claimed_values;
+        let claims = ctx.claims.flat();
         let num_vars = ctx.num_vars;
         let plan = ctx.ring_plan;
         let shifted_claims = ctx.shifted_claims;
@@ -110,10 +135,7 @@ where
         };
 
         transcript.append_message(b"eval_batch_start", b"");
-
-        for &val in claims {
-            transcript.append_field(b"claimed_val", val.to_tower());
-        }
+        transcript.append_field_each(b"claimed_val", ctx.claims.canonical());
 
         let eta_tower = transcript.challenge_field::<F>(b"eval_eta")?;
         let eta = eta_tower.to_hardware();
@@ -230,7 +252,6 @@ where
         }
 
         let q_flat: Vec<Flat<F>> = q.iter().map(|v| v.to_hardware()).collect();
-        let q_encoded = rs_encode_row::<F>(&q_flat, grid_cols, config)?;
 
         let r_col_low = &r_row[..split_vars];
         let tensor_col = build_tensor_table::<F>(r_col_low);
@@ -290,6 +311,10 @@ where
             None => None,
         };
 
+        let _proximity = trace_span!("proximity").entered();
+
+        let q_encoded = rs_encode_at::<F>(&q_flat, grid_cols, config, &queries.distinct)?;
+
         let slot_map = &queries.slot_map;
         let random_indices = &queries.indices;
         let h_rs = vec![ColumnType::B128; plan.h_cols];
@@ -345,7 +370,7 @@ where
                     q_val += fold * tensor_row_evals[r];
                 }
 
-                let ok = q_val == q_encoded[col_idx];
+                let ok = q_val == q_encoded[slot_map[q_idx]];
 
                 if !ok {
                     warn!("TensorPCS proximity mismatch for column {}", col_idx);
@@ -405,28 +430,38 @@ where
 /// `q_flat = [q_data(grid_cols), q_support(ldt)]`. Layout must
 /// match the prover's `rs_encode_grid`; `q_eval` reads `q_data`
 /// alone, the support masks openings without entering the claim.
-fn rs_encode_row<F: HardwareField + BinaryFieldExtras>(
+fn rs_encode_at<F: HardwareField + BinaryFieldExtras>(
     q_flat: &[Flat<F>],
     grid_cols: usize,
     config: &Config,
+    columns: &[usize],
 ) -> errors::Result<Vec<Flat<F>>> {
     let geom = config.table_geom(grid_cols);
     let ldt = geom.support_size;
-    let code_width = geom.encoded_width;
+    let zero = Flat::from_raw(F::ZERO);
 
-    let mut buf = vec![Flat::from_raw(F::ZERO); code_width];
-    buf[..ldt].copy_from_slice(&q_flat[grid_cols..grid_cols + ldt]);
-    buf[ldt..ldt + grid_cols].copy_from_slice(&q_flat[..grid_cols]);
+    let len = (ldt + grid_cols).next_power_of_two();
 
-    let fft = AdditiveFft::<F>::new(code_width.trailing_zeros());
+    let mut coeffs = vec![zero; len];
+    coeffs[..ldt].copy_from_slice(&q_flat[grid_cols..grid_cols + ldt]);
+    coeffs[ldt..ldt + grid_cols].copy_from_slice(&q_flat[..grid_cols]);
 
-    fft.forward_scalar(&mut buf)
-        .map_err(|_| errors::Error::Protocol {
-            protocol: "evaluator",
-            message: "additive-FFT row encode failed",
-        })?;
+    let encode_failed = |_| errors::Error::Protocol {
+        protocol: "evaluator",
+        message: "additive-FFT row encode failed",
+    };
 
-    Ok(buf)
+    let basis = CantorBasis::<F>::new(geom.encoded_width.trailing_zeros() as usize)
+        .map_err(encode_failed)?;
+
+    let mut scratch = vec![zero; len - 1];
+    let mut out = vec![zero; columns.len()];
+
+    basis
+        .evaluate_at(&coeffs, zero, columns, &mut scratch, &mut out)
+        .map_err(encode_failed)?;
+
+    Ok(out)
 }
 
 fn build_tensor_table<F: HardwareField>(r: &[Flat<F>]) -> Vec<Flat<F>> {
@@ -653,7 +688,7 @@ fn k_p_at(point: &[Block128], r_final: &[Block128]) -> Block128 {
 mod tests {
     use super::*;
     use hekate_core::poly::PolyVariant;
-    use hekate_math::TowerField;
+    use hekate_math::{AdditiveFft, TowerField};
 
     const GRID_COLS: usize = 1024;
 
@@ -673,6 +708,10 @@ mod tests {
 
     fn rs_row(seed: u128, len: usize) -> Vec<Flat<Block128>> {
         elems(seed, len).iter().map(|v| v.to_hardware()).collect()
+    }
+
+    fn all_columns(config: &Config, grid_cols: usize) -> Vec<usize> {
+        (0..config.table_geom(grid_cols).encoded_width).collect()
     }
 
     fn k_p_on_cube(point: &[Block128]) -> Vec<Block128> {
@@ -796,21 +835,21 @@ mod tests {
         assert_eq!(transpose128(&rows), cols);
     }
 
-    /// The proximity fold commutes with the encode
-    /// only while `rs_encode_row` stays linear
-    /// over its own support / data split.
+    /// The proximity fold commutes with the encode only while
+    /// `rs_encode_at` stays linear over its own support / data split.
     #[test]
-    fn rs_encode_row_is_linear() {
+    fn rs_encode_at_is_linear() {
         let config = Config::prod();
         let len = GRID_COLS + config.table_geom(GRID_COLS).support_size;
+        let all = all_columns(&config, GRID_COLS);
 
         let a = rs_row(0x11, len);
         let b = rs_row(0x22, len);
         let sum: Vec<Flat<Block128>> = a.iter().zip(&b).map(|(x, y)| *x + *y).collect();
 
-        let ea = rs_encode_row::<Block128>(&a, GRID_COLS, &config).unwrap();
-        let eb = rs_encode_row::<Block128>(&b, GRID_COLS, &config).unwrap();
-        let es = rs_encode_row::<Block128>(&sum, GRID_COLS, &config).unwrap();
+        let ea = rs_encode_at::<Block128>(&a, GRID_COLS, &config, &all).unwrap();
+        let eb = rs_encode_at::<Block128>(&b, GRID_COLS, &config, &all).unwrap();
+        let es = rs_encode_at::<Block128>(&sum, GRID_COLS, &config, &all).unwrap();
 
         for ((x, y), s) in ea.iter().zip(&eb).zip(&es) {
             assert_eq!(*x + *y, *s);
@@ -818,11 +857,12 @@ mod tests {
     }
 
     #[test]
-    fn rs_encode_row_meets_singleton_bound() {
+    fn rs_encode_at_meets_singleton_bound() {
         let config = Config::prod();
         let len = GRID_COLS + config.table_geom(GRID_COLS).support_size;
+        let all = all_columns(&config, GRID_COLS);
 
-        let code = rs_encode_row::<Block128>(&rs_row(0x33, len), GRID_COLS, &config).unwrap();
+        let code = rs_encode_at::<Block128>(&rs_row(0x33, len), GRID_COLS, &config, &all).unwrap();
 
         let zeros = code
             .iter()
@@ -835,11 +875,12 @@ mod tests {
     /// A drift in `CantorBasis` or `AdditiveFft` silently
     /// changes the code the proximity bound is stated over.
     #[test]
-    fn rs_encode_row_realises_cantor_subspace_chain() {
+    fn rs_encode_at_realises_cantor_subspace_chain() {
         let config = Config::prod();
         let geom = config.table_geom(GRID_COLS);
         let ldt = geom.support_size;
         let len = GRID_COLS + ldt;
+        let all = all_columns(&config, GRID_COLS);
 
         let zero = Flat::from_raw(Block128::ZERO);
 
@@ -853,7 +894,7 @@ mod tests {
             let mut row = vec![zero; len];
             row[slot] = Flat::from_raw(Block128::ONE);
 
-            let code = rs_encode_row::<Block128>(&row, GRID_COLS, &config).unwrap();
+            let code = rs_encode_at::<Block128>(&row, GRID_COLS, &config, &all).unwrap();
 
             let zeros: Vec<usize> = (0..geom.encoded_width)
                 .filter(|&x| code[x] == zero)
@@ -862,6 +903,40 @@ mod tests {
             assert_eq!(zeros, (0..at).collect::<Vec<usize>>(), "s_{}", at.ilog2());
 
             at <<= 1;
+        }
+    }
+
+    #[test]
+    fn rs_encode_at_matches_full_transform() {
+        let config = Config::prod();
+
+        for log_cols in 1..=12 {
+            let grid_cols = 1usize << log_cols;
+            let geom = config.table_geom(grid_cols);
+            let len = grid_cols + geom.support_size;
+            let row = rs_row(0x44 + log_cols as u128, len);
+
+            let mut full = vec![Flat::from_raw(Block128::ZERO); geom.encoded_width];
+            full[..geom.support_size].copy_from_slice(&row[grid_cols..]);
+            full[geom.support_size..len].copy_from_slice(&row[..grid_cols]);
+
+            AdditiveFft::<Block128>::new(geom.encoded_width.trailing_zeros())
+                .unwrap()
+                .forward_scalar(&mut full)
+                .unwrap();
+
+            let sparse: Vec<usize> = (0..geom.encoded_width).step_by(7).collect();
+            let edges = vec![0, geom.encoded_width - 1];
+
+            for columns in [sparse, edges, all_columns(&config, grid_cols)] {
+                let want: Vec<Flat<Block128>> = columns.iter().map(|&c| full[c]).collect();
+
+                assert_eq!(
+                    rs_encode_at::<Block128>(&row, grid_cols, &config, &columns).unwrap(),
+                    want,
+                    "grid_cols {grid_cols}"
+                );
+            }
         }
     }
 }

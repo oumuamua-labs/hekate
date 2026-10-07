@@ -172,11 +172,8 @@ pub enum ConstraintExpr<F> {
 /// `ExprId` (index into `nodes`).
 ///
 /// Cell nodes are automatically deduplicated:
-/// calling `cell()` twice with the same `ProgramCell`
-/// returns the same `ExprId`. This is mandatory, the
-/// downstream compiler maps ExprId to poly index,
-/// so duplicate cells would create duplicate polys
-/// in VirtualPoly and bloat Sumcheck evaluation.
+/// calling `cell()` twice with the same
+/// `ProgramCell` returns the same `ExprId`.
 pub struct ConstraintArena<F> {
     nodes: Vec<ConstraintExpr<F>>,
 
@@ -309,6 +306,38 @@ impl<F: TowerField> Clone for ConstraintAst<F> {
 }
 
 impl<F: TowerField> ConstraintAst<F> {
+    /// Errs unless every child id is below its node's
+    /// id and every root id lies inside the arena.
+    pub fn validate_order(&self) -> hekate_core::errors::Result<()> {
+        let n = self.arena.len();
+        for i in 0..n {
+            let precedes = |id: &ExprId| (id.0 as usize) < i;
+
+            let ordered = match self.arena.get(ExprId(i as u32)) {
+                ConstraintExpr::Cell(_) | ConstraintExpr::Const(_) => true,
+                ConstraintExpr::Add(a, b) | ConstraintExpr::Mul(a, b) => precedes(a) && precedes(b),
+                ConstraintExpr::Scale(_, a) => precedes(a),
+                ConstraintExpr::Sum(children) => children.iter().all(precedes),
+            };
+
+            if !ordered {
+                return Err(Error::Protocol {
+                    protocol: "constraint_ast",
+                    message: "child does not precede its node",
+                });
+            }
+        }
+
+        if self.roots.iter().any(|root| root.0 as usize >= n) {
+            return Err(Error::Protocol {
+                protocol: "constraint_ast",
+                message: "root outside the arena",
+            });
+        }
+
+        Ok(())
+    }
+
     /// Maximum polynomial degree
     /// across all constraint roots.
     pub fn max_degree(&self) -> usize {
@@ -542,6 +571,7 @@ mod tests {
     use super::*;
     use crate::constraint::ConstraintExpr;
     use crate::constraint::builder::ConstraintSystem;
+    use crate::outer::{TableShape, TableStatics};
     use crate::{Air, Program};
     use hekate_core::trace::ColumnType;
     use hekate_math::{Block128, Flat};
@@ -575,6 +605,54 @@ mod tests {
 
     impl Program<F> for TestFibProgram {}
 
+    fn misordered_asts() -> [(&'static str, &'static str, ConstraintAst<F>); 3] {
+        let cell = |col| ConstraintExpr::Cell(ProgramCell::current(col));
+
+        let ast = |nodes: [ConstraintExpr<F>; 3], root| {
+            let mut arena = ConstraintArena::new();
+            for node in nodes {
+                arena.alloc(node);
+            }
+
+            ConstraintAst {
+                arena,
+                roots: vec![ExprId(root)],
+                labels: vec![None],
+            }
+        };
+
+        [
+            (
+                "forward child",
+                "child does not precede its node",
+                ast(
+                    [
+                        cell(0),
+                        ConstraintExpr::Sum(vec![ExprId(0), ExprId(2)]),
+                        cell(1),
+                    ],
+                    1,
+                ),
+            ),
+            (
+                "self reference",
+                "child does not precede its node",
+                ast(
+                    [cell(0), ConstraintExpr::Mul(ExprId(0), ExprId(1)), cell(1)],
+                    1,
+                ),
+            ),
+            (
+                "root past the arena",
+                "root outside the arena",
+                ast(
+                    [cell(0), cell(1), ConstraintExpr::Add(ExprId(0), ExprId(1))],
+                    3,
+                ),
+            ),
+        ]
+    }
+
     #[test]
     fn default_constraint_ast_produces_correct_roots() {
         let program = TestFibProgram;
@@ -584,8 +662,6 @@ mod tests {
         assert_eq!(ast.roots.len(), 2);
 
         // c1 has 2 terms, c2 has 3 terms.
-        // Each term: 1 Const + 2 Cell + 2 Mul = 5 nodes
-        // c1: 2 terms * 5 + 1 Sum = 11 nodes (but cells are deduped)
         // Verify non-empty and structurally sound.
         assert!(!ast.arena.is_empty());
 
@@ -749,7 +825,7 @@ mod tests {
         let ast = SingleTermProgram.constraint_ast();
         assert_eq!(ast.roots.len(), 1);
 
-        // Single term: Const * cell0 * cell1 -> chain of Mul, no Sum
+        // Single term: cell0 * cell1 -> Mul, no Sum
         match ast.arena.get(ast.roots[0]) {
             ConstraintExpr::Mul(_, _) => {} // correct
             other => panic!("Expected Mul for single-term, got {:?}", other),
@@ -766,8 +842,6 @@ mod tests {
         let ast = program.constraint_ast();
 
         // Fib constraints: q * next_a (degree 2), q * curr_b (degree 2)
-        // Default AST adds Const(ONE) * cell * cell per term → degree 2 + Const
-        // Const has degree 0, so each term is Mul chain: 0 + 1 + 1 = 2
         // The AST max degree should match the flat form.
         let flat = program.constraints();
         let flat_max = flat
@@ -912,6 +986,23 @@ mod tests {
 
         for (i, root) in ast.roots.iter().enumerate() {
             assert_eq!(buf[root.0 as usize], expected[i]);
+        }
+    }
+
+    #[test]
+    fn table_shape_rejects_misordered_asts() {
+        for (case, expected, ast) in misordered_asts() {
+            let statics = TableStatics {
+                ast: &ast,
+                specs: &[],
+                fixed: &[],
+                boundary: &[],
+            };
+
+            match TableShape::from_air(&TestFibProgram, 4, &statics) {
+                Err(Error::Protocol { message, .. }) => assert_eq!(message, expected, "{case}"),
+                other => panic!("{case}: {other:?}"),
+            }
         }
     }
 }

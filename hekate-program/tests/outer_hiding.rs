@@ -302,7 +302,7 @@ fn commit(
 ) -> ([u8; 32], OuterOpening<K>) {
     let mut leaves: Vec<[u8; 32]> = vec![[0u8; 32]; outer.geom.domain_len];
     for (i, &c) in coins.columns.iter().enumerate() {
-        leaves[c] = column_leaf::<K, H>(opened[i][rows.clone()].iter().copied());
+        leaves[c] = column_leaf::<K, H>(opened[i][rows.clone()].iter().map(|v| v.to_tower()));
     }
 
     let tree = MerkleTree::<K, H>::new(&leaves);
@@ -389,7 +389,7 @@ fn accepts(outer: &Outer, coins: &Coins, view: &View) -> bool {
         geom,
         layout,
         encoder,
-        vanisher,
+        ..
     } = outer;
 
     let aux_rows = layout.total_rows() - layout.pad_rows;
@@ -404,19 +404,19 @@ fn accepts(outer: &Outer, coins: &Coins, view: &View) -> bool {
     let aux = Opening::from_wire(&view.aux, aux_rows).unwrap();
     let stacked = Opening::stack(&[&pad, &aux]).unwrap();
 
-    let opened_weights =
-        weights_at_columns(encoder, coins.messages.clone(), &coins.columns).unwrap();
+    let opened_weights = weights_at_columns(encoder, &coins.messages, &coins.columns).unwrap();
+    let opened_vanisher = encoder.vanisher_at(&coins.columns).unwrap();
 
     let linear_mask = ProductMask {
         low: layout.linear_mask(),
         high: layout.linear_mask_hi(),
-        vanisher,
+        vanisher: &opened_vanisher,
     };
 
     let quadratic_mask = ProductMask {
         low: layout.quadratic_mask(),
         high: layout.quadratic_mask_hi(),
-        vanisher,
+        vanisher: &opened_vanisher,
     };
 
     verify_interleaved(

@@ -121,8 +121,8 @@ impl Run {
 
         let end = self.origin + stride * self.count;
 
-        let upper = residue_sums(r, end, stride, &steps);
-        let lower = residue_sums(r, self.origin, stride, &steps);
+        let upper = residue_sums(r, end, stride, Some(steps.as_slice()));
+        let lower = residue_sums(r, self.origin, stride, Some(steps.as_slice()));
 
         let (q_origin, r_origin) = (self.origin / stride, self.origin % stride);
 
