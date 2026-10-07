@@ -12,8 +12,7 @@
 use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::proofs::{
-    BrakedownCommitment, BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, MasterEvals,
-    OuterOpening, OuterProof, SumcheckProof,
+    BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
 };
 use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
@@ -1521,7 +1520,7 @@ fn phased_clock_spec_round_trips() {
 }
 
 // =================================================================
-// Proof wire round-trip (tensor_vec / master_evals)
+// Proof wire round-trip (tensor_vec / masters)
 // =================================================================
 
 fn empty_sumcheck() -> SumcheckProof<F> {
@@ -1533,25 +1532,20 @@ fn empty_sumcheck() -> SumcheckProof<F> {
 
 fn eval_proof_with(
     tensor_vec: Vec<F>,
-    master_evals: Option<MasterEvals<F>>,
+    masters: Vec<F>,
     h_ldt_proof: Option<BrakedownProof<F>>,
 ) -> EvalBatchProof<F> {
     EvalBatchProof::new(
         empty_sumcheck(),
         BrakedownProof::new(vec![], vec![]),
-        (vec![wide(1)], vec![wide(2), wide(3)]),
         tensor_vec,
-        master_evals,
+        masters,
         h_ldt_proof,
     )
 }
 
-fn dummy_commitment() -> BrakedownCommitment {
-    BrakedownCommitment {
-        root: [7u8; 32],
-        num_rows: 1 << 10,
-        num_cols: 8,
-    }
+fn point_evaluation() -> (Vec<F>, Vec<F>) {
+    (vec![wide(1)], vec![wide(2), wide(3)])
 }
 
 fn arith_with_carry(num_rows: usize) -> ChipletDef<F> {
@@ -1568,24 +1562,20 @@ fn arith_with_carry(num_rows: usize) -> ChipletDef<F> {
 }
 
 #[test]
-fn proof_master_evals_round_trip() {
-    let evals = MasterEvals {
-        whole: wide(10),
-        ring: wide(11),
-    };
-
-    let main_eval = eval_proof_with(vec![wide(1), wide(2)], Some(evals), None);
-    let chiplet_eval = eval_proof_with(vec![wide(5)], None, None);
+fn proof_masters_round_trip() {
+    let eval = eval_proof_with(vec![wide(1), wide(2)], vec![wide(10), wide(11)], None);
 
     let proof = InnerProof::new(
-        dummy_commitment(),
+        [3u8; 32],
+        None,
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
-        main_eval,
-        vec![dummy_commitment()],
+        point_evaluation(),
+        eval,
+        vec![1 << 9],
         vec![empty_sumcheck()],
         vec![LogUpAux::new(vec![], vec![])],
-        vec![chiplet_eval],
+        vec![(vec![wide(5)], vec![wide(6), wide(7)])],
         None,
         None,
     );
@@ -1598,25 +1588,22 @@ fn proof_master_evals_round_trip() {
     assert_eq!(
         bytes_of(&restored.eval_proof.tensor_vec),
         bytes_of(&[wide(1), wide(2)]),
-        "main tensor_vec must survive the wire",
     );
     assert_eq!(
-        restored.eval_proof.master_evals,
-        Some(evals),
-        "main master_evals must survive the wire",
+        bytes_of(&restored.eval_proof.masters),
+        bytes_of(&[wide(10), wide(11)]),
     );
+    assert_eq!(restored.chiplet_rows, vec![1 << 9]);
 
-    let chip = &restored.chiplet_eval_proofs[0];
+    let (point, values) = &restored.main_point_evaluation;
 
-    assert_eq!(
-        bytes_of(&chip.tensor_vec),
-        bytes_of(&[wide(5)]),
-        "chiplet tensor_vec must survive the wire",
-    );
-    assert!(
-        chip.master_evals.is_none(),
-        "absent master_evals must stay absent",
-    );
+    assert_eq!(bytes_of(point), bytes_of(&[wide(1)]));
+    assert_eq!(bytes_of(values), bytes_of(&[wide(2), wide(3)]));
+
+    let (point, values) = &restored.chiplet_point_evaluations[0];
+
+    assert_eq!(bytes_of(point), bytes_of(&[wide(5)]));
+    assert_eq!(bytes_of(values), bytes_of(&[wide(6), wide(7)]));
 }
 
 #[test]
@@ -1624,16 +1611,17 @@ fn proof_logup_h_binding_round_trips() {
     let main_aux = LogUpAux {
         h_evals: vec![("bus".to_string(), wide(42))],
         claimed_sums: vec![("bus".to_string(), F::ZERO)],
-        h_commitment: Some(dummy_commitment()),
     };
 
     let h_opening = BrakedownProof::new(vec![vec![1u8, 2, 3], vec![4, 5, 6]], vec![[9u8; 32]]);
 
     let proof = InnerProof::new(
-        dummy_commitment(),
+        [3u8; 32],
+        Some([7u8; 32]),
         empty_sumcheck(),
         main_aux,
-        eval_proof_with(vec![wide(1)], None, Some(h_opening)),
+        point_evaluation(),
+        eval_proof_with(vec![wide(1)], vec![wide(2)], Some(h_opening)),
         vec![],
         vec![],
         vec![],
@@ -1645,14 +1633,8 @@ fn proof_logup_h_binding_round_trips() {
     let bytes = serialize_proof_bytes(&proof);
     let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
 
-    let comm = restored
-        .main_logup_aux
-        .h_commitment
-        .as_ref()
-        .expect("h_commitment must survive the wire");
-
-    assert_eq!(comm.root, [7u8; 32]);
-    assert_eq!(comm.num_cols, 8);
+    assert_eq!(restored.trace_root, [3u8; 32]);
+    assert_eq!(restored.h_root, Some([7u8; 32]));
 
     let opening = restored
         .eval_proof
@@ -1667,10 +1649,12 @@ fn proof_logup_h_binding_round_trips() {
 #[test]
 fn proof_absent_h_binding_stays_none() {
     let proof = InnerProof::new(
-        dummy_commitment(),
+        [3u8; 32],
+        None,
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
-        eval_proof_with(vec![wide(1)], None, None),
+        point_evaluation(),
+        eval_proof_with(vec![wide(1)], vec![wide(2)], None),
         vec![],
         vec![],
         vec![],
@@ -1682,7 +1666,7 @@ fn proof_absent_h_binding_stays_none() {
     let bytes = serialize_proof_bytes(&proof);
     let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
 
-    assert!(restored.main_logup_aux.h_commitment.is_none());
+    assert!(restored.h_root.is_none());
     assert!(restored.eval_proof.h_ldt_proof.is_none());
     assert!(restored.pad_root.is_none());
     assert!(restored.outer.is_none());
@@ -1706,10 +1690,12 @@ fn proof_outer_segment_round_trips() {
     };
 
     let proof = InnerProof::new(
-        dummy_commitment(),
+        [3u8; 32],
+        None,
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
-        eval_proof_with(vec![wide(1)], None, None),
+        point_evaluation(),
+        eval_proof_with(vec![wide(1)], vec![wide(2)], None),
         vec![],
         vec![],
         vec![],

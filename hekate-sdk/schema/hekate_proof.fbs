@@ -11,14 +11,6 @@ struct Block128 {
   hi: uint64;
 }
 
-// ===== Commitment =====
-
-table BrakedownCommitment {
-  root: [ubyte];
-  num_rows: uint64;
-  num_cols: uint64;
-}
-
 // ===== Sumcheck =====
 
 table UnivariatePoly {
@@ -39,11 +31,6 @@ table BrakedownProof {
 
 // ===== Evaluation Argument =====
 
-table MasterEvals {
-  whole: Block128;
-  ring: Block128;
-}
-
 table PointEvaluation {
   point: [Block128];
   column_values: [Block128];
@@ -52,9 +39,8 @@ table PointEvaluation {
 table EvalBatchProof {
   sumcheck_proof: SumcheckProof;
   ldt_proof: BrakedownProof;
-  point_evaluation: PointEvaluation;
   tensor_vec: [Block128];
-  master_evals: MasterEvals;
+  masters: [Block128];
   h_ldt_proof: BrakedownProof;
 }
 
@@ -68,7 +54,6 @@ table LogUpEntry {
 table LogUpAux {
   h_evals: [LogUpEntry];
   claimed_sums: [LogUpEntry];
-  h_commitment: BrakedownCommitment;
 }
 
 // ===== Outer Argument =====
@@ -93,17 +78,19 @@ table OuterProof {
 table Proof {
   version: uint32;
 
-  // Main trace
-  trace_commitment: BrakedownCommitment;
+  // Pool roots and main trace
+  trace_root: [ubyte];
+  h_root: [ubyte];
   zerocheck_proof: SumcheckProof;
   main_logup_aux: LogUpAux;
+  main_point_evaluation: PointEvaluation;
   eval_proof: EvalBatchProof;
 
   // Chiplets (parallel arrays)
-  chiplet_commitments: [BrakedownCommitment];
+  chiplet_rows: [uint64];
   chiplet_zerocheck_proofs: [SumcheckProof];
   chiplet_logup_aux: [LogUpAux];
-  chiplet_eval_proofs: [EvalBatchProof];
+  chiplet_point_evaluations: [PointEvaluation];
 
   // Eval-claim hiding
   pad_root: [ubyte];
