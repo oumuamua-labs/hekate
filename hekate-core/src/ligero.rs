@@ -8,7 +8,7 @@ use crate::proofs::OuterOpening;
 use alloc::vec;
 use alloc::vec::Vec;
 use hekate_crypto::Hasher;
-use hekate_crypto::merkle::MerkleTree;
+use hekate_crypto::merkle::{MerkleTree, Tag};
 use hekate_math::fft::vanish_eval;
 use hekate_math::{
     AdditiveFft, BinaryFieldExtras, CantorBasis, FftError, Flat, HardwareField, TowerField,
@@ -659,8 +659,8 @@ pub fn weights_at_columns<F: BinaryFieldExtras + HardwareField + TowerField>(
 /// Leaf of one column, its rows top to bottom.
 pub fn column_leaf<F: TowerField, H: Hasher>(column: impl Iterator<Item = F>) -> [u8; 32] {
     let mut hasher = H::new();
-    hasher.update(&[0u8]);
-    hasher.update_fields(&[], column);
+    hasher.update_fields(column);
+    hasher.update(&[Tag::OuterLeaf as u8]);
 
     hasher.finalize()
 }
@@ -671,7 +671,7 @@ mod tests {
     use crate::config::Config;
     use alloc::vec;
     use alloc::vec::Vec;
-    use hekate_math::{Block128, TowerField};
+    use hekate_math::{Block128, CanonicalSerialize, TowerField};
 
     const OPENED: [usize; 4] = [1, 9, 40, 77];
 
@@ -842,6 +842,20 @@ mod tests {
                 acc
             })
             .collect()
+    }
+
+    fn check_outer_leaf_tag<H: Hasher>() {
+        let column: Vec<F> = (1..=5u128)
+            .map(|i| Block128(i.wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835)))
+            .collect();
+
+        let mut preimage: Vec<u8> = column.iter().flat_map(|v| v.to_bytes()).collect();
+        preimage.push(0x03);
+
+        assert_eq!(
+            column_leaf::<F, H>(column.iter().copied()),
+            H::digest(&preimage)
+        );
     }
 
     #[test]
@@ -1346,5 +1360,23 @@ mod tests {
         assert!(encoder.evaluate_at(&coeffs, &[1, geom.domain_len]).is_err());
         assert!(encoder.vanisher_at(&[geom.domain_len]).is_err());
         assert!(weights_at_columns(&encoder, core::slice::from_ref(&coeffs), &[40, 9]).is_err());
+    }
+
+    #[cfg(feature = "blake3")]
+    #[test]
+    fn blake3_outer_leaf_ends_in_its_tag() {
+        check_outer_leaf_tag::<hekate_crypto::blake3::Blake3Hasher>();
+    }
+
+    #[cfg(feature = "sha2")]
+    #[test]
+    fn sha256_outer_leaf_ends_in_its_tag() {
+        check_outer_leaf_tag::<hekate_crypto::sha256::Sha256Hasher>();
+    }
+
+    #[cfg(feature = "sha3")]
+    #[test]
+    fn sha3_outer_leaf_ends_in_its_tag() {
+        check_outer_leaf_tag::<hekate_crypto::sha3::Sha3_256Hasher>();
     }
 }
