@@ -46,12 +46,21 @@ impl fmt::Display for Error {
     }
 }
 
+/// Last byte of every Merkle preimage, one per kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Tag {
+    Part = 0x00,
+    Node = 0x01,
+    PoolLeaf = 0x02,
+    OuterLeaf = 0x03,
+}
+
 /// Binary Merkle tree over 32-byte leaves.
 ///
-/// Internal node = `H(0x01 || left || right)`.
-/// Leaves are expected to already be hashes;
-/// callers serialize their field payloads via
-/// `hash_leaf_row_blinded` / `hash_column_leaves`.
+/// Internal node = `H(left || right || 0x01)`.
+/// Leaves are expected to already be hashes; callers
+/// serialize their field payloads via `hash_column_leaves`.
 #[derive(Clone, Debug)]
 pub struct MerkleTree<F: TowerField, H: Hasher = DefaultHasher> {
     nodes: Vec<MaybeUninit<[u8; 32]>>,
@@ -445,72 +454,7 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
     }
 }
 
-/// Hash one row into a blinded Merkle leaf:
-///
-/// ```text
-/// Leaf = H(
-///     0x00
-///  || u64_le(len(data || noise))
-///  || data_row_bytes
-///  || noise_bytes
-///  || code_row_bytes
-/// )
-/// ```
-///
-/// The length prefix commits to the boundary
-/// between `(data || noise)` and `code`, so
-/// two rows with shuffled widths cannot collide.
-#[inline(always)]
-pub fn hash_leaf_row_blinded<H: Hasher>(
-    row_idx: usize,
-    data_views: &[(&[u8], usize)],
-    code_views: &[(&[u8], usize)],
-    noise_bytes: &[u8],
-) -> [u8; 32] {
-    let mut hasher = H::new();
-
-    let physical_data_len: usize = data_views.iter().map(|(_, w)| *w).sum();
-    let data_len = physical_data_len + noise_bytes.len();
-
-    hasher.update(&[0u8]);
-
-    let len_bytes = (data_len as u64).to_le_bytes();
-    hasher.update(&len_bytes);
-
-    for (base_ptr, width) in data_views {
-        let start = row_idx * width;
-        let end = start + width;
-
-        // SAFETY:
-        // the caller builds each view with a
-        // matching `width` and guarantees
-        // `row_idx` is in range.
-        unsafe {
-            let src = base_ptr.get_unchecked(start..end);
-            hasher.update(src);
-        }
-    }
-
-    if !noise_bytes.is_empty() {
-        hasher.update(noise_bytes);
-    }
-
-    for (base_ptr, width) in code_views {
-        let start = row_idx * width;
-        let end = start + width;
-
-        // SAFETY:
-        // see loop above.
-        unsafe {
-            let src = base_ptr.get_unchecked(start..end);
-            hasher.update(src);
-        }
-    }
-
-    hasher.finalize()
-}
-
-/// One digest per grid column, `H(0x00 ‖ its cells row by row)`,
+/// One digest per grid column, `H(its cells row by row ‖ 0x00)`,
 /// for columns `0..digests.len()`, hashed by tiles of columns.
 pub fn hash_column_leaves<H: Hasher>(
     grid_rows: usize,
@@ -565,15 +509,16 @@ pub fn hash_parts_leaves<H: Hasher>(
     }
 }
 
-/// Hashes one pool leaf from the `0x02` tag followed
-/// by each table's digest of the column, in pool order.
+/// Hashes one pool leaf from each table's digest of
+/// the column, in pool order, followed by the `0x02` tag.
 pub fn hash_parts_leaf<'a, H: Hasher>(digests: impl IntoIterator<Item = &'a [u8; 32]>) -> [u8; 32] {
     let mut hasher = H::new();
-    hasher.update(&[2u8]);
 
     for digest in digests {
         hasher.update(digest);
     }
+
+    hasher.update(&[Tag::PoolLeaf as u8]);
 
     hasher.finalize()
 }
@@ -592,11 +537,11 @@ fn hash_tile<H: Hasher>(
 
     scratch.resize(out.len() * stride, 0);
 
-    for prefix in scratch.iter_mut().step_by(stride) {
-        *prefix = 0;
+    for tag in scratch.iter_mut().skip(stride - 1).step_by(stride) {
+        *tag = Tag::Part as u8;
     }
 
-    let mut offset = 1;
+    let mut offset = 0;
     for row in 0..grid_rows {
         let base = row * encoded_width + first;
         for &(column, width) in code_views {
@@ -637,12 +582,12 @@ fn hash_layer<H: Hasher>(
     }
 }
 
-/// `H(0x01 ‖ left ‖ right)`, an internal node of [`MerkleTree`].
+/// `H(left ‖ right ‖ 0x01)`, an internal node of [`MerkleTree`].
 fn hash_node<H: Hasher>(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut node = [0u8; 65];
-    node[0] = 1;
-    node[1..33].copy_from_slice(left);
-    node[33..].copy_from_slice(right);
+    node[..32].copy_from_slice(left);
+    node[32..64].copy_from_slice(right);
+    node[64] = Tag::Node as u8;
 
     H::digest(&node)
 }
@@ -685,14 +630,14 @@ mod tests {
         views: &[(&[u8], usize)],
     ) -> [u8; 32] {
         let mut hasher = H::new();
-        hasher.update(&[0u8]);
-
         for row in 0..grid_rows {
             for &(column, width) in views {
                 let start = (row * encoded_width + col) * width;
                 hasher.update(&column[start..start + width]);
             }
         }
+
+        hasher.update(&[0u8]);
 
         hasher.finalize()
     }
@@ -717,6 +662,25 @@ mod tests {
                 out
             })
             .collect()
+    }
+
+    fn check_tags<H: Hasher>() {
+        let right: [u8; 32] = core::array::from_fn(|i| 0x80 | i as u8);
+
+        for first in [0x00, 0x02] {
+            let mut left: [u8; 32] = core::array::from_fn(|i| i as u8);
+            left[0] = first;
+
+            let payload = [left, right].concat();
+            let tagged = |tag: u8| H::digest(&[&payload[..], &[tag][..]].concat());
+
+            let mut part = [[0u8; 32]];
+            hash_column_leaves::<H>(1, 1, &[(&payload[..], 64)], &mut part);
+
+            assert_eq!(part[0], tagged(0x00));
+            assert_eq!(hash_node::<H>(&left, &right), tagged(0x01));
+            assert_eq!(hash_parts_leaf::<H>([&left, &right]), tagged(0x02));
+        }
     }
 
     #[test]
@@ -1032,53 +996,6 @@ mod tests {
         assert!(tree.prove_batch(&[0, 8]).is_err());
     }
 
-    #[test]
-    fn hash_leaf_row_blinded_includes_length_prefix() {
-        let data = [1u8, 2u8];
-        let code = [3u8, 4u8, 5u8];
-
-        let data_views = vec![(&data[..], data.len())];
-        let code_views = vec![(&code[..], code.len())];
-
-        let expected = {
-            let mut h = H::new();
-            h.update(&[0u8]);
-            h.update(&(data.len() as u64).to_le_bytes());
-            h.update(&data);
-            h.update(&code);
-
-            h.finalize()
-        };
-
-        let got = hash_leaf_row_blinded::<H>(0, &data_views, &code_views, &[]);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn hash_leaf_row_blinded_rejects_ambiguous_concatenation() {
-        let data_a = [1u8, 2u8];
-        let code_a = [3u8];
-
-        let data_b = [1u8];
-        let code_b = [2u8, 3u8];
-
-        let h_a = hash_leaf_row_blinded::<H>(
-            0,
-            &[(&data_a[..], data_a.len())],
-            &[(&code_a[..], code_a.len())],
-            &[],
-        );
-
-        let h_b = hash_leaf_row_blinded::<H>(
-            0,
-            &[(&data_b[..], data_b.len())],
-            &[(&code_b[..], code_b.len())],
-            &[],
-        );
-
-        assert_ne!(h_a, h_b);
-    }
-
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic]
@@ -1172,15 +1089,35 @@ mod tests {
         hash_parts_leaves::<H>(&views, &mut leaves);
 
         for (j, leaf) in leaves.iter().enumerate() {
-            let mut preimage = vec![2u8];
+            let mut preimage = Vec::new();
             for table in &tables {
                 preimage.extend_from_slice(&table[j]);
             }
+
+            preimage.push(2u8);
 
             // SAFETY: every slot starts initialized
             let leaf = unsafe { leaf.assume_init() };
 
             assert_eq!(leaf, H::digest(&preimage));
         }
+    }
+
+    #[cfg(feature = "blake3")]
+    #[test]
+    fn blake3_preimages_end_in_their_tags() {
+        check_tags::<crate::blake3::Blake3Hasher>();
+    }
+
+    #[cfg(feature = "sha2")]
+    #[test]
+    fn sha256_preimages_end_in_their_tags() {
+        check_tags::<crate::sha256::Sha256Hasher>();
+    }
+
+    #[cfg(feature = "sha3")]
+    #[test]
+    fn sha3_preimages_end_in_their_tags() {
+        check_tags::<crate::sha3::Sha3_256Hasher>();
     }
 }

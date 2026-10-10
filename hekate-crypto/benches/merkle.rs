@@ -4,7 +4,7 @@
 
 use core::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use hekate_crypto::merkle::MerkleTree;
+use hekate_crypto::merkle::{MerkleTree, Tag};
 use hekate_crypto::{DefaultHasher, Hasher, default_hasher_name};
 use hekate_math::Block128;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -16,9 +16,8 @@ type F = Block128;
 #[inline(always)]
 fn hash_leaf(payload: &[u8]) -> [u8; 32] {
     let mut h = H::new();
-    h.update(&[0u8]);
-    h.update(&(payload.len() as u64).to_le_bytes());
     h.update(payload);
+    h.update(&[Tag::Part as u8]);
 
     h.finalize()
 }
@@ -26,9 +25,9 @@ fn hash_leaf(payload: &[u8]) -> [u8; 32] {
 #[inline(always)]
 fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut h = H::new();
-    h.update(&[1u8]);
     h.update(left);
     h.update(right);
+    h.update(&[Tag::Node as u8]);
 
     h.finalize()
 }
@@ -69,7 +68,7 @@ fn bench_merkle_hashing(c: &mut Criterion) {
         );
     }
 
-    group.throughput(Throughput::Bytes((1 + 32 + 32) as u64));
+    group.throughput(Throughput::Bytes((32 + 32 + 1) as u64));
     group.bench_function("node_hash", |b| {
         let left = hash_leaf(b"left");
         let right = hash_leaf(b"right");
