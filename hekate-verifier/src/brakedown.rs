@@ -9,7 +9,7 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::proofs::BrakedownProof;
 use hekate_crypto::Hasher;
-use hekate_crypto::merkle::{MerkleTree, hash_parts_leaf};
+use hekate_crypto::merkle::{MerkleTree, Tag, hash_parts_leaf};
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{Block8, HardwareField, PackableField};
 use tracing::instrument;
@@ -51,17 +51,7 @@ where
         let encoded_width = config.encoded_width(grid_cols);
         let num_queries = config.num_queries;
 
-        let mut indices = Vec::with_capacity(num_queries);
-        for _ in 0..num_queries {
-            let bytes = transcript.challenge_field::<F>(b"idx_query")?.to_bytes();
-
-            let mut rng_val: u64 = 0;
-            for (k, &b) in bytes.iter().take(8).enumerate() {
-                rng_val |= (b as u64) << (8 * k);
-            }
-
-            indices.push((rng_val % (encoded_width as u64)) as usize);
-        }
+        let indices = transcript.challenge_indices(b"idx_query", num_queries, encoded_width)?;
 
         // One opened column and one octopus leaf
         // per distinct queried index, ascending.
@@ -152,10 +142,10 @@ where
     }
 }
 
-fn hash_leaf<H: Hasher>(code: &[u8]) -> [u8; 32] {
+fn hash_part<H: Hasher>(code: &[u8]) -> [u8; 32] {
     let mut h = H::new();
-    h.update(&[0u8]); // Domain separator
     h.update(code);
+    h.update(&[Tag::Part as u8]); // Domain separator
 
     h.finalize()
 }
@@ -182,7 +172,7 @@ fn column_leaf<H: Hasher>(column: &[u8], parts: &[usize], digests: &mut Vec<[u8;
     for &len in parts {
         let (part, tail) = rest.split_at(len);
 
-        digests.push(hash_leaf::<H>(part));
+        digests.push(hash_part::<H>(part));
 
         rest = tail;
     }
@@ -196,7 +186,7 @@ mod tests {
     use alloc::vec;
     use hekate_crypto::DefaultHasher;
     use hekate_crypto::merkle::hash_column_leaves;
-    use hekate_math::{Block128, CanonicalSerialize};
+    use hekate_math::Block128;
 
     type F = Block128;
     type H = DefaultHasher;
@@ -268,7 +258,7 @@ mod tests {
 
         // 1. Setup Mock Data (Leaves)
         // Verification expects:
-        // Leaf = Hash(2 || Hash(0 || code_bytes))
+        // Leaf = Hash(Hash(code_bytes || 0) || 2)
         let mut leaves = vec![[0u8; 32]; encoded_width];
         for (i, leaf) in leaves.iter_mut().enumerate() {
             let mut code_bytes = vec![0u8; field_size * grid_rows];
@@ -281,8 +271,8 @@ mod tests {
             }
 
             let mut h = H::new();
-            h.update(&[0u8]); // Domain separator
             h.update(&code_bytes);
+            h.update(&[0u8]); // Domain separator
 
             *leaf = hash_parts_leaf::<H>([&h.finalize()]);
         }
@@ -292,22 +282,11 @@ mod tests {
 
         // 2. Simulate Transcript
         let num_queries = config.num_queries;
+
         let mut prover_transcript = Transcript::<H>::new(b"test_brakedown");
-        let mut query_indices = Vec::new();
-
-        for _ in 0..num_queries {
-            let bytes = prover_transcript
-                .challenge_field::<F>(b"idx_query")
-                .unwrap()
-                .to_bytes();
-
-            let mut rng_val: u64 = 0;
-            for (k, &b) in bytes.iter().take(8).enumerate() {
-                rng_val |= (b as u64) << (8 * k);
-            }
-
-            query_indices.push((rng_val % (encoded_width as u64)) as usize);
-        }
+        let query_indices = prover_transcript
+            .challenge_indices(b"idx_query", num_queries, encoded_width)
+            .unwrap();
 
         // 3. Construct Proof: one opened column per
         // distinct query, plus one octopus multiproof.
@@ -369,21 +348,9 @@ mod tests {
         // count, then submit garbage columns with an
         // empty octopus path: the batch walk starves.
         let mut prover_transcript = Transcript::<H>::new(b"test");
-        let mut distinct = Vec::new();
-
-        for _ in 0..config.num_queries {
-            let bytes = prover_transcript
-                .challenge_field::<F>(b"idx_query")
-                .unwrap()
-                .to_bytes();
-
-            let mut rng_val: u64 = 0;
-            for (k, &b) in bytes.iter().take(8).enumerate() {
-                rng_val |= (b as u64) << (8 * k);
-            }
-
-            distinct.push((rng_val % (encoded_width as u64)) as usize);
-        }
+        let mut distinct = prover_transcript
+            .challenge_indices(b"idx_query", config.num_queries, encoded_width)
+            .unwrap();
 
         distinct.sort_unstable();
         distinct.dedup();

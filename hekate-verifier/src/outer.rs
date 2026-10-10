@@ -109,8 +109,7 @@ where
 
     transcript.append_field_list(b"outer_p0", &outer.quadratic);
 
-    let columns =
-        protocol::challenge_outer_queries::<F, H>(transcript, geom.queries, geom.domain_len)?;
+    let columns = protocol::challenge_outer_queries(transcript, geom.queries, geom.domain_len)?;
 
     let aux_rows = layout.total_rows() - layout.pad_rows;
 

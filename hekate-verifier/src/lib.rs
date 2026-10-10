@@ -733,7 +733,7 @@ where
 
         let claims_first = cursor.map(|c| c.take(claims.flat().len()));
 
-        transcript.append_field_each(b"claimed_val", claims.canonical());
+        transcript.append_field_list(b"claimed_val", claims.canonical());
 
         Ok(Some(CheckedTable {
             view,
@@ -845,7 +845,7 @@ where
         transcript.append_u64(b"num_queries", config.num_queries as u64);
         transcript.append_u64(b"outer_queries", config.outer_queries as u64);
         transcript.append_u64(b"main_row_bytes", main.plan.opened_row_bytes() as u64);
-        transcript.append_field_each(b"public_input", main.instance.public_inputs());
+        transcript.append_field_list(b"public_input", main.instance.public_inputs());
 
         for bc in main.statics.boundary {
             bc.absorb_into(transcript);
