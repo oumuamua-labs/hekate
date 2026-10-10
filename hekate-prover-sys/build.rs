@@ -154,6 +154,7 @@ fn link_unsigned(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         path.display()
     );
 
+    println!("cargo:rerun-if-changed={}", path.display());
     println!("cargo:rustc-link-search=native={}", staged_dir.display());
     println!("cargo:rustc-link-lib=dylib=hekate_prover_cdylib");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", staged_dir.display());
