@@ -44,18 +44,14 @@ pub trait Hasher: Clone + Debug + Send + Sync + 'static {
         hasher.finalize()
     }
 
-    /// `update` with `prefix` and one element's canonical
-    /// bytes per element, batched through a stack buffer.
-    fn update_fields<F: TowerField>(
-        &mut self,
-        prefix: &[u8],
-        elements: impl IntoIterator<Item = F>,
-    ) {
+    /// `update` with each element's canonical
+    /// bytes, batched through a stack buffer.
+    fn update_fields<F: TowerField>(&mut self, elements: impl IntoIterator<Item = F>) {
         let mut buf = [0u8; FIELD_BUFFER_BYTES];
         let mut filled = 0;
 
         for element in elements {
-            let size = prefix.len() + element.serialized_size();
+            let size = element.serialized_size();
 
             if filled + size > buf.len() {
                 self.update(&buf[..filled]);
@@ -63,18 +59,14 @@ pub trait Hasher: Clone + Debug + Send + Sync + 'static {
                 filled = 0;
             }
 
-            let written = buf.get_mut(filled..filled + size).is_some_and(|slot| {
-                let (head, tail) = slot.split_at_mut(prefix.len());
-                head.copy_from_slice(prefix);
-
-                element.serialize(tail).is_ok()
-            });
+            let written = buf
+                .get_mut(filled..filled + size)
+                .is_some_and(|slot| element.serialize(slot).is_ok());
 
             if written {
                 filled += size;
             } else {
                 self.update(&buf[..filled]);
-                self.update(prefix);
                 self.update(&element.to_bytes());
 
                 filled = 0;
@@ -127,19 +119,18 @@ mod tests {
         hasher.finalize()
     }
 
-    fn per_element<H: Hasher, F: TowerField>(prefix: &[u8], elements: &[F]) -> [u8; 32] {
+    fn per_element<H: Hasher, F: TowerField>(elements: &[F]) -> [u8; 32] {
         let mut hasher = H::new();
         for element in elements {
-            hasher.update(prefix);
             hasher.update(&element.to_bytes());
         }
 
         hasher.finalize()
     }
 
-    fn buffered<H: Hasher, F: TowerField>(prefix: &[u8], elements: &[F]) -> [u8; 32] {
+    fn buffered<H: Hasher, F: TowerField>(elements: &[F]) -> [u8; 32] {
         let mut hasher = H::new();
-        hasher.update_fields(prefix, elements.iter().copied());
+        hasher.update_fields(elements.iter().copied());
 
         hasher.finalize()
     }
@@ -162,20 +153,12 @@ mod tests {
             .map(|i| Block32(i.wrapping_mul(0x9E37_79B9)))
             .collect();
 
-        for prefix in [&b""[..], b"claimed_val"] {
-            assert_eq!(
-                buffered::<H, _>(prefix, &wide),
-                per_element::<H, _>(prefix, &wide)
-            );
-            assert_eq!(
-                buffered::<H, _>(prefix, &narrow),
-                per_element::<H, _>(prefix, &narrow)
-            );
-            assert_eq!(
-                buffered::<H, Block128>(prefix, &[]),
-                per_element::<H, Block128>(prefix, &[])
-            );
-        }
+        assert_eq!(buffered::<H, _>(&wide), per_element::<H, _>(&wide));
+        assert_eq!(buffered::<H, _>(&narrow), per_element::<H, _>(&narrow));
+        assert_eq!(
+            buffered::<H, Block128>(&[]),
+            per_element::<H, Block128>(&[])
+        );
     }
 
     #[cfg(feature = "blake3")]
