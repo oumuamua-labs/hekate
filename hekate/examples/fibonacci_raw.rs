@@ -12,7 +12,7 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{Trace, TraceBuilder};
 use hekate_crypto::transcript::Transcript;
-use hekate_gadgets::atoms::int_arith::add_carry_chain_with_carry_in;
+use hekate_gadgets::atoms::int_arith::add_carry_chain;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::define_columns;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
@@ -33,7 +33,7 @@ type H = DefaultHasher;
 //
 // Real 32-bit integer Fibonacci over GF(2^k):
 // the carry chain is emulated bit-by-bit via
-// `add_carry_chain_with_carry_in`. Four B32
+// `add_carry_chain`. Four B32
 // physical columns (A, B, SUM, CARRY) expand
 // virtually into 128 bit slots the adder operates
 // on; the same four expose a packed view for
@@ -66,13 +66,7 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     let sum_bits: Vec<_> = words.bits(2).iter().map(|c| cs.col(c.index())).collect();
     let carry_v: Vec<_> = words.bits(3).iter().map(|c| cs.col(c.index())).collect();
 
-    let zero = cs.constant(F::ZERO);
-
-    let mut carry = Vec::with_capacity(33);
-    carry.push(zero);
-    carry.extend(carry_v.iter().copied());
-
-    add_carry_chain_with_carry_in(cs, &a_bits, &b_bits, &sum_bits, &carry);
+    add_carry_chain(cs, &a_bits, &b_bits, &sum_bits, &carry_v);
 
     let q_cell = cs.col(q.index());
     let b_packed = cs.col(b_packed_col.index());
@@ -97,8 +91,8 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
 // 3. TRACE GENERATION
 //
 // carry_word layout:
-// bit k = adder's carry[k+1]. Bit 31 is the
-// overflow (adder's carry[32]), constrained
+// bit k = adder's carry out of position k.
+// Bit 31 is the overflow, constrained
 // by the adder but otherwise unused.
 // =================================================================
 fn generate_fib_trace(num_vars: usize) -> errors::Result<ColumnTrace> {
