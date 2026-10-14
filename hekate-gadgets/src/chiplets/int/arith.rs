@@ -2,9 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! 1-row-per-op ALU chiplet over
-//! `int_arithmetic` primitives.
-//! Bit width is u32 or u64;
+//! 1-row-per-op ALU chiplet over `int_arith` primitives. Bit width is u32 or u64;
 //!
 //! Opcodes:
 //! ADD, SUB, AND, XOR, NOT, LT.
@@ -19,7 +17,7 @@ use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_math::{Bit, Block32, Block64, TowerField};
 use hekate_program::constraint::ConstraintAst;
-use hekate_program::constraint::builder::{ConstraintSystem, Expr};
+use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::define_columns;
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{BusKind, PermutationCheckSpec, Service, ServiceSlot};
@@ -350,7 +348,6 @@ impl<F: TowerField> Air<F> for IntArithmeticChiplet {
 
         let bw = ly.bit_width;
         let one = cs.one();
-        let zero = cs.constant(F::ZERO);
 
         let a: Vec<_> = (0..bw).map(|k| cs.col(ly.a_bits + k)).collect();
         let b: Vec<_> = (0..bw).map(|k| cs.col(ly.b_bits + k)).collect();
@@ -398,30 +395,32 @@ impl<F: TowerField> Air<F> for IntArithmeticChiplet {
         int_arith::bit_packing(&cs, val_res, &r);
         int_arith::bit_packing(&cs, carry_packed, &w);
 
-        let mut carry_full: Vec<Expr<F>> = Vec::with_capacity(bw + 1);
-        carry_full.push(zero);
+        let s_chain = s_add + s_sub;
+        let s_borrow = s_sub + s_lt;
 
-        for &w_k in w.iter() {
-            carry_full.push(w_k);
+        for k in 0..bw {
+            let w_in = match k {
+                0 => None,
+                _ => Some(w[k - 1]),
+            };
+
+            let sum = match w_in {
+                Some(c) => r[k] + a[k] + b[k] + c,
+                None => r[k] + a[k] + b[k],
+            };
+
+            cs.assert_zero_when(s_chain, sum);
+            cs.assert_zero_when(s_add, w[k] + int_arith::carry_out(a[k], b[k], w_in));
+            cs.assert_zero_when(
+                s_borrow,
+                w[k] + int_arith::borrow_out(&cs, a[k], b[k], w_in),
+            );
         }
-
-        int_arith::add_carry_chain_with_carry_in_gated(&cs, s_add, &a, &b, &r, &carry_full);
-        int_arith::sub_borrow_chain_gated(&cs, s_sub, &a, &b, &r, &carry_full);
 
         for k in 0..bw {
             cs.assert_zero_when(s_and, r[k] + a[k] * b[k]);
             cs.assert_zero_when(s_xor, r[k] + a[k] + b[k]);
             cs.assert_zero_when(s_not, r[k] + a[k] + one);
-        }
-
-        for k in 0..bw {
-            let w_k = if k == 0 { zero } else { w[k - 1] };
-            let w_next = w[k];
-
-            cs.assert_zero_when(
-                s_lt,
-                w_next + b[k] + a[k] * b[k] + w_k + a[k] * w_k + b[k] * w_k,
-            );
         }
 
         cs.assert_zero_when(s_lt, r[0] + w[bw - 1]);
