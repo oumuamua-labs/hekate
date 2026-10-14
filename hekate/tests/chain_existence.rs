@@ -10,7 +10,7 @@ use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_gadgets::atoms::int_arith::add_carry_chain_with_carry_in;
+use hekate_gadgets::atoms::int_arith::add_carry_chain;
 use hekate_gadgets::{IntArithmeticChiplet, IntArithmeticLayout, generate_arithmetic_trace};
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakWitness, generate_keccak_trace};
 use hekate_math::{Bit, Block32, Block64, Block128, HardwareField, TowerField};
@@ -199,11 +199,7 @@ fn fib_raw_host() -> CircuitProgram<F> {
     let sum_bits: Vec<_> = words.bits(2).iter().map(|c| cs.col(c.index())).collect();
     let carry_v: Vec<_> = words.bits(3).iter().map(|c| cs.col(c.index())).collect();
 
-    let mut carry = Vec::with_capacity(33);
-    carry.push(cs.constant(F::ZERO));
-    carry.extend(carry_v.iter().copied());
-
-    add_carry_chain_with_carry_in(cs, &a_bits, &b_bits, &sum_bits, &carry);
+    add_carry_chain(cs, &a_bits, &b_bits, &sum_bits, &carry_v);
 
     let q_cell = cs.col(q.index());
     let b_packed = cs.col(packed.at(1).index());
