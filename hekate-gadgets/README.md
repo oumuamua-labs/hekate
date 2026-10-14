@@ -113,8 +113,7 @@ const Q: u32 = 3329;
 define_columns! {
     Coefficients {
         VALUE: [Bit; 12],
-        RESULT: [Bit; 12],
-        BORROW: [Bit; 13],
+        BORROW: [Bit; 11],
     }
 }
 
@@ -136,21 +135,15 @@ fn below_q(rows: usize) -> errors::Result<CircuitProgram<F>> {
         cs.assert_boolean(bit);
     }
 
-    range_check(
-        cs,
-        &value,
-        &bits(Coefficients::RESULT, 12),
-        &bits(Coefficients::BORROW, 13),
-        Q,
-    );
+    range_check(cs, &value, &bits(Coefficients::BORROW, 11), Q);
 
     cx.compile()
 }
 ```
 
 `range_check` subtracts the value from q − 1 bit by bit and pins the last borrow to zero, which holds exactly when the
-value is below q. It boolean-checks the result and borrow bits; the value's bits are yours to check, as the loop does.
-The trace fills `RESULT` and `BORROW` with that subtraction on every row.
+value is below q. It boolean-checks nothing: the value's bits are yours to check, as the loop does, and they fix every
+borrow bit. The trace fills `BORROW` with the borrows out of bits 0 to 10 on every row.
 
 ## Documentation
 
