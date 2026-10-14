@@ -26,9 +26,7 @@ use super::{
     BallShape, Kind, RATE_128, RATE_256, RejShape, RowInfo, RowKind, SIGN_BYTES, STEP_ACCESSES,
     SamplerChiplet, SamplerForgery, SamplerStep, TAIL_LANES, cbd_slots, pinned, plan,
 };
-use crate::utils::{
-    Writer, fill_sub_borrow_packed, flush_bit_buffer, pack_bits, pack_one, write_column,
-};
+use crate::utils::{Writer, fill_borrows, flush_bit_buffer, pack_bits, pack_one, write_column};
 use crate::wiring::{LaneValues, N, PolyValues};
 use crate::{mldsa, mlkem};
 
@@ -643,9 +641,8 @@ fn fill_rejection<P: Fn(Col) -> errors::Result<usize>>(
     for (m, slot) in rej.slots.iter().enumerate() {
         let candidate = field(window, shape.stride * m, shape.width);
 
-        fill_sub_borrow_packed(
+        fill_borrows(
             bits,
-            slot.result,
             slot.borrow,
             shape.width,
             (shape.q - 1) as u64,
@@ -737,14 +734,7 @@ fn fill_ball<P: Fn(Col) -> errors::Result<usize>>(
 
     // The AIR compares the low byte of i with j;
     // at i = 256 the done gate zeroes u.
-    fill_sub_borrow_packed(
-        bits,
-        bb.diff,
-        bb.borrow,
-        BYTE,
-        (n & 0xff) as u64,
-        byte as u64,
-    );
+    fill_borrows(bits, bb.borrow, BYTE, (n & 0xff) as u64, byte as u64);
 
     fill_increment(bits, bb.carry, n, used);
 
@@ -783,17 +773,9 @@ fn fill_sorted<P: Fn(Col) -> errors::Result<usize>>(
     pack_one(bits, sb.write, a.write);
     pack_one(bits, sb.same, bool::from(same));
 
-    fill_sub_borrow_packed(
+    fill_borrows(bits, sb.addr_borrow, BYTE, a.addr as u64, b.addr as u64);
+    fill_borrows(
         bits,
-        sb.addr_diff,
-        sb.addr_borrow,
-        BYTE,
-        a.addr as u64,
-        b.addr as u64,
-    );
-    fill_sub_borrow_packed(
-        bits,
-        sb.time_diff,
         sb.time_borrow,
         TIME_BITS,
         a.time as u64,

@@ -22,10 +22,7 @@ pub(crate) const TIME_BITS: usize = 9;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RejSlot {
-    /// Bits of (q − 1) − c.
-    pub(crate) result: usize,
-
-    /// Its borrows; the top one rejects c.
+    /// Borrows of (q − 1) − c; the top one rejects c.
     pub(crate) borrow: usize,
 
     /// Carries of n + u.
@@ -49,8 +46,7 @@ impl RejBits {
 
         let slots = (0..shape.slots)
             .map(|_| RejSlot {
-                result: alloc(shape.width),
-                borrow: alloc(shape.width + 1),
+                borrow: alloc(shape.width),
                 carry: alloc(COUNT_BITS),
                 u: alloc(1),
             })
@@ -118,12 +114,10 @@ pub(crate) struct SortBits {
 
     /// Whether the next sorted access has this address.
     pub(crate) same: usize,
-    pub(crate) addr_diff: usize,
 
     /// Borrows of addr − next addr;
     /// the top one means the next is larger.
     pub(crate) addr_borrow: usize,
-    pub(crate) time_diff: usize,
 
     /// Borrows of time − next time;
     /// the top one means the next is later.
@@ -137,10 +131,8 @@ impl SortBits {
             time: alloc(TIME_BITS),
             write: alloc(1),
             same: alloc(1),
-            addr_diff: alloc(BYTE),
-            addr_borrow: alloc(BYTE + 1),
-            time_diff: alloc(TIME_BITS),
-            time_borrow: alloc(TIME_BITS + 1),
+            addr_borrow: alloc(BYTE),
+            time_borrow: alloc(TIME_BITS),
         }
     }
 }
@@ -154,7 +146,6 @@ pub(crate) struct BallBits {
 
     /// The candidate byte j.
     pub(crate) byte: usize,
-    pub(crate) diff: usize,
 
     /// Borrows of i − j;
     /// the top one rejects j.
@@ -170,8 +161,7 @@ impl BallBits {
             shape,
             counts: alloc(2 * COUNT_BITS),
             byte: alloc(BYTE),
-            diff: alloc(BYTE),
-            borrow: alloc(BYTE + 1),
+            borrow: alloc(BYTE),
             carry: alloc(COUNT_BITS),
             u: alloc(1),
             sort: SortBits::alloc(alloc),

@@ -94,54 +94,6 @@ pub fn flush_bit_buffer(bits: &[u32], tb: &mut TraceBuilder, row: usize) -> Resu
     Ok(())
 }
 
-/// Fill the carry chain of `a + b` into `bits`
-/// at virtual offset `carry_start`. Carry-out
-/// at bit position `k` lands at `carry_start + k + 1`.
-pub fn fill_add_carry_packed(
-    bits: &mut [u32],
-    carry_start: usize,
-    carry_width: usize,
-    a_val: u64,
-    b_val: u64,
-) {
-    let mut carry = false;
-    for k in 0..carry_width - 1 {
-        let a_bit = ((a_val >> k) & 1) == 1;
-        let b_bit = ((b_val >> k) & 1) == 1;
-
-        let new_carry = (a_bit & b_bit) ^ (carry & (a_bit ^ b_bit));
-        pack_one(bits, carry_start + k + 1, new_carry);
-
-        carry = new_carry;
-    }
-}
-
-/// Fill the result and borrow chain of `a - b` into `bits`.
-/// Result bits land at `result_start..result_start+width`;
-/// borrow at bit `k` lands at `borrow_start + k + 1`.
-pub fn fill_sub_borrow_packed(
-    bits: &mut [u32],
-    result_start: usize,
-    borrow_start: usize,
-    width: usize,
-    a_val: u64,
-    b_val: u64,
-) {
-    let mut borrow = false;
-    for k in 0..width {
-        let a_bit = ((a_val >> k) & 1) == 1;
-        let b_bit = ((b_val >> k) & 1) == 1;
-
-        let result = a_bit ^ b_bit ^ borrow;
-        let new_borrow = (!a_bit & b_bit) | ((!a_bit ^ b_bit) & borrow);
-
-        pack_one(bits, result_start + k, result);
-        pack_one(bits, borrow_start + k + 1, new_borrow);
-
-        borrow = new_borrow;
-    }
-}
-
 /// Carry out of position `k` of `a + b` lands
 /// at `start + k`, for `k` in `0..width`.
 pub(crate) fn fill_carries(bits: &mut [u32], start: usize, width: usize, a: u64, b: u64) {

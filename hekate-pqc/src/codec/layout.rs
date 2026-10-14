@@ -35,14 +35,11 @@ pub(crate) const Q_SHIFTS: [usize; (mlkem::Q >> 1).count_ones() as usize] = {
 #[derive(Clone, Debug)]
 pub(crate) struct ZField {
     pub(crate) y: usize,
-    pub(crate) lo_result: usize,
     pub(crate) lo_borrow: usize,
-    pub(crate) hi_result: usize,
     pub(crate) hi_borrow: usize,
     pub(crate) z: usize,
     pub(crate) carry: usize,
     pub(crate) flag: usize,
-    pub(crate) rng_result: usize,
     pub(crate) rng_borrow: usize,
 }
 
@@ -52,15 +49,12 @@ impl ZField {
 
         Self {
             y: alloc(w),
-            lo_result: alloc(w),
-            lo_borrow: alloc(w + 1),
-            hi_result: alloc(w),
-            hi_borrow: alloc(w + 1),
+            lo_borrow: alloc(w),
+            hi_borrow: alloc(w),
             z: alloc(Z_WIDTH),
-            carry: alloc(Z_WIDTH + 2),
+            carry: alloc(Z_WIDTH + 1),
             flag: alloc(1),
-            rng_result: alloc(Z_WIDTH),
-            rng_borrow: alloc(Z_WIDTH + 1),
+            rng_borrow: alloc(Z_WIDTH),
         }
     }
 }
@@ -68,20 +62,16 @@ impl ZField {
 #[derive(Clone, Debug)]
 pub(crate) struct HintSlot {
     pub(crate) s: usize,
-    pub(crate) lt_result: Vec<usize>,
     pub(crate) lt_borrow: Vec<usize>,
     pub(crate) p: usize,
     pub(crate) same: usize,
-    pub(crate) inc_result: usize,
     pub(crate) inc_borrow: usize,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct HintBits {
     pub(crate) counts: usize,
-    pub(crate) mono_result: Vec<usize>,
     pub(crate) mono_borrow: Vec<usize>,
-    pub(crate) last_result: usize,
     pub(crate) last_borrow: usize,
     pub(crate) slots: Vec<HintSlot>,
 }
@@ -92,29 +82,23 @@ impl HintBits {
 
         let counts = alloc(k * BYTE);
 
-        let mono_result = (1..k).map(|_| alloc(BYTE)).collect();
-        let mono_borrow = (1..k).map(|_| alloc(BYTE + 1)).collect();
+        let mono_borrow = (1..k).map(|_| alloc(BYTE)).collect();
 
-        let last_result = alloc(BYTE);
-        let last_borrow = alloc(BYTE + 1);
+        let last_borrow = alloc(BYTE);
 
         let slots = (0..HINT_SLOTS)
             .map(|_| HintSlot {
                 s: alloc(BYTE),
-                lt_result: (0..k).map(|_| alloc(BYTE)).collect(),
-                lt_borrow: (0..k).map(|_| alloc(BYTE + 1)).collect(),
+                lt_borrow: (0..k).map(|_| alloc(BYTE)).collect(),
                 p: alloc(k),
                 same: alloc(1),
-                inc_result: alloc(BYTE),
-                inc_borrow: alloc(BYTE + 1),
+                inc_borrow: alloc(BYTE),
             })
             .collect();
 
         Self {
             counts,
-            mono_result,
             mono_borrow,
-            last_result,
             last_borrow,
             slots,
         }
@@ -141,7 +125,6 @@ pub(crate) struct Byte12Field {
     pub(crate) x: usize,
     pub(crate) flag: usize,
     pub(crate) carry: usize,
-    pub(crate) rng_result: usize,
     pub(crate) rng_borrow: usize,
 }
 
@@ -151,9 +134,8 @@ impl Byte12Field {
             b: alloc(KEM_WIDTH),
             x: alloc(KEM_WIDTH),
             flag: alloc(1),
-            carry: alloc(KEM_WIDTH + 1),
-            rng_result: alloc(KEM_WIDTH),
-            rng_borrow: alloc(KEM_WIDTH + 1),
+            carry: alloc(KEM_WIDTH),
+            rng_borrow: alloc(KEM_WIDTH),
         }
     }
 }
@@ -177,7 +159,7 @@ impl DecompressField {
             r: alloc(d),
             x: alloc(KEM_WIDTH),
             sums: (1..chains).map(|_| alloc(w)).collect(),
-            carries: (0..chains).map(|_| alloc(w + 1)).collect(),
+            carries: (0..chains).map(|_| alloc(w)).collect(),
         }
     }
 }
@@ -190,7 +172,6 @@ pub(crate) struct CompressField {
     pub(crate) sums: Vec<usize>,
     pub(crate) carries: Vec<usize>,
     pub(crate) lift: Option<(usize, usize)>,
-    pub(crate) rng_result: usize,
     pub(crate) rng_borrow: usize,
 }
 
@@ -204,10 +185,9 @@ impl CompressField {
             yp: alloc(d + 1),
             r: alloc(KEM_WIDTH),
             sums: (1..chains).map(|_| alloc(v)).collect(),
-            carries: (0..chains).map(|_| alloc(v + 1)).collect(),
-            lift: (half_q() >> d != 0).then(|| (alloc(KEM_WIDTH + 1), alloc(KEM_WIDTH + 2))),
-            rng_result: alloc(KEM_WIDTH),
-            rng_borrow: alloc(KEM_WIDTH + 1),
+            carries: (0..chains).map(|_| alloc(v)).collect(),
+            lift: (half_q() >> d != 0).then(|| (alloc(KEM_WIDTH + 1), alloc(KEM_WIDTH + 1))),
+            rng_borrow: alloc(KEM_WIDTH),
         }
     }
 }
@@ -215,9 +195,7 @@ impl CompressField {
 #[derive(Clone, Debug)]
 pub(crate) struct Compress1Field {
     pub(crate) x: usize,
-    pub(crate) lo_result: usize,
     pub(crate) lo_borrow: usize,
-    pub(crate) hi_result: usize,
     pub(crate) hi_borrow: usize,
 }
 
@@ -225,10 +203,8 @@ impl Compress1Field {
     fn alloc(alloc: &mut impl FnMut(usize) -> usize) -> Self {
         Self {
             x: alloc(KEM_WIDTH),
-            lo_result: alloc(KEM_WIDTH),
-            lo_borrow: alloc(KEM_WIDTH + 1),
-            hi_result: alloc(KEM_WIDTH),
-            hi_borrow: alloc(KEM_WIDTH + 1),
+            lo_borrow: alloc(KEM_WIDTH),
+            hi_borrow: alloc(KEM_WIDTH),
         }
     }
 }

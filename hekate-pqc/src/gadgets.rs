@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 use hekate_gadgets::atoms::int_arith::{
     ModAddLayout, ModAddWitness, ModReductionLayout, ModReductionWitness, SchoolbookMulLayout,
-    SchoolbookMulWitness, mod_reduction, schoolbook_mul,
+    SchoolbookMulWitness, borrow_out, mod_reduction, schoolbook_mul,
 };
 use hekate_math::TowerField;
 use hekate_program::constraint::builder::{ConstraintSystem, Expr};
@@ -211,41 +211,19 @@ pub(crate) fn padded<'a, F: TowerField>(
         .collect()
 }
 
-/// `a + b = sum` over bits only; emits no booleanity
-/// root and leaves `carry[a.len()]` to the caller.
-pub(crate) fn carry_chain<'a, F: TowerField>(
-    cs: &'a ConstraintSystem<F>,
-    a: &[Expr<'a, F>],
-    b: &[Expr<'a, F>],
-    sum: &[Expr<'a, F>],
-    carry: &[Expr<'a, F>],
-) {
-    cs.constrain(carry[0]);
-
-    for i in 0..a.len() {
-        let (x, y, c) = (a[i], b[i], carry[i]);
-
-        cs.constrain(sum[i] + x + y + c);
-        cs.constrain(carry[i + 1] + x * y + x * c + y * c);
-    }
-}
-
-/// `a − b = diff` over bits only; emits no booleanity
-/// root and leaves `borrow[a.len()]` to the caller.
+/// Borrows of `a − b` over bits only: `borrow[k]` is the
+/// borrow out of bit `k`; no result cells, no booleanity root.
 pub(crate) fn borrow_chain<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     a: &[Expr<'a, F>],
     b: &[Expr<'a, F>],
-    diff: &[Expr<'a, F>],
     borrow: &[Expr<'a, F>],
 ) {
-    cs.constrain(borrow[0]);
+    let mut borrow_in = None;
+    for ((&x, &y), &w) in a.iter().zip(b).zip(borrow) {
+        cs.constrain(w + borrow_out(cs, x, y, borrow_in));
 
-    for i in 0..a.len() {
-        let (x, y, w) = (a[i], b[i], borrow[i]);
-
-        cs.constrain(diff[i] + x + y + w);
-        cs.constrain(borrow[i + 1] + y + x * y + w + x * w + y * w);
+        borrow_in = Some(w);
     }
 }
 

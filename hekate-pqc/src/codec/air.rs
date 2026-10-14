@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::vec::Vec;
+use hekate_gadgets::atoms::int_arith::add_carry_chain;
 use hekate_math::TowerField;
 use hekate_program::constraint::builder::{ConstraintSystem, Expr};
 
@@ -11,7 +12,7 @@ use super::layout::{
     HintCols, HintSlot, KEM_WIDTH, Q_SHIFTS, Z_WIDTH, half_q,
 };
 use super::{HintShape, Kinds, T1_BITS, T1_FIELDS, T1_SHIFT, ZShape, packing};
-use crate::gadgets::{bits, borrow_chain, carry_chain, const_bits, packed, padded};
+use crate::gadgets::{bits, borrow_chain, const_bits, packed, padded};
 use crate::mldsa::Q;
 use crate::mlkem;
 
@@ -112,17 +113,17 @@ fn z<'a, F: TowerField>(
             packed(cs, &y) + on * packed(cs, &field) + (one + on) * idle,
         );
 
-        let lo_borrow = bits(cs, f.lo_borrow, w + 1);
+        let lo_borrow = bits(cs, f.lo_borrow, w);
 
-        borrow_chain(cs, &y, &low, &bits(cs, f.lo_result, w), &lo_borrow);
+        borrow_chain(cs, &y, &low, &lo_borrow);
 
-        cs.constrain_named("codec_z_low", lo_borrow[w]);
+        cs.constrain_named("codec_z_low", lo_borrow[w - 1]);
 
-        let hi_borrow = bits(cs, f.hi_borrow, w + 1);
+        let hi_borrow = bits(cs, f.hi_borrow, w);
 
-        borrow_chain(cs, &high, &y, &bits(cs, f.hi_result, w), &hi_borrow);
+        borrow_chain(cs, &high, &y, &hi_borrow);
 
-        cs.constrain_named("codec_z_high", hi_borrow[w]);
+        cs.constrain_named("codec_z_high", hi_borrow[w - 1]);
 
         let z = bits(cs, f.z, Z_WIDTH);
         let flag = cs.col(f.flag);
@@ -138,9 +139,9 @@ fn z<'a, F: TowerField>(
             )
             .collect();
 
-        let carry = bits(cs, f.carry, Z_WIDTH + 2);
+        let carry = bits(cs, f.carry, Z_WIDTH + 1);
 
-        carry_chain(
+        add_carry_chain(
             cs,
             &padded(&z, Z_WIDTH + 1, zero),
             &padded(&y, Z_WIDTH + 1, zero),
@@ -148,13 +149,13 @@ fn z<'a, F: TowerField>(
             &carry,
         );
 
-        cs.constrain(carry[Z_WIDTH + 1]);
+        cs.constrain(carry[Z_WIDTH]);
 
-        let canonical = bits(cs, f.rng_borrow, Z_WIDTH + 1);
+        let canonical = bits(cs, f.rng_borrow, Z_WIDTH);
 
-        borrow_chain(cs, &top, &z, &bits(cs, f.rng_result, Z_WIDTH), &canonical);
+        borrow_chain(cs, &top, &z, &canonical);
 
-        cs.constrain_named("codec_z_range", canonical[Z_WIDTH]);
+        cs.constrain_named("codec_z_range", canonical[Z_WIDTH - 1]);
         cs.constrain_named(
             "codec_z_coef",
             on * (cs.col(ly.coef.at(j).index()) + packed(cs, &z)),
@@ -195,26 +196,19 @@ fn hint<'a, F: TowerField>(
     }
 
     for i in 1..k {
-        let borrow = bits(cs, hb.mono_borrow[i - 1], BYTE + 1);
-        let result = bits(cs, hb.mono_result[i - 1], BYTE);
+        let borrow = bits(cs, hb.mono_borrow[i - 1], BYTE);
 
-        borrow_chain(cs, &counts[i], &counts[i - 1], &result, &borrow);
+        borrow_chain(cs, &counts[i], &counts[i - 1], &borrow);
 
-        cs.constrain_named("codec_hint_counts", borrow[BYTE]);
+        cs.constrain_named("codec_hint_counts", borrow[BYTE - 1]);
     }
 
     let omega = const_bits(cs, shape.omega as u32, BYTE);
-    let bound = bits(cs, hb.last_borrow, BYTE + 1);
+    let bound = bits(cs, hb.last_borrow, BYTE);
 
-    borrow_chain(
-        cs,
-        &omega,
-        &counts[k - 1],
-        &bits(cs, hb.last_result, BYTE),
-        &bound,
-    );
+    borrow_chain(cs, &omega, &counts[k - 1], &bound);
 
-    cs.constrain_named("codec_hint_bound", bound[BYTE]);
+    cs.constrain_named("codec_hint_bound", bound[BYTE - 1]);
 
     let x = HintExprs {
         bytes: (0..HINT_SLOTS)
@@ -264,13 +258,12 @@ fn hint_slot<'a, F: TowerField>(
     let lt: Vec<Expr<'a, F>> = x
         .counts
         .iter()
-        .zip(&slot.lt_result)
         .zip(&slot.lt_borrow)
-        .map(|((count, &result), &borrow)| {
-            let borrow = bits(cs, borrow, BYTE + 1);
-            borrow_chain(cs, &s, count, &bits(cs, result, BYTE), &borrow);
+        .map(|(count, &borrow)| {
+            let borrow = bits(cs, borrow, BYTE);
+            borrow_chain(cs, &s, count, &borrow);
 
-            borrow[BYTE]
+            borrow[BYTE - 1]
         })
         .collect();
 
@@ -304,19 +297,13 @@ fn hint_slot<'a, F: TowerField>(
     }
 
     let same = cs.col(slot.same);
-    let order = bits(cs, slot.inc_borrow, BYTE + 1);
+    let order = bits(cs, slot.inc_borrow, BYTE);
 
     cs.constrain(same + cs.col(hc.pair.at(t).index()) * shared);
 
-    borrow_chain(
-        cs,
-        &x.bytes[t],
-        after,
-        &bits(cs, slot.inc_result, BYTE),
-        &order,
-    );
+    borrow_chain(cs, &x.bytes[t], after, &order);
 
-    cs.constrain_named("codec_hint_order", same * (one + order[BYTE]));
+    cs.constrain_named("codec_hint_order", same * (one + order[BYTE - 1]));
 }
 
 fn byte12<'a, F: TowerField>(
@@ -345,17 +332,17 @@ fn byte12<'a, F: TowerField>(
             })
             .collect();
 
-        let carry = bits(cs, f.carry, KEM_WIDTH + 1);
+        let carry = bits(cs, f.carry, KEM_WIDTH);
 
-        carry_chain(cs, &x, &q, &b, &carry);
+        add_carry_chain(cs, &x, &q, &b, &carry);
 
-        cs.constrain(carry[KEM_WIDTH]);
+        cs.constrain(carry[KEM_WIDTH - 1]);
 
-        let canonical = bits(cs, f.rng_borrow, KEM_WIDTH + 1);
+        let canonical = bits(cs, f.rng_borrow, KEM_WIDTH);
 
-        borrow_chain(cs, &top, &x, &bits(cs, f.rng_result, KEM_WIDTH), &canonical);
+        borrow_chain(cs, &top, &x, &canonical);
 
-        cs.constrain_named("codec_kem_range", canonical[KEM_WIDTH]);
+        cs.constrain_named("codec_kem_range", canonical[KEM_WIDTH - 1]);
         cs.constrain_named("codec_kem_modulus", (one + reduce) * flag);
         cs.constrain_named(
             "codec_kem_byte12",
@@ -395,15 +382,15 @@ fn decompress<F: TowerField>(cs: &ConstraintSystem<F>, ly: &CodecLayout, block: 
 
         let mut acc = rounded;
         for (i, &s) in Q_SHIFTS.iter().enumerate() {
-            let carry = bits(cs, f.carries[i], w + 1);
+            let carry = bits(cs, f.carries[i], w);
             let sum = match f.sums.get(i) {
                 Some(&start) => bits(cs, start, w),
                 None => out.clone(),
             };
 
-            carry_chain(cs, &acc, &shifted(&y, s, w, zero), &sum, &carry);
+            add_carry_chain(cs, &acc, &shifted(&y, s, w, zero), &sum, &carry);
 
-            cs.constrain(carry[w]);
+            cs.constrain(carry[w - 1]);
 
             acc = sum;
         }
@@ -448,9 +435,9 @@ fn compress<F: TowerField>(cs: &ConstraintSystem<F>, ly: &CodecLayout, block: &C
         let lifted = match f.lift {
             Some((sum, carry)) => {
                 let sum = bits(cs, sum, KEM_WIDTH + 1);
-                let carry = bits(cs, carry, KEM_WIDTH + 2);
+                let carry = bits(cs, carry, KEM_WIDTH + 1);
 
-                carry_chain(
+                add_carry_chain(
                     cs,
                     &padded(&x, KEM_WIDTH + 1, zero),
                     &const_bits(cs, high, KEM_WIDTH + 1),
@@ -458,7 +445,7 @@ fn compress<F: TowerField>(cs: &ConstraintSystem<F>, ly: &CodecLayout, block: &C
                     &carry,
                 );
 
-                cs.constrain(carry[KEM_WIDTH + 1]);
+                cs.constrain(carry[KEM_WIDTH]);
 
                 sum
             }
@@ -475,24 +462,24 @@ fn compress<F: TowerField>(cs: &ConstraintSystem<F>, ly: &CodecLayout, block: &C
 
         let mut acc = padded(&yp, v, zero);
         for (i, term) in terms.enumerate() {
-            let carry = bits(cs, f.carries[i], v + 1);
+            let carry = bits(cs, f.carries[i], v);
             let sum = match f.sums.get(i) {
                 Some(&start) => bits(cs, start, v),
                 None => lhs.clone(),
             };
 
-            carry_chain(cs, &acc, &term, &sum, &carry);
+            add_carry_chain(cs, &acc, &term, &sum, &carry);
 
-            cs.constrain(carry[v]);
+            cs.constrain(carry[v - 1]);
 
             acc = sum;
         }
 
-        let canonical = bits(cs, f.rng_borrow, KEM_WIDTH + 1);
+        let canonical = bits(cs, f.rng_borrow, KEM_WIDTH);
 
-        borrow_chain(cs, &top, &r, &bits(cs, f.rng_result, KEM_WIDTH), &canonical);
+        borrow_chain(cs, &top, &r, &canonical);
 
-        cs.constrain_named("codec_compress_range", canonical[KEM_WIDTH]);
+        cs.constrain_named("codec_compress_range", canonical[KEM_WIDTH - 1]);
 
         let field = word_field(cs, ly, j, d);
 
@@ -515,17 +502,17 @@ fn compress1<F: TowerField>(cs: &ConstraintSystem<F>, ly: &CodecLayout, block: &
 
         cs.constrain(packed(cs, &x) + on * cs.col(ly.coef.at(j).index()));
 
-        let below = bits(cs, f.lo_borrow, KEM_WIDTH + 1);
+        let below = bits(cs, f.lo_borrow, KEM_WIDTH);
 
-        borrow_chain(cs, &x, &lower, &bits(cs, f.lo_result, KEM_WIDTH), &below);
+        borrow_chain(cs, &x, &lower, &below);
 
-        let above = bits(cs, f.hi_borrow, KEM_WIDTH + 1);
+        let above = bits(cs, f.hi_borrow, KEM_WIDTH);
 
-        borrow_chain(cs, &upper, &x, &bits(cs, f.hi_result, KEM_WIDTH), &above);
+        borrow_chain(cs, &upper, &x, &above);
 
         cs.constrain_named(
             "codec_kem_compress",
-            on * (cs.col(ly.word_bit(j)) + one + below[KEM_WIDTH] + above[KEM_WIDTH]),
+            on * (cs.col(ly.word_bit(j)) + one + below[KEM_WIDTH - 1] + above[KEM_WIDTH - 1]),
         );
     }
 }
