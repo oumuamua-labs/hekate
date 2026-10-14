@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! 1-row-per-op ALU chiplet over `int_arith` primitives. Bit width is u32 or u64;
+//! 1-row-per-op ALU chiplet over `int_arith`
+//! primitives. Bit width is u32 or u64.
 //!
 //! Opcodes:
 //! ADD, SUB, AND, XOR, NOT, LT.

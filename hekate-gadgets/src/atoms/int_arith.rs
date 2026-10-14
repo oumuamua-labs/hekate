@@ -5,11 +5,14 @@
 //! Integer arithmetic over binary tower fields as carry and
 //! borrow chains over bit cells. Every bit slice must be a
 //! cell that holds only 0 or 1; no atom asserts booleanity.
+//! A bit expanded from a packed word qualifies; a `Bit`
+//! column read whole does not and needs `assert_boolean`.
 
 use alloc::vec::Vec;
 use hekate_math::TowerField;
 use hekate_program::constraint::builder::{ConstraintSystem, Expr};
 
+/// Signed digit `±2^shift` of a non-adjacent form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NafDigit {
     pub shift: usize,
@@ -174,7 +177,7 @@ pub fn range_check<'a, F: TowerField>(
 
     let mut borrow_in: Option<Expr<'a, F>> = None;
     for (k, &v) in value_bits.iter().enumerate() {
-        let minuend = match (bound_minus_1 >> k) & 1 {
+        let minuend = match bound_minus_1.checked_shr(k as u32).unwrap_or(0) & 1 {
             1 => cs.one(),
             _ => cs.constant(F::ZERO),
         };
@@ -284,6 +287,10 @@ pub fn mul_const<'a, F: TowerField>(
             scratch_carries[j - 1],
             digit.negative,
         );
+
+        for &cell in result.iter().skip(width) {
+            cs.constrain(cell);
+        }
 
         acc = padded;
     }
@@ -498,7 +505,7 @@ pub fn mod_add<'a, F: TowerField>(
             _ => a_bits[k] + b_bits[k] + scratch.carry[k - 1],
         };
 
-        let flag_q = match (modulus >> k) & 1 {
+        let flag_q = match modulus.checked_shr(k as u32).unwrap_or(0) & 1 {
             1 => scratch.flag,
             _ => zero,
         };
@@ -519,6 +526,7 @@ pub fn mod_add<'a, F: TowerField>(
     range_check(cs, result_bits, scratch.range_borrow, modulus);
 }
 
+/// Scratch layout of `mod_add` on `operand_width`-bit operands.
 pub fn mod_add_scratch_count(operand_width: usize) -> ModAddLayout {
     ModAddLayout {
         carry_width: operand_width,
@@ -549,6 +557,7 @@ pub fn bit_packing<'a, F: TowerField>(
     cs.constrain(bus_col + reconstruction);
 }
 
+/// Non-adjacent form of `constant`, highest digit first.
 pub fn naf_digits(constant: u32) -> Vec<NafDigit> {
     let mut digits = Vec::new();
     let mut c = constant as i64;
@@ -575,8 +584,8 @@ pub fn naf_digits(constant: u32) -> Vec<NafDigit> {
     digits
 }
 
-/// Scratch widths for `mul_const`: stage `j` is sized to `partial_j · (2^n - 1)`,
-/// which no stage can exceed; no carry-out needs a pin.
+/// Scratch widths for `mul_const`: result `j` is as wide
+/// as `partial_j · (2^n - 1)`; no carry-out needs a pin.
 pub fn mul_const_scratch_widths(operand_width: usize, constant: u32) -> MulConstLayout {
     let digits = naf_digits(constant);
     let n = operand_width;
@@ -1414,19 +1423,114 @@ mod tests {
     }
 
     #[test]
-    fn ast_sharing_across_multiple_add_chains() {
+    fn add_carry_chain_with_carry_in_accepts_honest_rows_and_rejects_tampered() {
         let cs = ConstraintSystem::<F>::new();
+        let n = 12;
+
         let mut cols = Cols::new(&cs);
 
-        let (a1, b1, r1, c1) = (cols.take(12), cols.take(12), cols.take(12), cols.take(12));
-        let (a2, b2, r2, c2) = (cols.take(12), cols.take(12), cols.take(12), cols.take(12));
+        let carry_in = cols.take(1)[0];
+        let (a, b, r, c) = (cols.take(n), cols.take(n), cols.take(n), cols.take(n));
 
-        add_carry_chain(&cs, &a1, &b1, &r1, &c1);
-        add_carry_chain(&cs, &a2, &b2, &r2, &c2);
+        add_carry_chain_with_carry_in(&cs, carry_in, &a, &b, &r, &c);
 
         let ast = cs.build();
 
-        assert_eq!(ast.roots.len(), 48);
-        assert!(!ast.arena.is_empty());
+        for (x, y, cin) in [
+            (4095u128, 0u128, 1u128),
+            (2730, 1365, 1),
+            (0, 0, 1),
+            (3329, 4000, 0),
+        ] {
+            let carry = (0..n).fold(0u128, |word, k| {
+                let low = mask(k + 1);
+                word | ((((x & low) + (y & low) + cin) >> (k + 1)) << k)
+            });
+
+            let mut row = Row::new(1 + 4 * n);
+            row.bit(0, cin == 1);
+            row.bits(1, n, x);
+            row.bits(1 + n, n, y);
+            row.bits(1 + 2 * n, n, (x + y + cin) & mask(n));
+            row.bits(1 + 3 * n, n, carry);
+
+            assert!(row.violations(&ast).is_empty(), "{x} + {y} + {cin}");
+
+            row.bit(0, cin == 0);
+
+            assert!(
+                !row.violations(&ast).is_empty(),
+                "{x} + {y} + {cin} carry-in flipped"
+            );
+        }
+    }
+
+    #[test]
+    fn mod_add_accepts_only_honest_fill_on_every_boolean_witness() {
+        let n = 3;
+        for m in [5u32, 6, 7] {
+            let (ast, num_cols) = mod_add_case(n, m);
+            let q = m as u128;
+
+            for (x, y) in (0..q).flat_map(|x| (0..q).map(move |y| (x, y))) {
+                let s = x + y;
+                let flag = s >= q;
+                let r = s - if flag { q } else { 0 };
+                let fq = if flag { q } else { 0 };
+
+                let honest = r
+                    | (carries(x, y, n) << n)
+                    | (borrows(s, fq, n) << (2 * n))
+                    | ((flag as u128) << (3 * n))
+                    | (range_borrows(r, m, n) << (3 * n + 1));
+
+                let mut row = Row::new(num_cols);
+                row.bits(0, n, x);
+                row.bits(n, n, y);
+
+                let accepted: Vec<u128> = (0..1u128 << (4 * n))
+                    .filter(|&word| {
+                        row.bits(2 * n, 4 * n, word);
+                        row.violations(&ast).is_empty()
+                    })
+                    .collect();
+
+                assert_eq!(accepted, [honest], "{x} + {y} mod {m}");
+            }
+        }
+    }
+
+    #[test]
+    fn range_check_accepts_only_honest_borrows_on_every_boolean_witness() {
+        let n = 4;
+        for bound in 1u32..=16 {
+            let cs = ConstraintSystem::<F>::new();
+            let mut cols = Cols::new(&cs);
+
+            let (v, w) = (cols.take(n), cols.take(n - 1));
+
+            range_check(&cs, &v, &w, bound);
+
+            let ast = cs.build();
+
+            for value in 0..1u128 << n {
+                let expected: Vec<u128> = match value < bound as u128 {
+                    true => alloc::vec![range_borrows(value, bound, n)],
+                    false => Vec::new(),
+                };
+
+                let mut row = Row::new(2 * n - 1);
+                row.bits(0, n, value);
+
+                let accepted: Vec<u128> = (0..1u128 << (n - 1))
+                    .filter(|&word| {
+                        row.bits(n, n - 1, word);
+                        row.violations(&ast).is_empty()
+                    })
+                    .collect();
+
+                assert_eq!(accepted, expected, "{value} < {bound}");
+            }
+        }
     }
 }
