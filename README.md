@@ -11,20 +11,20 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 
 Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
 
-> [!WARNING]  
-> This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
-> without notice. Do not deploy to mainnet.
-
 > [!NOTE]  
-> The verifier, core SDK, and cryptographic chiplets are open-source under AGPL-3.0-only. The prover
-> and compression engine stay proprietary, shipped as free binaries for macOS (Apple Silicon),
+> Hekate's open code is AGPL-3.0-only; its signed prover binary ships as free binaries for macOS (Apple Silicon),
 > Linux (ARM64, glibc), iOS (ARM64, device and simulator), and Android (ARM64).
+> A product shipped under other terms, open source or closed, needs a commercial license.
 
 > [!IMPORTANT]  
 > [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed
 > iOS `.xcframework` and Android `.aar` behind a typed Swift / Kotlin API, one `await` per proof, zero ZK
 > terminology across the boundary. Shipping ZK to edge devices? Start there, with the Swift and Kotlin
 > guides at [oumuamua.dev/mobile](https://oumuamua.dev/mobile).
+
+> [!WARNING]  
+> This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
+> without notice. Do not deploy to mainnet.
 
 ---
 
