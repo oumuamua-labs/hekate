@@ -5,7 +5,8 @@
 use hekate_core::errors::{Error, Result};
 use hekate_core::trace::ColumnType;
 use hekate_gadgets::atoms::int_arith::{
-    ModAddLayout, mod_add_scratch_count, mod_reduction_scratch_count, schoolbook_mul_layout,
+    ModAddLayout, ModReductionLayout, mod_add_scratch_count, mod_reduction_scratch_count,
+    schoolbook_mul_layout,
 };
 use hekate_math::{HardwareField, TowerField};
 use hekate_program::circuit::{Circuit, Col, ColRange};
@@ -77,6 +78,7 @@ pub struct PolyArithLayout {
     pub selin: ColRange,
     pub copy: Option<(Col, Col)>,
 
+    pub red: ModReductionLayout,
     pub add: ModAddLayout,
 }
 
@@ -89,7 +91,7 @@ impl PolyArithLayout {
         copies: bool,
     ) -> Self {
         let mul = schoolbook_mul_layout(bit_width, bit_width);
-        let red = mod_reduction_scratch_count(bit_width, q);
+        let red = mod_reduction_scratch_count(bit_width, mul.product_width, q);
         let add = mod_add_scratch_count(bit_width);
 
         let mut next = 0usize;
@@ -190,6 +192,7 @@ impl PolyArithLayout {
             sel,
             selin,
             copy,
+            red,
             add,
         }
     }

@@ -3,12 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::vec::Vec;
-use hekate_gadgets::atoms::int_arith::{add_carry_chain, mod_add, mul_const, range_check};
+use hekate_gadgets::atoms::int_arith::{
+    add_carry_chain, borrow_out, mod_add, mul_const, range_check,
+};
 use hekate_math::TowerField;
 use hekate_program::constraint::builder::{ConstraintSystem, Expr};
 
 use super::layout::{HighBitsLayout, W_BITS};
-use crate::gadgets::{ModAddExprs, bits, borrow_chain, const_bits, groups, packed, padded};
+use crate::gadgets::{ModAddExprs, bits, groups, packed, padded};
 use crate::mldsa::{MlDsaParams, Q};
 
 pub(crate) fn constrain<F: TowerField>(
@@ -40,7 +42,7 @@ pub(crate) fn constrain<F: TowerField>(
 
     mul_const(cs, &r1u, &qxd, &result_refs, &carry_refs, 2 * gamma2);
 
-    let add_carry = bits(cs, ly.add_carry, width + 1);
+    let add_carry = bits(cs, ly.add_carry, width);
 
     add_carry_chain(
         cs,
@@ -50,49 +52,24 @@ pub(crate) fn constrain<F: TowerField>(
         &add_carry,
     );
 
-    cs.constrain(add_carry[width]);
+    cs.constrain(add_carry[width - 1]);
 
     range_check(
         cs,
         &r0u,
-        &bits(cs, ly.rng_result, ly.r0_width),
-        &bits(cs, ly.rng_borrow, ly.r0_width + 1),
+        &bits(cs, ly.rng_borrow, ly.r0_width - 1),
         2 * gamma2,
     );
 
-    let w_borrow = bits(cs, ly.w_rng_borrow, W_BITS + 1);
-
-    borrow_chain(
-        cs,
-        &const_bits(cs, Q - 1, W_BITS),
-        &w,
-        &bits(cs, ly.w_rng_result, W_BITS),
-        &w_borrow,
+    cs.constrain_named(
+        "hb_w_range",
+        const_borrows(cs, Q - 1, &w, &bits(cs, ly.w_rng_borrow, W_BITS - 1)),
     );
 
-    cs.constrain_named("hb_w_range", w_borrow[W_BITS]);
+    let neg_borrow = bits(cs, ly.neg_borrow, ly.r0_width);
+    let neg = neg_borrow[ly.r0_width - 1];
 
-    let neg_result = bits(cs, ly.neg_result, ly.r0_width);
-    let neg_borrow = bits(cs, ly.neg_borrow, ly.r0_width + 1);
-
-    cs.constrain(neg_borrow[0]);
-
-    for i in 0..ly.r0_width {
-        let (v, w_in, r, w_out) = (r0u[i], neg_borrow[i], neg_result[i], neg_borrow[i + 1]);
-
-        match (gamma2 >> i) & 1 {
-            1 => {
-                cs.constrain(r + one + v + w_in);
-                cs.constrain(w_out + v * w_in);
-            }
-            _ => {
-                cs.constrain(r + v + w_in);
-                cs.constrain(w_out + v + w_in + v * w_in);
-            }
-        }
-    }
-
-    let neg = neg_borrow[ly.r0_width];
+    cs.constrain(neg + const_borrows(cs, gamma2, &r0u, &neg_borrow[..ly.r0_width - 1]));
 
     let r1p = bits(cs, ly.r1p, n);
     let inc = bits(cs, ly.inc, n - 1);
@@ -170,4 +147,27 @@ pub(crate) fn constrain<F: TowerField>(
     for k in ly.num_bits..ly.num_packed * 32 {
         cs.constrain(cs.col(k));
     }
+}
+
+fn const_borrows<'a, F: TowerField>(
+    cs: &'a ConstraintSystem<F>,
+    minuend: u32,
+    value: &[Expr<'a, F>],
+    borrows: &[Expr<'a, F>],
+) -> Expr<'a, F> {
+    let bit = |k: usize| match (minuend >> k) & 1 {
+        1 => cs.one(),
+        _ => cs.constant(F::ZERO),
+    };
+
+    let mut borrow_in = None;
+    for (k, (&v, &b)) in value.iter().zip(borrows).enumerate() {
+        cs.constrain(b + borrow_out(cs, bit(k), v, borrow_in));
+
+        borrow_in = Some(b);
+    }
+
+    let top = value.len() - 1;
+
+    borrow_out(cs, bit(top), value[top], borrow_in)
 }

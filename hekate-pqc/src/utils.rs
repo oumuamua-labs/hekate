@@ -7,6 +7,7 @@
 use hekate_core::config::Config;
 use hekate_core::errors::{Error, Result};
 use hekate_core::trace::{ColumnType, TraceBuilder};
+use hekate_gadgets::atoms::int_arith::NafDigit;
 use hekate_math::{Bit, Block16, Block32, Block64};
 use hekate_program::circuit::Col;
 use subtle::{Choice, ConditionallySelectable};
@@ -141,6 +142,30 @@ pub fn fill_sub_borrow_packed(
     }
 }
 
+/// Carry out of position `k` of `a + b` lands
+/// at `start + k`, for `k` in `0..width`.
+pub(crate) fn fill_carries(bits: &mut [u32], start: usize, width: usize, a: u64, b: u64) {
+    let mut carry = false;
+    for k in 0..width {
+        let (x, y) = (((a >> k) & 1) == 1, ((b >> k) & 1) == 1);
+        carry = (x & y) | (carry & (x ^ y));
+
+        pack_one(bits, start + k, carry);
+    }
+}
+
+/// Borrow out of position `k` of `a - b` lands
+/// at `start + k`, for `k` in `0..width`.
+pub(crate) fn fill_borrows(bits: &mut [u32], start: usize, width: usize, a: u64, b: u64) {
+    let mut borrow = false;
+    for k in 0..width {
+        let (x, y) = (((a >> k) & 1) == 1, ((b >> k) & 1) == 1);
+        borrow = (!x & y) | (!(x ^ y) & borrow);
+
+        pack_one(bits, start + k, borrow);
+    }
+}
+
 pub(crate) fn fill_mod_add(
     bits: &mut [u32],
     q: u32,
@@ -151,19 +176,13 @@ pub(crate) fn fill_mod_add(
 ) {
     let flag_q = u64::conditional_select(&0, &(q as u64), Choice::from(flag as u8));
 
-    pack_bits(bits, cols.lhs_result, a as u64 + b as u64, bw);
-    fill_add_carry_packed(bits, cols.lhs_carry, bw + 1, a as u64, b as u64);
-
-    pack_bits(bits, cols.rhs_result, result as u64 + flag_q, bw);
-    fill_add_carry_packed(bits, cols.rhs_carry, bw + 1, result as u64, flag_q);
-
+    fill_carries(bits, cols.carry, bw, a as u64, b as u64);
+    fill_borrows(bits, cols.borrow, bw, a as u64 + b as u64, flag_q);
     pack_one(bits, cols.flag, flag);
-
-    fill_sub_borrow_packed(
+    fill_borrows(
         bits,
-        cols.range_result,
         cols.range_borrow,
-        bw,
+        bw - 1,
         (q - 1) as u64,
         result as u64,
     );
@@ -173,6 +192,7 @@ pub(crate) fn fill_mul_mod(
     bits: &mut [u32],
     cols: &MulModCols,
     q: u32,
+    digits: &[NafDigit],
     (x, y): (u32, u32),
     (quot, rem): (u32, u32),
 ) {
@@ -198,7 +218,7 @@ pub(crate) fn fill_mul_mod(
         let (carry_start, carry_width) = cols.carries[j];
 
         pack_bits(bits, start, acc + pp, width);
-        fill_add_carry_packed(bits, carry_start, carry_width, acc, pp);
+        fill_carries(bits, carry_start, carry_width, acc, pp);
 
         acc += pp;
     }
@@ -206,25 +226,24 @@ pub(crate) fn fill_mul_mod(
     let last = cols.carries.len();
     let (carry_start, carry_width) = cols.carries[last - 1];
 
-    fill_add_carry_packed(bits, carry_start, carry_width, acc, partial(last));
+    fill_carries(bits, carry_start, carry_width, acc, partial(last));
 
     let quot_x_q = quot as u64 * q as u64;
 
     pack_bits(bits, cols.quot_x_q.0, quot_x_q, cols.quot_x_q.1);
 
-    fill_mul_const(bits, q, quot, &cols.red_results, &cols.red_carries);
-    fill_add_carry_packed(
+    fill_mul_const(bits, digits, quot, &cols.red_results, &cols.red_carries);
+    fill_carries(
         bits,
         cols.red_add_carry.0,
         cols.red_add_carry.1,
         quot_x_q,
         rem as u64,
     );
-    fill_sub_borrow_packed(
+    fill_borrows(
         bits,
-        cols.red_range_result.0,
         cols.red_range_borrow.0,
-        cols.red_range_result.1,
+        cols.red_range_borrow.1,
         (q - 1) as u64,
         rem as u64,
     );
@@ -232,28 +251,35 @@ pub(crate) fn fill_mul_mod(
 
 pub(crate) fn fill_mul_const(
     bits: &mut [u32],
-    constant: u32,
+    digits: &[NafDigit],
     operand: u32,
     results: &[(usize, usize)],
     carries: &[(usize, usize)],
 ) {
-    let mut terms = (0..32)
-        .filter(|&i| (constant >> i) & 1 == 1)
-        .map(|i| (operand as u64) << i);
-
-    let Some(mut acc) = terms.next() else {
+    let Some(top) = digits.first() else {
         return;
     };
 
-    let partials = (constant.count_ones() as usize).saturating_sub(2);
+    let mut acc = (operand as u64) << top.shift;
+    for (j, digit) in digits.iter().enumerate().skip(1) {
+        let term = (operand as u64) << digit.shift;
+        let (start, width) = carries[j - 1];
 
-    for (j, term) in terms.enumerate() {
-        fill_add_carry_packed(bits, carries[j].0, carries[j].1, acc, term);
+        acc = match digit.negative {
+            true => {
+                fill_borrows(bits, start, width, acc, term);
 
-        acc += term;
+                acc - term
+            }
+            false => {
+                fill_carries(bits, start, width, acc, term);
 
-        if j < partials {
-            pack_bits(bits, results[j].0, acc, results[j].1);
+                acc + term
+            }
+        };
+
+        if let Some(&(start, width)) = results.get(j - 1) {
+            pack_bits(bits, start, acc, width);
         }
     }
 }

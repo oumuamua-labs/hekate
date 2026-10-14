@@ -91,11 +91,13 @@ impl Row {
             pack_bits(bits, start, value as u64, bw);
         }
 
-        fill_mul_mod(bits, &ly.t00, q, (self.a.0, self.b.0), self.t00);
-        fill_mul_mod(bits, &ly.t11, q, (self.a.1, self.b.1), self.t11);
-        fill_mul_mod(bits, &ly.g, q, (self.t11.1, self.gamma), self.g);
-        fill_mul_mod(bits, &ly.t01, q, (self.a.0, self.b.1), self.t01);
-        fill_mul_mod(bits, &ly.t10, q, (self.a.1, self.b.0), self.t10);
+        let digits = &ly.red.mul_layout.digits;
+
+        fill_mul_mod(bits, &ly.t00, q, digits, (self.a.0, self.b.0), self.t00);
+        fill_mul_mod(bits, &ly.t11, q, digits, (self.a.1, self.b.1), self.t11);
+        fill_mul_mod(bits, &ly.g, q, digits, (self.t11.1, self.gamma), self.g);
+        fill_mul_mod(bits, &ly.t01, q, digits, (self.a.0, self.b.1), self.t01);
+        fill_mul_mod(bits, &ly.t10, q, digits, (self.a.1, self.b.0), self.t10);
 
         let adds = [
             (self.acc.0, self.t00.1, self.u0, &ly.u0_add),
