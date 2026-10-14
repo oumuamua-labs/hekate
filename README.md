@@ -12,7 +12,7 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
 
 > [!NOTE]  
-> Hekate's open code is AGPL-3.0-only; its signed prover binary ships as free binaries for macOS (Apple Silicon),
+> Hekate's open code is AGPL-3.0-only; its signed prover ships as free binaries for macOS (Apple Silicon),
 > Linux (ARM64, glibc), iOS (ARM64, device and simulator), and Android (ARM64).
 > A product shipped under other terms, open source or closed, needs a commercial license.
 
