@@ -27,9 +27,10 @@ transcript-trace = []
 [dependencies]
 hekate-math = { workspace = true }
 rayon = { workspace = true, optional = true }
+serde = { workspace = true }
 blake3 = { version = "1.8", default-features = false, optional = true }
 sha2 = { version = "0.11", default-features = false, optional = true }
-sha3 = { version = "0.11", default-features = false, optional = true }
+sha3 = { version = "0.12", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
