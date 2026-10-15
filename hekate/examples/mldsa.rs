@@ -4,15 +4,15 @@
 
 //! ML-DSA verification (FIPS 204) with the public key and
 //! the signature in the witness: the statement publishes M'
-//! and tr = H(pk). Usage: HEKATE_LEVEL=[44|65|87] mldsa
+//! and tr = H(pk). Usage: mldsa [--level 44|65|87]
 
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block32, Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_pqc::mldsa::{self, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaParams};
@@ -40,6 +40,26 @@ define_columns! {
 struct Signed {
     pk: Zeroizing<Vec<u8>>,
     signature: Zeroizing<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Level {
+    #[value(name = "44")]
+    MlDsa44,
+    #[value(name = "65")]
+    MlDsa65,
+    #[value(name = "87")]
+    MlDsa87,
+}
+
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// ML-DSA parameter set.
+    #[arg(long, value_enum, default_value = "65")]
+    level: Level,
 }
 
 /// The host requests one word a row, in the order the pipeline
@@ -117,7 +137,7 @@ fn sign<P: ml_dsa::MlDsaParams>(m_prime: &[u8]) -> Signed {
     }
 }
 
-fn run(label: &str, params: MlDsaParams, m_prime: &[u8], signed: &Signed) {
+fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, m_prime: &[u8], signed: &Signed) {
     common::init(label);
 
     println!("  Public key:     {} bytes, private", signed.pk.len());
@@ -167,10 +187,7 @@ fn run(label: &str, params: MlDsaParams, m_prime: &[u8], signed: &Signed) {
     let instance = ProgramInstance::new(rows, public_inputs);
     let witness = ProgramWitness::new(host).with_chiplets(traced.traces);
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -191,8 +208,8 @@ fn run(label: &str, params: MlDsaParams, m_prime: &[u8], signed: &Signed) {
     common::proof_breakdown(&proof);
 
     let mut verifier_transcript = Transcript::<H>::new(b"MlDsa_E2E");
-    let pinned_id = common::audited_id(&program);
 
+    let pinned_id = args.audited_id(&program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
@@ -209,24 +226,28 @@ fn run(label: &str, params: MlDsaParams, m_prime: &[u8], signed: &Signed) {
 }
 
 fn main() {
-    let level = common::level("65");
+    let args = Args::parse();
+
+    let (level, params) = match args.level {
+        Level::MlDsa44 => ("44", MlDsaParams::ML_DSA_44),
+        Level::MlDsa65 => ("65", MlDsaParams::ML_DSA_65),
+        Level::MlDsa87 => ("87", MlDsaParams::ML_DSA_87),
+    };
+
     let message = format!("Hekate ML-DSA-{level} verification example");
 
     // FIPS 204 Algorithm 2:
     // M' = 0 ∥ |ctx| ∥ ctx ∥ M, here with the empty context.
     let m_prime = [&[0u8, 0][..], message.as_bytes()].concat();
 
-    let (params, signed) = match level.as_str() {
-        "44" => (MlDsaParams::ML_DSA_44, sign::<MlDsa44>(&m_prime)),
-        "65" => (MlDsaParams::ML_DSA_65, sign::<MlDsa65>(&m_prime)),
-        "87" => (MlDsaParams::ML_DSA_87, sign::<MlDsa87>(&m_prime)),
-        other => {
-            eprintln!("Usage: HEKATE_LEVEL=[44|65|87] mldsa (got {other:?})");
-            std::process::exit(1);
-        }
+    let signed = match args.level {
+        Level::MlDsa44 => sign::<MlDsa44>(&m_prime),
+        Level::MlDsa65 => sign::<MlDsa65>(&m_prime),
+        Level::MlDsa87 => sign::<MlDsa87>(&m_prime),
     };
 
     run(
+        &args.run,
         &format!("ML-DSA-{level} Signature Verification"),
         params,
         &m_prime,

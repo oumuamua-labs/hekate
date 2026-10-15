@@ -169,7 +169,7 @@ The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in r
 
 Proving time, verification time, proof size and peak memory for the hashing, signature, encryption and
 integer-arithmetic examples are at [oumuamua.dev/hekate/benchmarks](https://oumuamua.dev/hekate/benchmarks),
-in zero-knowledge and base mode (`HEKATE_ZK=0`), with the machine, the build features and the command behind
+in zero-knowledge and base mode (`--no-zk`), with the machine, the build features and the command behind
 each run.
 
 ---

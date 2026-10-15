@@ -6,17 +6,18 @@
 //! The proof shows c encapsulates K to the key behind H(ek)
 //! and K encrypts the public message; ek, m and K stay private.
 //!
-//! Usage: HEKATE_LEVEL=[512|768|1024] HEKATE_MESSAGE=<text> mlkem_sender
+//! Usage: mlkem_sender [--level 512|768|1024] [--message <text>]
 
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::builder::NonEmptyStringValueParser;
+use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block8, Block16, Block32, Block128, TowerField};
 use hekate_aes::trace::{Aes256Call, aes256_encrypt_block, expand_key_256};
 use hekate_aes::{Aes256Chiplet, AesRound256Air, host_key_selector_shape, host_selector_shape};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_pqc::mlkem::{
@@ -81,6 +82,30 @@ define_columns! {
         PLAINTEXT: [B8; 16],
         CIPHERTEXT: [B8; 16],
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Level {
+    #[value(name = "512")]
+    MlKem512,
+    #[value(name = "768")]
+    MlKem768,
+    #[value(name = "1024")]
+    MlKem1024,
+}
+
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// ML-KEM parameter set.
+    #[arg(long, value_enum, default_value = "768")]
+    level: Level,
+
+    /// Plaintext the sender encrypts under the encapsulated key.
+    #[arg(long, default_value = DEFAULT_MESSAGE, value_parser = NonEmptyStringValueParser::new())]
+    message: String,
 }
 
 /// Rows of the ML-KEM host words in service order:
@@ -398,7 +423,7 @@ fn key_link(idx: Source, word: Col, selector: Col) -> PermutationCheckSpec {
     .with_clock_waiver(KEY_LINK_WAIVER)
 }
 
-fn run<K: Kem>(label: &str, params: MlKemParams, message: &[u8])
+fn run<K: Kem>(args: &common::RunArgs, label: &str, params: MlKemParams, message: &[u8])
 where
     K::DecapsulationKey: Decapsulate,
 {
@@ -423,7 +448,8 @@ where
         message.len()
     );
 
-    let floor = Config::default().min_table_rows();
+    let config = args.config();
+    let floor = config.min_table_rows();
 
     let pipeline = MlKemChiplet::<F>::new(params, &[MlKemCall::Encaps]).expect("pipeline build");
     let aes = Aes256Chiplet::new(
@@ -534,11 +560,6 @@ where
     let instance = ProgramInstance::new(rows, public_inputs);
     let witness = ProgramWitness::new(host).with_chiplets(chiplets);
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
-
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
@@ -558,8 +579,8 @@ where
     common::proof_breakdown(&proof);
 
     let mut verifier_transcript = Transcript::<H>::new(b"MlKemSender_E2E");
-    let pinned_id = common::audited_id(&program);
 
+    let pinned_id = args.audited_id(&program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
@@ -576,33 +597,30 @@ where
 }
 
 fn main() {
-    let level = common::level("768");
-    let message = Zeroizing::new(match std::env::var("HEKATE_MESSAGE") {
-        Ok(message) => message,
-        Err(std::env::VarError::NotPresent) => DEFAULT_MESSAGE.to_owned(),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            eprintln!("HEKATE_MESSAGE is not UTF-8 text");
-            std::process::exit(1);
-        }
-    });
+    let args = Args::parse();
+    let run_args = &args.run;
 
-    if message.is_empty() {
-        eprintln!("HEKATE_MESSAGE is empty: the sender needs at least one byte to encrypt");
-        std::process::exit(1);
-    }
-
+    let message = Zeroizing::new(args.message);
     let message = message.as_bytes();
 
-    match level.as_str() {
-        "512" => run::<MlKem512>("ML-KEM-512 Sender", MlKemParams::ML_KEM_512, message),
-        "768" => run::<MlKem768>("ML-KEM-768 Sender", MlKemParams::ML_KEM_768, message),
-        "1024" => run::<MlKem1024>("ML-KEM-1024 Sender", MlKemParams::ML_KEM_1024, message),
-        other => {
-            eprintln!(
-                "Usage: HEKATE_LEVEL=[512|768|1024] HEKATE_MESSAGE=<text> mlkem_sender \
-                 (got {other:?})"
-            );
-            std::process::exit(1);
-        }
+    match args.level {
+        Level::MlKem512 => run::<MlKem512>(
+            run_args,
+            "ML-KEM-512 Sender",
+            MlKemParams::ML_KEM_512,
+            message,
+        ),
+        Level::MlKem768 => run::<MlKem768>(
+            run_args,
+            "ML-KEM-768 Sender",
+            MlKemParams::ML_KEM_768,
+            message,
+        ),
+        Level::MlKem1024 => run::<MlKem1024>(
+            run_args,
+            "ML-KEM-1024 Sender",
+            MlKemParams::ML_KEM_1024,
+            message,
+        ),
     }
 }

@@ -5,10 +5,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::core::trace::{ColumnTrace, ColumnType};
 use hekate::crypto::DefaultHasher;
 use hekate::math::{Block32, Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{Trace, TraceBuilder};
 use hekate_crypto::transcript::Transcript;
@@ -27,6 +27,16 @@ use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
+
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// Trace rows as a power of two.
+    #[arg(long, default_value_t = 24)]
+    num_vars: usize,
+}
 
 // =================================================================
 // 2. INTEGER FIBONACCI AIR DEFINITION
@@ -136,15 +146,14 @@ fn generate_fib_trace(num_vars: usize) -> errors::Result<ColumnTrace> {
 // 4. MAIN EXECUTION
 // =================================================================
 fn main() {
+    let args = Args::parse();
+
     common::init("Fibonacci (integer, 32-bit)");
 
-    let num_vars = common::num_vars(24);
+    let num_vars = args.num_vars;
     let num_rows = 1 << num_vars;
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.run.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -184,8 +193,7 @@ fn main() {
 
     let mut verifier_transcript = Transcript::<H>::new(b"FibonacciInt");
 
-    let pinned_id = common::audited_id::<F, _>(&program);
-
+    let pinned_id = args.run.audited_id::<F, _>(&program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

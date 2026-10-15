@@ -5,11 +5,11 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::core::trace::{ColumnTrace, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block32, Block128, HardwareField, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_gadgets::{
     ArithmeticOpcode, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
@@ -124,15 +124,14 @@ fn generate_fib_trace(num_rows: usize) -> errors::Result<(ColumnTrace, u32)> {
 // 3. MAIN EXECUTION
 // =================================================================
 fn main() {
+    let args = common::RunArgs::parse();
+
     common::init("Fibonacci (integer, inlined arithmetic chiplet)");
 
     let num_vars: usize = 24;
     let num_rows: usize = 1 << num_vars;
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -171,8 +170,7 @@ fn main() {
 
     let mut verifier_transcript = Transcript::<H>::new(b"FibonacciIntChiplet");
 
-    let pinned_id = common::audited_id::<F, _>(&program);
-
+    let pinned_id = args.audited_id::<F, _>(&program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

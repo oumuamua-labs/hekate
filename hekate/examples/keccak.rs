@@ -5,11 +5,11 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakColumns, generate_keccak_trace};
@@ -24,6 +24,16 @@ use zeroize::Zeroizing;
 
 type F = Block128;
 type H = DefaultHasher;
+
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// Trace rows as a power of two.
+    #[arg(long, default_value_t = 20)]
+    num_vars: usize,
+}
 
 // =================================================================
 // 1. KECCAK PROGRAM DEFINITION
@@ -167,16 +177,15 @@ fn generate_combined_trace(
 // =================================================================
 
 fn main() {
+    let args = Args::parse();
+
     common::init("Keccak-f[1600]");
 
     // Setup parameters
-    let num_vars = common::num_vars(20);
+    let num_vars = args.num_vars;
     let num_rows = 1 << num_vars;
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.run.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -256,8 +265,8 @@ fn main() {
     common::proof_breakdown(&proof);
 
     let mut verifier_transcript = Transcript::<H>::new(b"Keccak_E2E");
-    let pinned_id = common::audited_id(&air);
 
+    let pinned_id = args.run.audited_id(&air);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

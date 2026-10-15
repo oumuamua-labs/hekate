@@ -7,10 +7,10 @@ mod common;
 
 use std::time::Instant;
 
+use clap::Parser;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::Block128;
-use hekate_core::config::Config;
 use hekate_gadgets::chiplets::bignum::modexp::LIMBS32;
 use hekate_program::Air;
 use hekate_prover_sys::prove;
@@ -69,27 +69,29 @@ const S: [u32; LIMBS32] = [
     0x5e0682b7, 0x1ed8bd9b, 0x6c7f6532, 0x9f1e9450,
 ];
 
-fn rounds_per_row() -> usize {
-    std::env::var("HEKATE_ROUNDS_PER_ROW")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2)
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// SHA-256 rounds one trace row computes.
+    #[arg(long, default_value_t = 2)]
+    rounds_per_row: usize,
 }
 
 fn main() {
+    let args = Args::parse();
+
     common::init("RSA-2048 PKCS#1 v1.5 + SHA-256");
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.run.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
 
     let message: Zeroizing<Vec<u8>> = Zeroizing::new((0..200u8).collect());
     let num_blocks = pad_message(&message).len();
-    let rounds_per_row = rounds_per_row();
+    let rounds_per_row = args.rounds_per_row;
 
     let statement = common::phase("Statement build", || {
         Pkcs1Statement::new(num_blocks, rounds_per_row, SHA_ROWS, CPU_ROWS)
@@ -151,8 +153,8 @@ fn main() {
     common::proof_breakdown(&proof);
 
     let mut verifier_transcript = Transcript::<H>::new(b"RsaPkcs1");
-    let pinned_id = common::audited_id::<F, _>(program);
 
+    let pinned_id = args.run.audited_id::<F, _>(program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

@@ -5,11 +5,11 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_gadgets::{
@@ -282,6 +282,8 @@ fn generate_cpu_trace(
 }
 
 fn main() {
+    let args = common::RunArgs::parse();
+
     common::init("ALU + RAM + ROM Chiplets");
 
     // Workload parameters
@@ -306,10 +308,7 @@ fn main() {
     let ram_num_rows = num_ops.next_power_of_two();
     let ram_num_vars = ram_num_rows.trailing_zeros() as usize;
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -388,7 +387,7 @@ fn main() {
 
     let mut verifier_transcript = Transcript::<H>::new(b"Unified_Example");
 
-    let pinned_id = common::audited_id(&air);
+    let pinned_id = args.audited_id(&air);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

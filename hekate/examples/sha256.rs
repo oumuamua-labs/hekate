@@ -5,10 +5,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_program::circuit::{Circuit, CircuitProgram};
@@ -36,11 +36,23 @@ struct Statement {
     digest: [u32; STATE_WORDS],
 }
 
-fn rounds_per_row() -> usize {
-    std::env::var("HEKATE_ROUNDS_PER_ROW")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4)
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// Trace rows as a power of two.
+    #[arg(long, default_value_t = 15)]
+    num_vars: usize,
+
+    /// SHA-256 rounds one trace row computes.
+    #[arg(long, default_value_t = 4)]
+    rounds_per_row: usize,
+
+    /// Message blocks hashed, at most what the trace holds;
+    /// unset, the most it holds.
+    #[arg(long)]
+    blocks: Option<usize>,
 }
 
 fn cpu_layout() -> Vec<ColumnType> {
@@ -163,12 +175,14 @@ fn combined_trace(st: &Statement, chiplet: &Sha256Chiplet<F>) -> errors::Result<
 }
 
 fn main() {
+    let args = Args::parse();
+
     common::init("SHA-256");
 
-    let num_vars = common::num_vars(15);
+    let num_vars = args.num_vars;
     let num_rows = 1 << num_vars;
 
-    let rounds_per_row = rounds_per_row();
+    let rounds_per_row = args.rounds_per_row;
     let max_blocks = num_rows * rounds_per_row / ROUNDS;
 
     assert!(
@@ -176,18 +190,9 @@ fn main() {
         "2^{num_vars} rows at {rounds_per_row} rounds per row holds no full block"
     );
 
-    let num_blocks = std::env::var("HEKATE_BLOCKS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(max_blocks)
-        .clamp(1, max_blocks);
-
+    let num_blocks = args.blocks.unwrap_or(max_blocks).clamp(1, max_blocks);
     let message_len = num_blocks * BLOCK_WORDS * 4 - 9;
-
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.run.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -245,8 +250,8 @@ fn main() {
     common::proof_breakdown(&proof);
 
     let mut verifier_transcript = Transcript::<H>::new(b"Sha256_E2E");
-    let pinned_id = common::audited_id(&st.program);
 
+    let pinned_id = args.run.audited_id(&st.program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

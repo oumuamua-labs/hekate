@@ -5,11 +5,11 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::Block128;
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_gadgets::{
     ArithmeticOpcode, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
@@ -89,16 +89,15 @@ fn generate_arith_trace(num_ops: usize, num_rows: usize) -> errors::Result<Colum
 // 3. MAIN EXECUTION
 // =================================================================
 fn main() {
+    let args = common::RunArgs::parse();
+
     common::init("Arithmetic Chiplet (inline + IntArith kernel)");
 
     let num_vars: usize = 20;
     let num_rows: usize = 1 << num_vars;
     let num_ops: usize = num_rows;
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -135,7 +134,7 @@ fn main() {
 
     let mut verifier_transcript = Transcript::<H>::new(b"Arith_Example");
 
-    let pinned_id = common::audited_id(&program);
+    let pinned_id = args.audited_id(&program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

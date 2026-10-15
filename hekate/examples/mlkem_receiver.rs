@@ -6,15 +6,15 @@
 //! the seed d into Decaps of a sender's ciphertext c. d, z
 //! and dk stay private; H(ek), c and valid are public.
 //!
-//! Usage: HEKATE_LEVEL=[512|768|1024] mlkem_receiver
+//! Usage: mlkem_receiver [--level 512|768|1024]
 
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block16, Block32, Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_pqc::mlkem::{
@@ -50,6 +50,26 @@ define_columns! {
         LINK_IDX: B16,
         LINK_SEL: Bit,
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Level {
+    #[value(name = "512")]
+    MlKem512,
+    #[value(name = "768")]
+    MlKem768,
+    #[value(name = "1024")]
+    MlKem1024,
+}
+
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// ML-KEM parameter set.
+    #[arg(long, value_enum, default_value = "768")]
+    level: Level,
 }
 
 /// Host rows of KeyGen, then Decaps, in service order, and
@@ -219,7 +239,7 @@ fn encapsulate<K: Kem>(ek: &[u8]) -> (Vec<u8>, Zeroizing<[u8; 32]>) {
     (c.to_vec(), shared)
 }
 
-fn run<K: Kem>(label: &str, params: MlKemParams) {
+fn run<K: Kem>(args: &common::RunArgs, label: &str, params: MlKemParams) {
     common::init(label);
 
     let mut d = Zeroizing::new([0u8; 32]);
@@ -295,10 +315,7 @@ fn run<K: Kem>(label: &str, params: MlKemParams) {
     let instance = ProgramInstance::new(rows, public_inputs);
     let witness = ProgramWitness::new(host).with_chiplets(traced.traces);
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -319,8 +336,8 @@ fn run<K: Kem>(label: &str, params: MlKemParams) {
     common::proof_breakdown(&proof);
 
     let mut verifier_transcript = Transcript::<H>::new(b"MlKemReceiver_E2E");
-    let pinned_id = common::audited_id(&program);
 
+    let pinned_id = args.audited_id(&program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
@@ -337,15 +354,18 @@ fn run<K: Kem>(label: &str, params: MlKemParams) {
 }
 
 fn main() {
-    let level = common::level("768");
+    let args = Args::parse();
+    let run_args = &args.run;
 
-    match level.as_str() {
-        "512" => run::<MlKem512>("ML-KEM-512 Receiver", MlKemParams::ML_KEM_512),
-        "768" => run::<MlKem768>("ML-KEM-768 Receiver", MlKemParams::ML_KEM_768),
-        "1024" => run::<MlKem1024>("ML-KEM-1024 Receiver", MlKemParams::ML_KEM_1024),
-        other => {
-            eprintln!("Usage: HEKATE_LEVEL=[512|768|1024] mlkem_receiver (got {other:?})");
-            std::process::exit(1);
+    match args.level {
+        Level::MlKem512 => {
+            run::<MlKem512>(run_args, "ML-KEM-512 Receiver", MlKemParams::ML_KEM_512)
+        }
+        Level::MlKem768 => {
+            run::<MlKem768>(run_args, "ML-KEM-768 Receiver", MlKemParams::ML_KEM_768)
+        }
+        Level::MlKem1024 => {
+            run::<MlKem1024>(run_args, "ML-KEM-1024 Receiver", MlKemParams::ML_KEM_1024)
         }
     }
 }
