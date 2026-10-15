@@ -8,7 +8,7 @@ use crate::proofs::OuterOpening;
 use alloc::vec;
 use alloc::vec::Vec;
 use hekate_crypto::Hasher;
-use hekate_crypto::merkle::{MerkleTree, Tag};
+use hekate_crypto::merkle::{MerkleTree, Multiproof, Tag};
 use hekate_math::fft::vanish_eval;
 use hekate_math::{
     AdditiveFft, BinaryFieldExtras, CantorBasis, FftError, Flat, HardwareField, TowerField,
@@ -338,7 +338,7 @@ impl<F: BinaryFieldExtras + HardwareField> RowEncoder<F> {
 
 pub struct Opening<F> {
     pub columns: Vec<(usize, Vec<Flat<F>>)>,
-    pub siblings: Vec<[u8; 32]>,
+    pub multiproof: Multiproof,
 }
 
 impl<F: TowerField> Opening<F> {
@@ -367,7 +367,7 @@ impl<F: TowerField> Opening<F> {
 
         Ok(Self {
             columns,
-            siblings: wire.siblings.clone(),
+            multiproof: wire.multiproof.clone(),
         })
     }
 
@@ -382,7 +382,7 @@ impl<F: TowerField> Opening<F> {
                 .iter()
                 .flat_map(|(_, v)| v.iter().map(|x| x.to_tower()))
                 .collect(),
-            siblings: self.siblings.clone(),
+            multiproof: self.multiproof.clone(),
         }
     }
 
@@ -427,7 +427,7 @@ impl<F: TowerField> Opening<F> {
 
         Ok(Self {
             columns,
-            siblings: Vec::new(),
+            multiproof: Multiproof::default(),
         })
     }
 }
@@ -598,7 +598,7 @@ pub fn verify_quadratic<F: BinaryFieldExtras + HardwareField + TowerField>(
 /// tower bytes, as [`column_leaf`] does.
 pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
     root: &[u8; 32],
-    domain_len: usize,
+    geom: &OuterGeometry,
     rows: usize,
     opening: &OuterOpening<F>,
 ) -> bool {
@@ -613,7 +613,13 @@ pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
         .map(|(&col, values)| (col as usize, column_leaf::<F, H>(values.iter().copied())))
         .collect();
 
-    MerkleTree::<F, H>::verify_batch(root, domain_len, &leaves, &opening.siblings)
+    MerkleTree::<F, H>::verify_batch(
+        root,
+        geom.domain_len,
+        geom.queries,
+        &leaves,
+        &opening.multiproof,
+    )
 }
 
 pub fn weights_at_columns<F: BinaryFieldExtras + HardwareField + TowerField>(
@@ -713,7 +719,7 @@ mod tests {
                 .iter()
                 .map(|&c| (c, rows.iter().map(|r| r[c]).collect()))
                 .collect(),
-            siblings: Vec::new(),
+            multiproof: Multiproof::default(),
         }
     }
 

@@ -4269,6 +4269,7 @@ pub mod hekate {
             pub const VT_MIN_SECURITY_BITS: ::flatbuffers::VOffsetT = 8;
             pub const VT_OUTER_QUERIES: ::flatbuffers::VOffsetT = 10;
             pub const VT_ZERO_KNOWLEDGE: ::flatbuffers::VOffsetT = 12;
+            pub const VT_LOG_INV_RATE: ::flatbuffers::VOffsetT = 14;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4285,6 +4286,7 @@ pub mod hekate {
                 args: &'args ConfigArgs,
             ) -> ::flatbuffers::WIPOffset<Config<'bldr>> {
                 let mut builder = ConfigBuilder::new(_fbb);
+                builder.add_log_inv_rate(args.log_inv_rate);
                 builder.add_outer_queries(args.outer_queries);
                 builder.add_min_security_bits(args.min_security_bits);
                 builder.add_ldt_support_size(args.ldt_support_size);
@@ -4348,6 +4350,17 @@ pub mod hekate {
                         .unwrap()
                 }
             }
+            #[inline]
+            pub fn log_inv_rate(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(Config::VT_LOG_INV_RATE, Some(0))
+                        .unwrap()
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for Config<'_> {
@@ -4362,6 +4375,7 @@ pub mod hekate {
                     .visit_field::<u32>("min_security_bits", Self::VT_MIN_SECURITY_BITS, false)?
                     .visit_field::<u32>("outer_queries", Self::VT_OUTER_QUERIES, false)?
                     .visit_field::<bool>("zero_knowledge", Self::VT_ZERO_KNOWLEDGE, false)?
+                    .visit_field::<u32>("log_inv_rate", Self::VT_LOG_INV_RATE, false)?
                     .finish();
                 Ok(())
             }
@@ -4372,6 +4386,7 @@ pub mod hekate {
             pub min_security_bits: u32,
             pub outer_queries: u32,
             pub zero_knowledge: bool,
+            pub log_inv_rate: u32,
         }
         impl<'a> Default for ConfigArgs {
             #[inline]
@@ -4382,6 +4397,7 @@ pub mod hekate {
                     min_security_bits: 0,
                     outer_queries: 0,
                     zero_knowledge: false,
+                    log_inv_rate: 0,
                 }
             }
         }
@@ -4417,6 +4433,11 @@ pub mod hekate {
                     .push_slot::<bool>(Config::VT_ZERO_KNOWLEDGE, zero_knowledge, false);
             }
             #[inline]
+            pub fn add_log_inv_rate(&mut self, log_inv_rate: u32) {
+                self.fbb_
+                    .push_slot::<u32>(Config::VT_LOG_INV_RATE, log_inv_rate, 0);
+            }
+            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> ConfigBuilder<'a, 'b, A> {
@@ -4441,6 +4462,7 @@ pub mod hekate {
                 ds.field("min_security_bits", &self.min_security_bits());
                 ds.field("outer_queries", &self.outer_queries());
                 ds.field("zero_knowledge", &self.zero_knowledge());
+                ds.field("log_inv_rate", &self.log_inv_rate());
                 ds.finish()
             }
         }

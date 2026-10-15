@@ -825,8 +825,7 @@ where
             .collect()
     }
 
-    /// Mirrors `commit_main_trace` on the verifier side:
-    /// absorbs every public parameter before the first challenge.
+    /// Absorbs every public parameter before the first challenge.
     #[instrument(skip_all, level = "trace", name = "verify_trace_commitment")]
     fn verify_trace_commitment(
         program_id: [u8; 32],
@@ -843,6 +842,7 @@ where
         transcript.append_u64(b"ldt_support_size", config.ldt_support_size as u64);
         transcript.append_u64(b"zero_knowledge", u64::from(config.zero_knowledge));
         transcript.append_u64(b"num_queries", config.num_queries as u64);
+        transcript.append_u64(b"log_inv_rate", u64::from(config.code_rate.log_inv_rate()));
         transcript.append_u64(b"outer_queries", config.outer_queries as u64);
         transcript.append_u64(b"main_row_bytes", main.plan.opened_row_bytes() as u64);
         transcript.append_field_list(b"public_input", main.instance.public_inputs());

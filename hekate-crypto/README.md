@@ -41,26 +41,26 @@ fn row_digest(parts: &[&[u8]]) -> [u8; 32] {
 A Merkle tree commits to leaf digests, and a path opens one leaf against the root:
 
 ```rust
-use hekate_crypto::merkle::{self, MerkleTree};
+use hekate_crypto::merkle::{self, MerkleTree, Multiproof};
 use hekate_crypto::{DefaultHasher, Hasher};
 use hekate_math::Block128;
 
-fn commit_and_open(rows: &[&[u8]], index: usize) -> merkle::Result<([u8; 32], Vec<[u8; 32]>)> {
+fn commit_and_open(rows: &[&[u8]], index: usize) -> merkle::Result<([u8; 32], Multiproof)> {
     let leaves: Vec<[u8; 32]> = rows.iter().map(|row| DefaultHasher::digest(row)).collect();
     let tree = MerkleTree::<Block128>::new(&leaves);
 
-    Ok((tree.root(), tree.prove_batch(&[index])?))
+    Ok((tree.root(), tree.prove_batch(&[index], 1)?))
 }
 
-fn opens(root: &[u8; 32], num_rows: usize, row: &[u8], index: usize, path: &[[u8; 32]]) -> bool {
+fn opens(root: &[u8; 32], num_rows: usize, row: &[u8], index: usize, proof: &Multiproof) -> bool {
     let leaf = (index, DefaultHasher::digest(row));
 
-    MerkleTree::<Block128>::verify_batch(root, num_rows.next_power_of_two(), &[leaf], path)
+    MerkleTree::<Block128>::verify_batch(root, num_rows.next_power_of_two(), 1, &[leaf], proof)
 }
 ```
 
-A leaf count that is not a power of two pads with zero leaves. The padded count fixes the path length, and several
-leaves open with one shared set of siblings.
+A leaf count that is not a power of two pads with zero leaves. Both sides pass the same draw count, and several
+leaves open under one multiproof.
 
 A transcript turns what both sides have absorbed into the same challenge, here drawn after the root:
 

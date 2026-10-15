@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use flatbuffers::{Allocator, FlatBufferBuilder};
-use hekate_core::config::Config;
+use hekate_core::config::{CodeRate, Config};
 use hekate_core::errors::Result;
 
 use crate::generated::program as fb;
@@ -20,12 +20,14 @@ pub fn serialize_config<'a, A: Allocator + 'a>(
             min_security_bits: config.min_security_bits as u32,
             outer_queries: config.outer_queries as u32,
             zero_knowledge: config.zero_knowledge,
+            log_inv_rate: config.code_rate.log_inv_rate(),
         },
     )
 }
 
 pub fn deserialize_config(fb_config: fb::Config<'_>) -> Result<Config> {
     Ok(Config {
+        code_rate: CodeRate::try_from(fb_config.log_inv_rate())?,
         num_queries: fb_config.num_queries() as usize,
         ldt_support_size: fb_config.ldt_support_size() as usize,
         min_security_bits: fb_config.min_security_bits() as usize,

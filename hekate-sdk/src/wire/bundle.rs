@@ -25,7 +25,7 @@ use super::{Interner, wire_err};
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
-const WIRE_FORMAT_VERSION: u32 = 7;
+const WIRE_FORMAT_VERSION: u32 = 8;
 
 pub struct DeserializedBundle<F: TowerField> {
     pub name: String,

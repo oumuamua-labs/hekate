@@ -314,7 +314,9 @@ fn commit(
             .enumerate()
             .map(|(i, &c)| (c, opened[i][rows.clone()].to_vec()))
             .collect(),
-        siblings: tree.prove_batch(&coins.columns).unwrap(),
+        multiproof: tree
+            .prove_batch(&coins.columns, outer.geom.queries)
+            .unwrap(),
     };
 
     (tree.root(), opening.to_wire())
@@ -394,8 +396,8 @@ fn accepts(outer: &Outer, coins: &Coins, view: &View) -> bool {
 
     let aux_rows = layout.total_rows() - layout.pad_rows;
 
-    if !verify_opening::<K, H>(&view.pad_root, geom.domain_len, layout.pad_rows, &view.pad)
-        || !verify_opening::<K, H>(&view.aux_root, geom.domain_len, aux_rows, &view.aux)
+    if !verify_opening::<K, H>(&view.pad_root, geom, layout.pad_rows, &view.pad)
+        || !verify_opening::<K, H>(&view.aux_root, geom, aux_rows, &view.aux)
     {
         return false;
     }

@@ -130,22 +130,8 @@ where
     let openings = || {
         trace_span!("openings").in_scope(|| {
             let (pad, aux) = join(
-                || {
-                    verify_opening::<F, H>(
-                        pad_root,
-                        geom.domain_len,
-                        layout.pad_rows,
-                        &outer.pad_opening,
-                    )
-                },
-                || {
-                    verify_opening::<F, H>(
-                        &outer.aux_root,
-                        geom.domain_len,
-                        aux_rows,
-                        &outer.aux_opening,
-                    )
-                },
+                || verify_opening::<F, H>(pad_root, &geom, layout.pad_rows, &outer.pad_opening),
+                || verify_opening::<F, H>(&outer.aux_root, &geom, aux_rows, &outer.aux_opening),
             );
 
             pad && aux

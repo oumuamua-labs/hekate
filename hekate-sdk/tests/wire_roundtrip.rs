@@ -9,13 +9,14 @@
 //! main-trace-only, single chiplet with virtual
 //! expansion, and multi-chiplet programs.
 
-use hekate_core::config::Config;
+use hekate_core::config::{CodeRate, Config};
 use hekate_core::errors;
 use hekate_core::proofs::{
     BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
 };
 use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
+use hekate_crypto::merkle::Multiproof;
 use hekate_gadgets::{
     ArithmeticOpcode, CpuArithColumns, CpuFetchColumns, CpuMemColumns, Instruction,
     IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp, MemoryEvent, RamChiplet,
@@ -824,6 +825,7 @@ fn config_roundtrip() {
     let witness = ProgramWitness::new(trace);
 
     let config = Config {
+        code_rate: CodeRate::Quarter,
         num_queries: 200,
         ldt_support_size: 250,
         min_security_bits: 120,
@@ -834,6 +836,7 @@ fn config_roundtrip() {
     let bytes = serialize_bundle(&program, &instance, &witness, &config).unwrap();
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
+    assert_eq!(restored.config.code_rate, CodeRate::Quarter);
     assert_eq!(restored.config.num_queries, 200);
     assert_eq!(restored.config.ldt_support_size, 250);
     assert_eq!(restored.config.min_security_bits, 120);
@@ -1537,7 +1540,7 @@ fn eval_proof_with(
 ) -> EvalBatchProof<F> {
     EvalBatchProof::new(
         empty_sumcheck(),
-        BrakedownProof::new(vec![], vec![]),
+        BrakedownProof::new(vec![], Multiproof::default()),
         tensor_vec,
         masters,
         h_ldt_proof,
@@ -1613,7 +1616,12 @@ fn proof_logup_h_binding_round_trips() {
         claimed_sums: vec![("bus".to_string(), F::ZERO)],
     };
 
-    let h_opening = BrakedownProof::new(vec![vec![1u8, 2, 3], vec![4, 5, 6]], vec![[9u8; 32]]);
+    let multiproof = Multiproof {
+        siblings: vec![[9u8; 32]],
+        unreached: vec![[11u8; 32], [12u8; 32]],
+    };
+
+    let h_opening = BrakedownProof::new(vec![vec![1u8, 2, 3], vec![4, 5, 6]], multiproof.clone());
 
     let proof = InnerProof::new(
         [3u8; 32],
@@ -1643,7 +1651,7 @@ fn proof_logup_h_binding_round_trips() {
         .expect("h opening must survive the wire");
 
     assert_eq!(opening.opened_columns, vec![vec![1u8, 2, 3], vec![4, 5, 6]]);
-    assert_eq!(opening.batch_path, vec![[9u8; 32]]);
+    assert_eq!(opening.multiproof, multiproof);
 }
 
 #[test]
@@ -1674,10 +1682,15 @@ fn proof_absent_h_binding_stays_none() {
 
 #[test]
 fn proof_outer_segment_round_trips() {
+    let multiproof = Multiproof {
+        siblings: vec![[9u8; 32], [10u8; 32]],
+        unreached: vec![[13u8; 32]],
+    };
+
     let opening = |seed: u128| OuterOpening {
         columns: vec![3, 17, 40],
         values: (0..6).map(|i| wide(seed + i)).collect(),
-        siblings: vec![[9u8; 32], [10u8; 32]],
+        multiproof: multiproof.clone(),
     };
 
     let outer = OuterProof {
@@ -1729,7 +1742,7 @@ fn proof_outer_segment_round_trips() {
             bytes_of(&opening.values),
             bytes_of(&(0..6).map(|i| wide(seed + i)).collect::<Vec<_>>())
         );
-        assert_eq!(opening.siblings, vec![[9u8; 32], [10u8; 32]]);
+        assert_eq!(opening.multiproof, multiproof);
     }
 }
 

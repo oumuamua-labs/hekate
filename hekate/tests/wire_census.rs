@@ -131,7 +131,7 @@ fn opening(opening: &OuterOpening<F>) -> usize {
     let OuterOpening {
         columns: _,
         values,
-        siblings: _,
+        multiproof: _,
     } = opening;
 
     values.len()

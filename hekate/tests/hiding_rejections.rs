@@ -423,3 +423,65 @@ fn violating_witnesses_are_rejected() {
         "bus multisets diverge"
     );
 }
+
+#[test]
+fn outer_multiproof_sections_are_bound() {
+    let (air, instance, proof) = ram_case();
+
+    let mut mutant = proof.clone();
+    mutant
+        .outer
+        .as_mut()
+        .unwrap()
+        .pad_opening
+        .multiproof
+        .unreached[0][0] ^= 1;
+
+    assert!(
+        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        "pad unreached node"
+    );
+
+    let mut mutant = proof.clone();
+    mutant
+        .outer
+        .as_mut()
+        .unwrap()
+        .pad_opening
+        .multiproof
+        .siblings[0][0] ^= 1;
+
+    assert!(
+        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        "pad sibling"
+    );
+
+    let mut mutant = proof.clone();
+    mutant
+        .outer
+        .as_mut()
+        .unwrap()
+        .aux_opening
+        .multiproof
+        .siblings[0][0] ^= 1;
+
+    assert!(
+        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        "aux sibling"
+    );
+
+    let mut mutant = proof;
+    mutant
+        .outer
+        .as_mut()
+        .unwrap()
+        .aux_opening
+        .multiproof
+        .unreached
+        .pop();
+
+    assert!(
+        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        "aux unreached count"
+    );
+}

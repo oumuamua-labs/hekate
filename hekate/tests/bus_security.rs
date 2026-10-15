@@ -517,7 +517,18 @@ fn cfg() -> Config {
     }
 }
 
-fn multibus_proof() -> (
+/// Five draws on an eight-node layer
+/// leave three or more nodes unreached.
+fn layer_gap_cfg() -> Config {
+    Config {
+        num_queries: 5,
+        ..cfg()
+    }
+}
+
+fn multibus_proof(
+    config: Config,
+) -> (
     MultiBusProgram,
     ProgramInstance<F>,
     Config,
@@ -535,7 +546,6 @@ fn multibus_proof() -> (
 
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main_trace).with_chiplets(vec![chiplet_a, chiplet_b]);
-    let config = cfg();
 
     let proof = prove(
         b"AuditP0", &air, &instance, &witness, &config, [0xA5; 32], None,
@@ -611,7 +621,7 @@ fn verify_rejects(
 
 #[test]
 fn logup_h_evals_reordered_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+    let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     let aux = &mut proof.chiplet_logup_aux[0];
     assert!(aux.h_evals.len() >= 2);
@@ -630,7 +640,7 @@ fn logup_h_evals_reordered_rejected() {
 
 #[test]
 fn h_eval_corruption_after_sumcheck_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+    let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     let aux = &mut proof.chiplet_logup_aux[0];
     assert!(!aux.h_evals.is_empty());
@@ -649,7 +659,7 @@ fn h_eval_corruption_after_sumcheck_rejected() {
 
 #[test]
 fn h_opening_omitted_on_bused_table_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+    let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     assert!(proof.h_root.is_some());
     assert!(proof.eval_proof.h_ldt_proof.is_some());
@@ -673,7 +683,7 @@ fn h_opening_omitted_on_bused_table_rejected() {
 
 #[test]
 fn h_root_omitted_on_bused_proof_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+    let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     assert!(proof.h_root.is_some());
 
@@ -847,7 +857,7 @@ fn logup_bus_id_proof_label_diverged_from_program_specs_rejected() {
 
 #[test]
 fn zero_bus_main_emits_empty_logup_aux() {
-    let (_air, _instance, _config, proof) = multibus_proof();
+    let (_air, _instance, _config, proof) = multibus_proof(cfg());
 
     assert!(
         proof.main_logup_aux.claimed_sums.is_empty(),
@@ -863,7 +873,7 @@ fn zero_bus_main_emits_empty_logup_aux() {
 
 #[test]
 fn zero_bus_main_injected_claimed_sum_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+    let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     assert!(
         proof.main_logup_aux.claimed_sums.is_empty(),
@@ -902,7 +912,7 @@ fn zero_bus_main_injected_claimed_sum_rejected() {
 #[test]
 fn h_binding_on_bus_free_proof_rejected() {
     let (air, instance, config, proof) = bus_free_proof();
-    let (_, _, _, bused) = multibus_proof();
+    let (_, _, _, bused) = multibus_proof(cfg());
 
     assert!(proof.h_root.is_none());
     assert!(proof.eval_proof.h_ldt_proof.is_none());
@@ -945,8 +955,8 @@ fn h_binding_on_bus_free_proof_rejected() {
 // =====================================================
 
 #[test]
-fn h_opening_batch_path_tamper_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+fn h_opening_sibling_tamper_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     let opening = proof
         .eval_proof
@@ -954,29 +964,29 @@ fn h_opening_batch_path_tamper_rejected() {
         .as_mut()
         .expect("bused proof carries an h opening");
 
-    assert!(!opening.batch_path.is_empty());
+    assert!(!opening.multiproof.siblings.is_empty());
 
-    opening.batch_path[0][0] ^= 1;
+    opening.multiproof.siblings[0][0] ^= 1;
 
     assert!(verify_rejects(&air, &instance, &config, &proof));
 }
 
 #[test]
-fn trace_opening_batch_path_tamper_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof();
+fn trace_opening_sibling_tamper_rejected() {
+    let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     let opening = &mut proof.eval_proof.ldt_proof;
 
-    assert!(!opening.batch_path.is_empty());
+    assert!(!opening.multiproof.siblings.is_empty());
 
-    opening.batch_path[0][0] ^= 1;
+    opening.multiproof.siblings[0][0] ^= 1;
 
     assert!(verify_rejects(&air, &instance, &config, &proof));
 }
 
 #[test]
 fn opened_column_off_part_layout_rejected() {
-    let (air, instance, config, proof) = multibus_proof();
+    let (air, instance, config, proof) = multibus_proof(cfg());
 
     let mut long_h = proof.clone();
     long_h
@@ -1008,7 +1018,7 @@ fn opened_column_off_part_layout_rejected() {
 
 #[test]
 fn master_count_mismatch_rejected() {
-    let (air, instance, config, proof) = multibus_proof();
+    let (air, instance, config, proof) = multibus_proof(cfg());
 
     let mut short = proof.clone();
     short.eval_proof.masters.pop();
@@ -1034,7 +1044,7 @@ fn master_count_mismatch_rejected() {
 
 #[test]
 fn master_or_fold_vector_tamper_rejected() {
-    let (air, instance, config, proof) = multibus_proof();
+    let (air, instance, config, proof) = multibus_proof(cfg());
 
     for k in 0..proof.eval_proof.masters.len() {
         let mut forged = proof.clone();
@@ -1055,5 +1065,52 @@ fn master_or_fold_vector_tamper_rejected() {
         let result = verify_result(&air, &instance, &config, &forged);
 
         assert!(matches!(result, Ok(false)), "{result:?}");
+    }
+}
+
+#[test]
+fn unreached_layer_node_tamper_rejected() {
+    let (air, instance, config, proof) = multibus_proof(layer_gap_cfg());
+
+    let mut trace = proof.clone();
+    let unreached = &mut trace.eval_proof.ldt_proof.multiproof.unreached;
+
+    assert!(!unreached.is_empty());
+
+    unreached[0][0] ^= 1;
+
+    let mut h = proof;
+    let opening = h
+        .eval_proof
+        .h_ldt_proof
+        .as_mut()
+        .expect("bused proof carries an h opening");
+
+    opening.multiproof.unreached[0][0] ^= 1;
+
+    for forged in [trace, h] {
+        assert!(verify_rejects(&air, &instance, &config, &forged));
+    }
+}
+
+#[test]
+fn unreached_section_off_derived_count_rejected() {
+    let (air, instance, config, proof) = multibus_proof(layer_gap_cfg());
+
+    assert!(!proof.eval_proof.ldt_proof.multiproof.unreached.is_empty());
+
+    let mut extra = proof.clone();
+    extra
+        .eval_proof
+        .ldt_proof
+        .multiproof
+        .unreached
+        .push([0u8; 32]);
+
+    let mut short = proof;
+    short.eval_proof.ldt_proof.multiproof.unreached.pop();
+
+    for forged in [extra, short] {
+        assert!(verify_rejects(&air, &instance, &config, &forged));
     }
 }

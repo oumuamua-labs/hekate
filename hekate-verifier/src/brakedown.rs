@@ -81,7 +81,7 @@ where
 
     /// Verifies one tree's opening at the drawn queries:
     /// hashes each distinct opened column to a leaf and
-    /// replays the octopus multiproof against the root.
+    /// replays the multiproof against the root.
     #[instrument(skip_all, level = "trace", name = "Brakedown::verify_opening")]
     pub fn verify_opening<'a>(
         root: &[u8; 32],
@@ -131,7 +131,13 @@ where
 
         let padded_leaves = queries.encoded_width.next_power_of_two();
 
-        if !MerkleTree::<F, H>::verify_batch(root, padded_leaves, &leaves, &proof.batch_path) {
+        if !MerkleTree::<F, H>::verify_batch(
+            root,
+            padded_leaves,
+            queries.indices.len(),
+            &leaves,
+            &proof.multiproof,
+        ) {
             return Err(errors::Error::Protocol {
                 protocol: "brakedown",
                 message: "batch merkle proof verification failed",
@@ -185,7 +191,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use hekate_crypto::DefaultHasher;
-    use hekate_crypto::merkle::hash_column_leaves;
+    use hekate_crypto::merkle::{Multiproof, hash_column_leaves};
     use hekate_math::Block128;
 
     type F = Block128;
@@ -236,7 +242,11 @@ mod tests {
             .map(|&j| [cell(&a, j), cell(&b0, j), cell(&b1, j)].concat())
             .collect();
 
-        let proof = BrakedownProof::new(opened, tree.prove_batch(&queries.distinct).unwrap());
+        let proof = BrakedownProof::new(
+            opened,
+            tree.prove_batch(&queries.distinct, queries.indices.len())
+                .unwrap(),
+        );
 
         (tree.root(), proof, queries)
     }
@@ -309,8 +319,8 @@ mod tests {
             opened_columns.push(code_col);
         }
 
-        let batch_path = tree.prove_batch(&distinct).unwrap();
-        let proof = BrakedownProof::new(opened_columns, batch_path);
+        let multiproof = tree.prove_batch(&distinct, num_queries).unwrap();
+        let proof = BrakedownProof::new(opened_columns, multiproof);
 
         // 4. Verify
         let mut verifier_transcript = Transcript::<H>::new(b"test_brakedown");
@@ -346,7 +356,7 @@ mod tests {
 
         // Replay the query draws to learn the distinct
         // count, then submit garbage columns with an
-        // empty octopus path: the batch walk starves.
+        // empty multiproof: the batch walk starves.
         let mut prover_transcript = Transcript::<H>::new(b"test");
         let mut distinct = prover_transcript
             .challenge_indices(b"idx_query", config.num_queries, encoded_width)
@@ -355,7 +365,8 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
 
-        let proof = BrakedownProof::new(vec![vec![4u8, 5, 6]; distinct.len()], Vec::new());
+        let proof =
+            BrakedownProof::new(vec![vec![4u8, 5, 6]; distinct.len()], Multiproof::default());
 
         let mut transcript = Transcript::<H>::new(b"test");
         let queries =

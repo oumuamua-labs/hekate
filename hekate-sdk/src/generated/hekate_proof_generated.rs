@@ -415,6 +415,164 @@ pub mod hekate {
                 ds.finish()
             }
         }
+        pub enum MultiproofOffset {}
+        #[derive(Copy, Clone, PartialEq)]
+
+        pub struct Multiproof<'a> {
+            pub _tab: ::flatbuffers::Table<'a>,
+        }
+
+        impl<'a> ::flatbuffers::Follow<'a> for Multiproof<'a> {
+            type Inner = Multiproof<'a>;
+            #[inline]
+            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+                Self {
+                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
+                }
+            }
+        }
+
+        impl<'a> Multiproof<'a> {
+            pub const VT_SIBLINGS: ::flatbuffers::VOffsetT = 4;
+            pub const VT_UNREACHED: ::flatbuffers::VOffsetT = 6;
+
+            #[inline]
+            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+                Multiproof { _tab: table }
+            }
+            #[allow(unused_mut)]
+            pub fn create<
+                'bldr: 'args,
+                'args: 'mut_bldr,
+                'mut_bldr,
+                A: ::flatbuffers::Allocator + 'bldr,
+            >(
+                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+                args: &'args MultiproofArgs<'args>,
+            ) -> ::flatbuffers::WIPOffset<Multiproof<'bldr>> {
+                let mut builder = MultiproofBuilder::new(_fbb);
+                if let Some(x) = args.unreached {
+                    builder.add_unreached(x);
+                }
+                if let Some(x) = args.siblings {
+                    builder.add_siblings(x);
+                }
+                builder.finish()
+            }
+
+            #[inline]
+            pub fn siblings(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                            Multiproof::VT_SIBLINGS,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn unreached(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                            Multiproof::VT_UNREACHED,
+                            None,
+                        )
+                }
+            }
+        }
+
+        impl ::flatbuffers::Verifiable for Multiproof<'_> {
+            #[inline]
+            fn run_verifier(
+                v: &mut ::flatbuffers::Verifier,
+                pos: usize,
+            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+                v.visit_table(pos)?
+                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
+                        "siblings",
+                        Self::VT_SIBLINGS,
+                        false,
+                    )?
+                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
+                        "unreached",
+                        Self::VT_UNREACHED,
+                        false,
+                    )?
+                    .finish();
+                Ok(())
+            }
+        }
+        pub struct MultiproofArgs<'a> {
+            pub siblings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub unreached: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+        }
+        impl<'a> Default for MultiproofArgs<'a> {
+            #[inline]
+            fn default() -> Self {
+                MultiproofArgs {
+                    siblings: None,
+                    unreached: None,
+                }
+            }
+        }
+
+        pub struct MultiproofBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+        }
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MultiproofBuilder<'a, 'b, A> {
+            #[inline]
+            pub fn add_siblings(
+                &mut self,
+                siblings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    Multiproof::VT_SIBLINGS,
+                    siblings,
+                );
+            }
+            #[inline]
+            pub fn add_unreached(
+                &mut self,
+                unreached: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    Multiproof::VT_UNREACHED,
+                    unreached,
+                );
+            }
+            #[inline]
+            pub fn new(
+                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            ) -> MultiproofBuilder<'a, 'b, A> {
+                let start = _fbb.start_table();
+                MultiproofBuilder {
+                    fbb_: _fbb,
+                    start_: start,
+                }
+            }
+            #[inline]
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<Multiproof<'a>> {
+                let o = self.fbb_.end_table(self.start_);
+                ::flatbuffers::WIPOffset::new(o.value())
+            }
+        }
+
+        impl ::core::fmt::Debug for Multiproof<'_> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut ds = f.debug_struct("Multiproof");
+                ds.field("siblings", &self.siblings());
+                ds.field("unreached", &self.unreached());
+                ds.finish()
+            }
+        }
         pub enum BrakedownProofOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -434,7 +592,7 @@ pub mod hekate {
 
         impl<'a> BrakedownProof<'a> {
             pub const VT_OPENED_COLUMNS: ::flatbuffers::VOffsetT = 4;
-            pub const VT_BATCH_PATH: ::flatbuffers::VOffsetT = 6;
+            pub const VT_MULTIPROOF: ::flatbuffers::VOffsetT = 6;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -451,8 +609,8 @@ pub mod hekate {
                 args: &'args BrakedownProofArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<BrakedownProof<'bldr>> {
                 let mut builder = BrakedownProofBuilder::new(_fbb);
-                if let Some(x) = args.batch_path {
-                    builder.add_batch_path(x);
+                if let Some(x) = args.multiproof {
+                    builder.add_multiproof(x);
                 }
                 if let Some(x) = args.opened_columns {
                     builder.add_opened_columns(x);
@@ -474,16 +632,15 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn batch_path(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+            pub fn multiproof(&self) -> Option<Multiproof<'a>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
-                            BrakedownProof::VT_BATCH_PATH,
-                            None,
-                        )
+                    self._tab.get::<::flatbuffers::ForwardsUOffset<Multiproof>>(
+                        BrakedownProof::VT_MULTIPROOF,
+                        None,
+                    )
                 }
             }
         }
@@ -500,9 +657,9 @@ pub mod hekate {
                         Self::VT_OPENED_COLUMNS,
                         false,
                     )?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
-                        "batch_path",
-                        Self::VT_BATCH_PATH,
+                    .visit_field::<::flatbuffers::ForwardsUOffset<Multiproof>>(
+                        "multiproof",
+                        Self::VT_MULTIPROOF,
                         false,
                     )?
                     .finish();
@@ -511,14 +668,14 @@ pub mod hekate {
         }
         pub struct BrakedownProofArgs<'a> {
             pub opened_columns: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
-            pub batch_path: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub multiproof: Option<::flatbuffers::WIPOffset<Multiproof<'a>>>,
         }
         impl<'a> Default for BrakedownProofArgs<'a> {
             #[inline]
             fn default() -> Self {
                 BrakedownProofArgs {
                     opened_columns: None,
-                    batch_path: None,
+                    multiproof: None,
                 }
             }
         }
@@ -539,14 +696,12 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_batch_path(
-                &mut self,
-                batch_path: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
-            ) {
-                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    BrakedownProof::VT_BATCH_PATH,
-                    batch_path,
-                );
+            pub fn add_multiproof(&mut self, multiproof: ::flatbuffers::WIPOffset<Multiproof<'b>>) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<Multiproof>>(
+                        BrakedownProof::VT_MULTIPROOF,
+                        multiproof,
+                    );
             }
             #[inline]
             pub fn new(
@@ -569,7 +724,7 @@ pub mod hekate {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 let mut ds = f.debug_struct("BrakedownProof");
                 ds.field("opened_columns", &self.opened_columns());
-                ds.field("batch_path", &self.batch_path());
+                ds.field("multiproof", &self.multiproof());
                 ds.finish()
             }
         }
@@ -1291,7 +1446,7 @@ pub mod hekate {
         impl<'a> OuterOpening<'a> {
             pub const VT_COLUMNS: ::flatbuffers::VOffsetT = 4;
             pub const VT_VALUES: ::flatbuffers::VOffsetT = 6;
-            pub const VT_SIBLINGS: ::flatbuffers::VOffsetT = 8;
+            pub const VT_MULTIPROOF: ::flatbuffers::VOffsetT = 8;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1308,8 +1463,8 @@ pub mod hekate {
                 args: &'args OuterOpeningArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<OuterOpening<'bldr>> {
                 let mut builder = OuterOpeningBuilder::new(_fbb);
-                if let Some(x) = args.siblings {
-                    builder.add_siblings(x);
+                if let Some(x) = args.multiproof {
+                    builder.add_multiproof(x);
                 }
                 if let Some(x) = args.values {
                     builder.add_values(x);
@@ -1347,16 +1502,15 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn siblings(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+            pub fn multiproof(&self) -> Option<Multiproof<'a>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
-                            OuterOpening::VT_SIBLINGS,
-                            None,
-                        )
+                    self._tab.get::<::flatbuffers::ForwardsUOffset<Multiproof>>(
+                        OuterOpening::VT_MULTIPROOF,
+                        None,
+                    )
                 }
             }
         }
@@ -1370,7 +1524,7 @@ pub mod hekate {
                 v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u32>>>("columns", Self::VT_COLUMNS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("values", Self::VT_VALUES, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("siblings", Self::VT_SIBLINGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<Multiproof>>("multiproof", Self::VT_MULTIPROOF, false)?
      .finish();
                 Ok(())
             }
@@ -1378,7 +1532,7 @@ pub mod hekate {
         pub struct OuterOpeningArgs<'a> {
             pub columns: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
             pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
-            pub siblings: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub multiproof: Option<::flatbuffers::WIPOffset<Multiproof<'a>>>,
         }
         impl<'a> Default for OuterOpeningArgs<'a> {
             #[inline]
@@ -1386,7 +1540,7 @@ pub mod hekate {
                 OuterOpeningArgs {
                     columns: None,
                     values: None,
-                    siblings: None,
+                    multiproof: None,
                 }
             }
         }
@@ -1417,14 +1571,12 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_siblings(
-                &mut self,
-                siblings: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
-            ) {
-                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    OuterOpening::VT_SIBLINGS,
-                    siblings,
-                );
+            pub fn add_multiproof(&mut self, multiproof: ::flatbuffers::WIPOffset<Multiproof<'b>>) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<Multiproof>>(
+                        OuterOpening::VT_MULTIPROOF,
+                        multiproof,
+                    );
             }
             #[inline]
             pub fn new(
@@ -1448,7 +1600,7 @@ pub mod hekate {
                 let mut ds = f.debug_struct("OuterOpening");
                 ds.field("columns", &self.columns());
                 ds.field("values", &self.values());
-                ds.field("siblings", &self.siblings());
+                ds.field("multiproof", &self.multiproof());
                 ds.finish()
             }
         }

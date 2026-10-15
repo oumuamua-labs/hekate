@@ -201,6 +201,7 @@ table Config {
   min_security_bits: uint32;
   outer_queries: uint32;
   zero_knowledge: bool;
+  log_inv_rate: uint32;
 }
 
 // ===== Top-Level Bundle =====
