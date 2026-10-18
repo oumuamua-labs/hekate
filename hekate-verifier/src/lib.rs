@@ -55,8 +55,8 @@ use hekate_program::outer::{
     TableStatics, eval_record, table_record,
 };
 use hekate_program::permutation::{
-    self, BusKind, PermutationCheckSpec, RankClock, RankTable, TableHeight, eval_row_idx_byte_mle,
-    eval_row_idx_le_mle, rank_clocks,
+    self, BusKind, PermutationCheckSpec, RankClock, RankTable, TableHeight, bus_alpha_weights,
+    eval_row_idx_byte_mle, eval_row_idx_le_mle, rank_clocks,
 };
 use hekate_program::{
     Air, FixedColumn, Program, ProgramInstance, ShapeEvaluator, validate_fixed_columns,
@@ -856,7 +856,7 @@ where
 
     /// Verifies AIR + LogUp ZeroCheck.
     ///
-    /// The initial sumcheck claim is `Σ_k α^k · claimed_sum_k` (LogUp bus-sum total),
+    /// The initial sumcheck claim, the bus sums at `bus_alpha_weights`, is
     /// not zero. The consistency check at `r_final` covers AIR, boundary,
     /// ZK blinding, and LogUp contributions; with a pad cursor the
     /// values are masked and the check becomes the table's record.
@@ -969,12 +969,12 @@ where
         }
 
         let mut initial_claim = Flat::from_raw(F::ZERO);
-        if !bus_specs.is_empty() {
-            let mut alpha_pow = alpha_logup_start;
-            for (_, claim) in &logup_aux.claimed_sums {
-                initial_claim += alpha_pow * claim.to_hardware();
-                alpha_pow *= alpha;
-            }
+        for ((_, claim), w) in logup_aux
+            .claimed_sums
+            .iter()
+            .zip(bus_alpha_weights(alpha_logup_start, alpha))
+        {
+            initial_claim += w.bus_sum * claim.to_hardware();
         }
 
         let zc_first = cursor
@@ -1130,7 +1130,9 @@ where
         if !bus_specs.is_empty() {
             let mut source_evals: Vec<Flat<F>> = Vec::new();
 
-            for (spec_idx, (bus_id, spec)) in bus_specs.iter().enumerate() {
+            let weights = bus_alpha_weights(alpha_pow, alpha);
+
+            for ((spec_idx, (bus_id, spec)), w) in bus_specs.iter().enumerate().zip(weights) {
                 let h_eval = logup_aux.h_evals[spec_idx].1.to_hardware();
 
                 let s_eval = match spec.selector {
@@ -1214,13 +1216,13 @@ where
                     s_eval,
                     s_recv_eval,
                     source_evals: &source_evals,
-                    alpha_bus: alpha_pow,
+                    alpha_cons: w.consistency,
+                    alpha_bus: w.bus_sum,
                     eq_lookup,
                 };
 
                 expected_val +=
                     logup::expected_bus_contribution(&bus_eval, gamma, beta, eq_zc_eval);
-                alpha_pow *= alpha;
             }
         }
 

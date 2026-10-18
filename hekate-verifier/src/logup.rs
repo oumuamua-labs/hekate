@@ -12,6 +12,7 @@ pub struct BusSpecEvaluation<'a, F: HardwareField> {
     pub s_eval: Flat<F>,
     pub s_recv_eval: Flat<F>,
     pub source_evals: &'a [Flat<F>],
+    pub alpha_cons: Flat<F>,
     pub alpha_bus: Flat<F>,
     pub eq_lookup: Flat<F>,
 }
@@ -31,7 +32,7 @@ pub fn expected_bus_contribution<F: HardwareField>(
     }
 
     let s_eff = spec.s_eval + spec.s_recv_eval;
-    let consistency = spec.alpha_bus * (gamma * spec.h_eval + spec.h_eval * key + s_eff) * eq_zc;
+    let consistency = spec.alpha_cons * (gamma * spec.h_eval + spec.h_eval * key + s_eff) * eq_zc;
     let bus_sum = spec.alpha_bus * spec.h_eval * spec.eq_lookup;
 
     consistency + bus_sum
@@ -128,7 +129,9 @@ mod tests {
         let gamma = f(0xAA).to_hardware();
         let beta = f(0xBB).to_hardware();
         let eq_zc = f(0xCC).to_hardware();
-        let alpha_bus = f(0xDD).to_hardware();
+
+        let alpha_cons = f(0xDD).to_hardware();
+        let alpha_bus = f(0xEE).to_hardware();
 
         let h_eval = f(0x11).to_hardware();
         let s_eval = f(0x22).to_hardware();
@@ -144,6 +147,7 @@ mod tests {
             s_eval,
             s_recv_eval: Flat::from_raw(F::ZERO),
             source_evals: &source_evals,
+            alpha_cons,
             alpha_bus,
             eq_lookup: Flat::from_raw(F::ONE),
         };
@@ -159,7 +163,7 @@ mod tests {
         }
 
         let expected =
-            alpha_bus * (gamma * h_eval + h_eval * key + s_eval) * eq_zc + alpha_bus * h_eval;
+            alpha_cons * (gamma * h_eval + h_eval * key + s_eval) * eq_zc + alpha_bus * h_eval;
 
         assert_eq!(got, expected);
     }

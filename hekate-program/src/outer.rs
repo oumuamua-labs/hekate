@@ -9,7 +9,8 @@ use crate::expander::{
 };
 use crate::linearized::{self, RingGadget, linearized_coeffs};
 use crate::permutation::{
-    BusKind, PermutationCheckSpec, RankClock, Source, eval_row_idx_byte_mle, eval_row_idx_le_mle,
+    BusKind, PermutationCheckSpec, RankClock, Source, bus_alpha_weights, eval_row_idx_byte_mle,
+    eval_row_idx_le_mle,
 };
 use crate::predicate::{AffineRow, ClaimLayout, Form, Unknown, WireRole, compile};
 use crate::{Air, FixedColumn, ProgramInstance, ShapeEvaluator};
@@ -899,12 +900,10 @@ where
         alpha_pow *= inputs.alpha;
     }
 
-    let mut initial = Vec::with_capacity(bus_specs.len());
-    for k in 0..bus_specs.len() as u32 {
-        initial.push((Unknown::Pad(inputs.pads.claimed_sums + k), alpha_pow));
-
-        alpha_pow *= inputs.alpha;
-    }
+    let initial: Vec<(Unknown, Flat<F>)> = (0..bus_specs.len() as u32)
+        .zip(bus_alpha_weights(alpha_pow, inputs.alpha))
+        .map(|(k, w)| (Unknown::Pad(inputs.pads.claimed_sums + k), w.bus_sum))
+        .collect();
 
     let degree = shape.sumcheck_degree;
     let round_pads: Vec<Vec<u32>> = (0..num_vars)
@@ -1109,8 +1108,12 @@ pub fn consistency_row<F: TowerField + HardwareField>(
         alpha_pow *= inputs.alpha;
     }
 
-    for bus in &inputs.buses {
-        let consistency = alpha_pow * inputs.eq_zc;
+    for (bus, w) in inputs
+        .buses
+        .iter()
+        .zip(bus_alpha_weights(alpha_pow, inputs.alpha))
+    {
+        let consistency = w.consistency * inputs.eq_zc;
         let gamma_weight = consistency * inputs.gamma;
 
         row.unknowns.push((Unknown::Pad(bus.h_pad), gamma_weight));
@@ -1134,13 +1137,11 @@ pub fn consistency_row<F: TowerField + HardwareField>(
             push_claim(&mut row, inputs.pad_first, s, consistency);
         }
 
-        let lookup_weight = alpha_pow * bus.eq_lookup;
+        let lookup_weight = w.bus_sum * bus.eq_lookup;
 
         row.unknowns.push((Unknown::Pad(bus.h_pad), lookup_weight));
 
         row.constant += lookup_weight * bus.h_masked;
-
-        alpha_pow *= inputs.alpha;
     }
 
     row
