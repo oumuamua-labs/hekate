@@ -417,7 +417,7 @@ impl VirtualExpander {
         phy_start_idx: usize,
     ) -> Result<Vec<PolyVariant<'a, F>>, Error>
     where
-        F: TraceCompatibleField + 'static,
+        F: TraceCompatibleField,
     {
         let columns = trace.columns();
 
@@ -1312,7 +1312,7 @@ fn parse_tower_bit(storage: ColumnType, bytes: &[u8], bit_idx: usize) -> u8 {
     }
 }
 
-fn expand_packed_bit<F: TraceCompatibleField + 'static>(
+fn expand_packed_bit<F: TraceCompatibleField>(
     col: &'_ TraceColumn,
     storage: ColumnType,
     bit_idx: usize,
@@ -1354,7 +1354,7 @@ fn expand_packed_bit<F: TraceCompatibleField + 'static>(
     }
 }
 
-fn expand_pass_through<F: TraceCompatibleField + 'static>(
+fn expand_pass_through<F: TraceCompatibleField>(
     col: &TraceColumn,
     storage: ColumnType,
 ) -> Result<PolyVariant<'_, F>, Error> {
