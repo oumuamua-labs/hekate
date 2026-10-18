@@ -955,7 +955,6 @@ dependencies = [
  "hekate-program",
  "hekate-sdk",
  "proptest",
- "rayon",
 ]
 
 [[package]]
