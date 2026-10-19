@@ -10,9 +10,8 @@ For readers new to this series: Hekate is a zero-knowledge proof system over bin
 splits a computation into tables, such as a CPU, a memory, or a unit that computes Keccak, and
 checks each table on its own. Tables exchange values over buses. A CPU row that reads memory emits
 a message carrying the address and the value it got, and a memory row emits the same message from
-its side. The proof has to show that every message sent on a bus is received, as many times as it
-is sent. [logUp buses](https://oumuamua.dev/hekate/docs/basics/logup-buses) covers the mechanism in
-depth.
+its side. The proof has to show that every message sent on a bus is received.
+[logUp buses](https://oumuamua.dev/hekate/docs/basics/logup-buses) covers the mechanism in depth.
 
 ## Summary
 
@@ -27,8 +26,8 @@ depth.
 | 0.29.1 to 0.37.0 | 1, on every bus, with and without zero knowledge | Upgrade to 0.38.0 and re-prove. |
 | 0.38.0           | None known                                       | Current.                        |
 
-No proof crosses this boundary: 0.38.0 moves the bus weights and, for its Merkle openings, the proof
-wire to v8.
+0.38.0 changes the bus weights, and a separate change to Merkle openings moves the proof wire to v8.
+No proof crosses this boundary.
 
 Upgrading protects new proofs only. A verifier from 0.29.1 to 0.37.0 accepts forged bus relations,
 and a proof it accepted is no evidence of what its buses carried. A statement that matters should be
@@ -47,7 +46,9 @@ one fraction per row, `h = s / (γ + key)`, where `key` is the row's message and
 that emits. Two claims about `h` then carry the bus:
 
 1. **Consistency.** Every row satisfies `(γ + key) · h = s`: each `h` is the right fraction.
-2. **Bus sum.** The values of `h` add up to the sum the prover reports for its side of the bus.
+2. **Bus sum.** The values of `h`, each times `eq_lookup`, which is 1 on a permutation bus and
+   `eq(r_bus, x)` for a second random point `r_bus` on a lookup bus, add up to the sum the prover
+   reports for its side of the bus.
 
 A table carries many other checks, from its constraints, its boundary values and its blinding
 terms. The verifier does not run them one at a time. It draws a random `α` and folds them
@@ -95,13 +96,12 @@ and reads the same at every point. The shared weight predates the first tag, 0.2
 
 ## How we found out
 
-Most of the earlier postmortems came out of targeted security audits we ran on Hekate with our own
-people. This one arrived unplanned. We were working on another system that builds on Hekate's core,
-and its verifier replays Hekate's logUp check through
-`hekate_verifier::logup::expected_bus_contribution`. A security review of that system found the
-shared weight on 17 October 2026 and confirmed the forgery end to end against its verifier. We
-reproduced it the same day against Hekate's own verifier, with a proof-of-concept prover, with and
-without zero knowledge.
+Most of the earlier postmortems came out of targeted security audits of Hekate. This one arrived
+unplanned. We were working on another system that builds on Hekate's core, and its verifier replays
+Hekate's logUp check through `hekate_verifier::logup::expected_bus_contribution`. A security review
+of that system found the shared weight on 17 October 2026 and confirmed the forgery end to end
+against its verifier. We reproduced it the same day against Hekate's own verifier, with a
+proof-of-concept prover, with and without zero knowledge.
 
 ## The fix
 
@@ -125,7 +125,7 @@ verifier's ZeroCheck and the zero-knowledge outer statement take every bus weigh
 
 **The forgery.** The proof-of-concept prover's forged proof is rejected with and without zero
 knowledge. Merge the two powers back into one inside `bus_alpha_weights`, and the forged proof
-without zero knowledge verifies again.
+verifies again in both modes.
 
 **A control.** The forging prover runs its own sumcheck. On an honest bus that sumcheck produces
 proofs that verify in both modes, and the rejection of the forgery comes from the weights.
@@ -168,7 +168,7 @@ already accepted.
 of them share a coefficient. Write down the map from checks to powers, and test that it is one to
 one.
 
-**A constant passes a zero check at every point.** A ZeroCheck shows that a residual's multilinear
+**A constant looks the same at every point.** A ZeroCheck shows that a residual's multilinear
 extension vanishes at a random point. A constant residual takes its value everywhere, and only a
 target of zero that nothing else can move rejects it. If a value the prover reports shares the
 residual's weight, the constant moves into that value.
