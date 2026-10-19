@@ -35,11 +35,8 @@ pub struct HighBitsLayout {
     pub mul_results: Vec<(usize, usize)>,
     pub mul_carries: Vec<(usize, usize)>,
     pub add_carry: usize,
-    pub rng_result: usize,
     pub rng_borrow: usize,
-    pub neg_result: usize,
     pub neg_borrow: usize,
-    pub w_rng_result: usize,
     pub w_rng_borrow: usize,
 
     pub r1p: usize,
@@ -117,13 +114,10 @@ impl HighBitsLayout {
             .map(|&width| (alloc(width), width))
             .collect();
 
-        let add_carry = alloc(mul.result_width + 1);
-        let rng_result = alloc(r0_width);
-        let rng_borrow = alloc(r0_width + 1);
-        let neg_result = alloc(r0_width);
-        let neg_borrow = alloc(r0_width + 1);
-        let w_rng_result = alloc(W_BITS);
-        let w_rng_borrow = alloc(W_BITS + 1);
+        let add_carry = alloc(mul.result_width);
+        let rng_borrow = alloc(r0_width - 1);
+        let neg_borrow = alloc(r0_width);
+        let w_rng_borrow = alloc(W_BITS - 1);
 
         let r1p = alloc(n);
         let inc = alloc(n - 1);
@@ -158,11 +152,8 @@ impl HighBitsLayout {
             mul_results,
             mul_carries,
             add_carry,
-            rng_result,
             rng_borrow,
-            neg_result,
             neg_borrow,
-            w_rng_result,
             w_rng_borrow,
             r1p,
             inc,

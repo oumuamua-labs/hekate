@@ -19,9 +19,7 @@ use super::{
     transform_plan,
 };
 use crate::gadgets::MulModCols;
-use crate::utils::{
-    fill_mod_add, fill_mul_mod, fill_sub_borrow_packed, flush_bit_buffer, pack_bits,
-};
+use crate::utils::{fill_borrows, fill_mod_add, fill_mul_mod, flush_bit_buffer, pack_bits};
 use crate::wiring::{N, Poly, PolyValues};
 
 #[derive(Clone, Copy)]
@@ -163,16 +161,22 @@ impl RowWriter<'_> {
         fill_mod_add(bits, q, bw, (g.a, g.y, g.s1), g.add_flag, &ly.s1_add);
         fill_mod_add(bits, q, bw, (g.s2, g.y, g.a), g.sub_flag, &ly.s2_sub);
 
-        fill_sub_borrow_packed(
+        fill_borrows(
             bits,
-            ly.s2_range_result,
             ly.s2_range_borrow,
-            bw,
+            bw - 1,
             (q - 1) as u64,
             g.s2 as u64,
         );
 
-        fill_mul_mod(bits, &self.mm, q, (g.w, g.x), (g.quot, g.p));
+        fill_mul_mod(
+            bits,
+            &self.mm,
+            q,
+            &ly.red.mul_layout.digits,
+            (g.w, g.x),
+            (g.quot, g.p),
+        );
 
         flush_bit_buffer(&self.bits, self.tb, self.row)?;
 

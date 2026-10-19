@@ -55,7 +55,8 @@ publish-all:
         cargo update
     done
 
-example name variant="ct":
+[positional-arguments]
+example name variant="ct" *args:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -69,7 +70,7 @@ example name variant="ct":
         --no-default-features --features "$feats" \
         --example {{name}}
 
-    /usr/bin/time -l target/release/examples/{{name}} &
+    /usr/bin/time -l target/release/examples/{{name}} "${@:3}" &
     tpid=$!
 
     pid=""

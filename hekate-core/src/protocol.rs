@@ -135,22 +135,12 @@ where
 }
 
 /// Distinct outer-argument query columns, ascending.
-pub fn challenge_outer_queries<F: TowerField, H: Hasher>(
+pub fn challenge_outer_queries<H: Hasher>(
     transcript: &mut Transcript<H>,
     queries: usize,
     domain_len: usize,
 ) -> errors::Result<Vec<usize>> {
-    let mut columns = Vec::with_capacity(queries);
-    for _ in 0..queries {
-        let bytes = transcript.challenge_field::<F>(b"outer_idx")?.to_bytes();
-
-        let mut value: u64 = 0;
-        for (k, &b) in bytes.iter().take(8).enumerate() {
-            value |= (b as u64) << (8 * k);
-        }
-
-        columns.push((value % (domain_len as u64)) as usize);
-    }
+    let mut columns = transcript.challenge_indices(b"outer_idx", queries, domain_len)?;
 
     columns.sort_unstable();
     columns.dedup();

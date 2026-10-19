@@ -22,11 +22,18 @@ table SumcheckProof {
   claimed_evaluation: Block128;
 }
 
+// ===== Merkle Opening =====
+
+table Multiproof {
+  siblings: [ubyte];
+  unreached: [ubyte];
+}
+
 // ===== Brakedown Opening =====
 
 table BrakedownProof {
   opened_columns: [ubyte];
-  batch_path: [ubyte];
+  multiproof: Multiproof;
 }
 
 // ===== Evaluation Argument =====
@@ -61,7 +68,7 @@ table LogUpAux {
 table OuterOpening {
   columns: [uint32];
   values: [Block128];
-  siblings: [ubyte];
+  multiproof: Multiproof;
 }
 
 table OuterProof {

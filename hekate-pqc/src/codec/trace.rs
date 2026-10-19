@@ -24,9 +24,7 @@ use super::{
 };
 use crate::mldsa::Q;
 use crate::mlkem;
-use crate::utils::{
-    Writer, fill_add_carry_packed, fill_sub_borrow_packed, flush_bit_buffer, pack_bits, pack_one,
-};
+use crate::utils::{Writer, fill_borrows, fill_carries, flush_bit_buffer, pack_bits, pack_one};
 use crate::wiring::{N, PolyValues, WordValues};
 
 struct Grid {
@@ -519,17 +517,9 @@ fn fill_z(bits: &mut [u32], f: &ZField, shape: ZShape, y: u32, lifted: bool) {
 
     pack_bits(bits, f.y, y as u64, w);
 
-    fill_sub_borrow_packed(
+    fill_borrows(bits, f.lo_borrow, w, y as u64, (shape.beta + 1) as u64);
+    fill_borrows(
         bits,
-        f.lo_result,
-        f.lo_borrow,
-        w,
-        y as u64,
-        (shape.beta + 1) as u64,
-    );
-    fill_sub_borrow_packed(
-        bits,
-        f.hi_result,
         f.hi_borrow,
         w,
         (2 * shape.gamma1 - shape.beta - 1) as u64,
@@ -539,15 +529,8 @@ fn fill_z(bits: &mut [u32], f: &ZField, shape: ZShape, y: u32, lifted: bool) {
     pack_bits(bits, f.z, z as u64, Z_WIDTH);
     pack_one(bits, f.flag, flag);
 
-    fill_add_carry_packed(bits, f.carry, Z_WIDTH + 2, z as u64, y as u64);
-    fill_sub_borrow_packed(
-        bits,
-        f.rng_result,
-        f.rng_borrow,
-        Z_WIDTH,
-        (Q - 1) as u64,
-        z as u64,
-    );
+    fill_carries(bits, f.carry, Z_WIDTH + 1, z as u64, y as u64);
+    fill_borrows(bits, f.rng_borrow, Z_WIDTH, (Q - 1) as u64, z as u64);
 }
 
 fn fill_hint(
@@ -576,9 +559,8 @@ fn fill_hint(
     }
 
     for i in 1..k {
-        fill_sub_borrow_packed(
+        fill_borrows(
             bits,
-            hb.mono_result[i - 1],
             hb.mono_borrow[i - 1],
             BYTE,
             counts[i] as u64,
@@ -586,9 +568,8 @@ fn fill_hint(
         );
     }
 
-    fill_sub_borrow_packed(
+    fill_borrows(
         bits,
-        hb.last_result,
         hb.last_borrow,
         BYTE,
         shape.omega as u64,
@@ -608,14 +589,7 @@ fn fill_hint(
         pack_bits(bits, slot.s, s as u64, BYTE);
 
         for (i, &c) in counts.iter().enumerate() {
-            fill_sub_borrow_packed(
-                bits,
-                slot.lt_result[i],
-                slot.lt_borrow[i],
-                BYTE,
-                s as u64,
-                c as u64,
-            );
+            fill_borrows(bits, slot.lt_borrow[i], BYTE, s as u64, c as u64);
         }
 
         let (after, after_counts) = match t + 1 < HINT_SLOTS {
@@ -629,14 +603,7 @@ fn fill_hint(
         pack_bits(bits, slot.p, p as u64, k);
         pack_one(bits, slot.same, same);
 
-        fill_sub_borrow_packed(
-            bits,
-            slot.inc_result,
-            slot.inc_borrow,
-            BYTE,
-            bytes[t] as u64,
-            after as u64,
-        );
+        fill_borrows(bits, slot.inc_borrow, BYTE, bytes[t] as u64, after as u64);
 
         if idx {
             tokens[t] = (owner_label(p, base), bytes[t] as u16);
@@ -655,10 +622,9 @@ fn fill_byte12(bits: &mut [u32], f: &Byte12Field, b: u32, unreduced: bool) {
     pack_bits(bits, f.x, x as u64, KEM_WIDTH);
     pack_one(bits, f.flag, bool::from(reduced));
 
-    fill_add_carry_packed(bits, f.carry, KEM_WIDTH + 1, x as u64, q as u64);
-    fill_sub_borrow_packed(
+    fill_carries(bits, f.carry, KEM_WIDTH, x as u64, q as u64);
+    fill_borrows(
         bits,
-        f.rng_result,
         f.rng_borrow,
         KEM_WIDTH,
         (mlkem::Q - 1) as u64,
@@ -676,7 +642,7 @@ fn fill_decompress(bits: &mut [u32], f: &DecompressField, d: usize, y: u32) {
     for (i, s) in Q_SHIFTS.into_iter().enumerate() {
         let term = y << s;
 
-        fill_add_carry_packed(bits, f.carries[i], w + 1, acc, term);
+        fill_carries(bits, f.carries[i], w, acc, term);
 
         acc += term;
 
@@ -705,7 +671,7 @@ fn fill_compress(bits: &mut [u32], f: &CompressField, d: usize, x: u32, borrowed
 
     let mut acc = yp;
     for (i, term) in terms.enumerate() {
-        fill_add_carry_packed(bits, f.carries[i], v + 1, acc, term);
+        fill_carries(bits, f.carries[i], v, acc, term);
 
         acc += term;
 
@@ -718,10 +684,10 @@ fn fill_compress(bits: &mut [u32], f: &CompressField, d: usize, x: u32, borrowed
         let high = (half_q() >> d) as u64;
 
         pack_bits(bits, sum, x + high, KEM_WIDTH + 1);
-        fill_add_carry_packed(bits, carry, KEM_WIDTH + 2, x, high);
+        fill_carries(bits, carry, KEM_WIDTH + 1, x, high);
     }
 
-    fill_sub_borrow_packed(bits, f.rng_result, f.rng_borrow, KEM_WIDTH, q - 1, r);
+    fill_borrows(bits, f.rng_borrow, KEM_WIDTH, q - 1, r);
 }
 
 fn fill_compress1(bits: &mut [u32], f: &Compress1Field, x: u32) {
@@ -729,22 +695,8 @@ fn fill_compress1(bits: &mut [u32], f: &Compress1Field, x: u32) {
 
     pack_bits(bits, f.x, x, KEM_WIDTH);
 
-    fill_sub_borrow_packed(
-        bits,
-        f.lo_result,
-        f.lo_borrow,
-        KEM_WIDTH,
-        x,
-        mlkem::Q.div_ceil(4) as u64,
-    );
-    fill_sub_borrow_packed(
-        bits,
-        f.hi_result,
-        f.hi_borrow,
-        KEM_WIDTH,
-        (3 * mlkem::Q / 4) as u64,
-        x,
-    );
+    fill_borrows(bits, f.lo_borrow, KEM_WIDTH, x, mlkem::Q.div_ceil(4) as u64);
+    fill_borrows(bits, f.hi_borrow, KEM_WIDTH, (3 * mlkem::Q / 4) as u64, x);
 }
 
 fn check_hint(shape: HintShape, bytes: &[u8]) -> errors::Result<()> {

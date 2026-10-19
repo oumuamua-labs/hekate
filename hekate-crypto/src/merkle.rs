@@ -11,6 +11,7 @@ use core::mem::MaybeUninit;
 use hekate_math::TowerField;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// Leaves of one subtree a worker hashes whole.
 #[cfg(feature = "parallel")]
@@ -46,12 +47,29 @@ impl fmt::Display for Error {
     }
 }
 
+/// Last byte of every Merkle preimage, one per kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Tag {
+    Part = 0x00,
+    Node = 0x01,
+    PoolLeaf = 0x02,
+    OuterLeaf = 0x03,
+}
+
+/// Opening of a leaf set: the octopus siblings below the [`layer_log`] layer,
+/// then the layer nodes no opened path reaches, ascending by position.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Multiproof {
+    pub siblings: Vec<[u8; 32]>,
+    pub unreached: Vec<[u8; 32]>,
+}
+
 /// Binary Merkle tree over 32-byte leaves.
 ///
-/// Internal node = `H(0x01 || left || right)`.
-/// Leaves are expected to already be hashes;
-/// callers serialize their field payloads via
-/// `hash_leaf_row_blinded` / `hash_column_leaves`.
+/// Internal node = `H(left || right || 0x01)`.
+/// Leaves are expected to already be hashes; callers
+/// serialize their field payloads via `hash_column_leaves`.
 #[derive(Clone, Debug)]
 pub struct MerkleTree<F: TowerField, H: Hasher = DefaultHasher> {
     nodes: Vec<MaybeUninit<[u8; 32]>>,
@@ -304,11 +322,10 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
     // Batch (octopus) proofs
     // =================================
 
-    /// Octopus multiproof: one pruned sibling set opening
-    /// every `leaf_indices` entry against the root, each
-    /// shared sibling sent once. Emitted in canonical order;
-    /// `verify_batch` must consume it in the same order.
-    pub fn prove_batch(&self, leaf_indices: &[usize]) -> Result<Vec<[u8; 32]>> {
+    /// Multiproof opening every `leaf_indices` entry against
+    /// the root for `queries` draws, each shared sibling sent
+    /// once; `verify_batch` consumes it in the same order.
+    pub fn prove_batch(&self, leaf_indices: &[usize], queries: usize) -> Result<Multiproof> {
         // SAFETY:
         // see `root`, requires `built`.
         assert!(
@@ -331,11 +348,17 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
         frontier.sort_unstable();
         frontier.dedup();
 
+        let Some(depth) = self.num_leaves.checked_ilog2() else {
+            return Ok(Multiproof::default());
+        };
+
+        let top_width = 1 << layer_log(queries, depth as usize);
+
         let mut siblings = Vec::new();
         let mut next: Vec<usize> = Vec::with_capacity(frontier.len());
         let mut layer_width = self.num_leaves;
 
-        while layer_width > 1 {
+        while layer_width > top_width {
             let layer_offset = layer_width - 1;
 
             next.clear();
@@ -365,17 +388,35 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
             layer_width >>= 1;
         }
 
-        Ok(siblings)
+        let layer_offset = top_width - 1;
+
+        let mut reached = frontier.iter().copied().peekable();
+        let mut unreached = Vec::with_capacity(top_width - frontier.len());
+
+        for position in 0..top_width {
+            if reached.next_if_eq(&position).is_none() {
+                // SAFETY:
+                // `built` guarantees every node is initialized;
+                // `position < top_width` keeps the index inside the layer.
+                unreached.push(unsafe { self.nodes[layer_offset + position].assume_init() });
+            }
+        }
+
+        Ok(Multiproof {
+            siblings,
+            unreached,
+        })
     }
 
-    /// Verifies a `prove_batch` multiproof against `root`.
+    /// Verifies a `prove_batch` multiproof for `queries` draws against `root`.
     /// `num_leaves` is the padded power-of-two leaf count;
     /// `leaves` must be sorted strictly ascending by index.
     pub fn verify_batch(
         root: &[u8; 32],
         num_leaves: usize,
+        queries: usize,
         leaves: &[(usize, [u8; 32])],
-        siblings: &[[u8; 32]],
+        proof: &Multiproof,
     ) -> bool {
         if !num_leaves.is_power_of_two() || leaves.is_empty() {
             return false;
@@ -399,11 +440,14 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
             frontier.push((idx, hash));
         }
 
+        let top_width = 1 << layer_log(queries, num_leaves.trailing_zeros() as usize);
+        let siblings = &proof.siblings;
+
         let mut sib_pos = 0usize;
         let mut next: Vec<(usize, [u8; 32])> = Vec::with_capacity(leaves.len());
         let mut layer_width = num_leaves;
 
-        while layer_width > 1 {
+        while layer_width > top_width {
             next.clear();
 
             let mut i = 0;
@@ -441,76 +485,55 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
             layer_width >>= 1;
         }
 
-        sib_pos == siblings.len() && frontier.len() == 1 && &frontier[0].1 == root
+        if sib_pos != siblings.len() {
+            return false;
+        }
+
+        let mut reached = frontier.iter().peekable();
+        let mut unreached = proof.unreached.iter();
+        let mut layer = Vec::with_capacity(top_width);
+
+        for position in 0..top_width {
+            let node = match reached.next_if(|&&(idx, _)| idx == position) {
+                Some(&(_, hash)) => Some(hash),
+                None => unreached.next().copied(),
+            };
+
+            match node {
+                Some(hash) => layer.push(hash),
+                None => return false,
+            }
+        }
+
+        if unreached.next().is_some() {
+            return false;
+        }
+
+        while layer.len() > 1 {
+            let parents = layer.len() / 2;
+            for i in 0..parents {
+                layer[i] = hash_node::<H>(&layer[2 * i], &layer[2 * i + 1]);
+            }
+
+            layer.truncate(parents);
+        }
+
+        layer.first() == Some(root)
     }
 }
 
-/// Hash one row into a blinded Merkle leaf:
-///
-/// ```text
-/// Leaf = H(
-///     0x00
-///  || u64_le(len(data || noise))
-///  || data_row_bytes
-///  || noise_bytes
-///  || code_row_bytes
-/// )
-/// ```
-///
-/// The length prefix commits to the boundary
-/// between `(data || noise)` and `code`, so
-/// two rows with shuffled widths cannot collide.
-#[inline(always)]
-pub fn hash_leaf_row_blinded<H: Hasher>(
-    row_idx: usize,
-    data_views: &[(&[u8], usize)],
-    code_views: &[(&[u8], usize)],
-    noise_bytes: &[u8],
-) -> [u8; 32] {
-    let mut hasher = H::new();
+/// Level of the [`Multiproof`] layer:
+/// `⌈log2 queries⌉`, capped at `depth`.
+pub fn layer_log(queries: usize, depth: usize) -> usize {
+    let ceil_log2 = match queries {
+        0 | 1 => 0,
+        q => (usize::BITS - (q - 1).leading_zeros()) as usize,
+    };
 
-    let physical_data_len: usize = data_views.iter().map(|(_, w)| *w).sum();
-    let data_len = physical_data_len + noise_bytes.len();
-
-    hasher.update(&[0u8]);
-
-    let len_bytes = (data_len as u64).to_le_bytes();
-    hasher.update(&len_bytes);
-
-    for (base_ptr, width) in data_views {
-        let start = row_idx * width;
-        let end = start + width;
-
-        // SAFETY:
-        // the caller builds each view with a
-        // matching `width` and guarantees
-        // `row_idx` is in range.
-        unsafe {
-            let src = base_ptr.get_unchecked(start..end);
-            hasher.update(src);
-        }
-    }
-
-    if !noise_bytes.is_empty() {
-        hasher.update(noise_bytes);
-    }
-
-    for (base_ptr, width) in code_views {
-        let start = row_idx * width;
-        let end = start + width;
-
-        // SAFETY:
-        // see loop above.
-        unsafe {
-            let src = base_ptr.get_unchecked(start..end);
-            hasher.update(src);
-        }
-    }
-
-    hasher.finalize()
+    ceil_log2.min(depth)
 }
 
-/// One digest per grid column, `H(0x00 ‖ its cells row by row)`,
+/// One digest per grid column, `H(its cells row by row ‖ 0x00)`,
 /// for columns `0..digests.len()`, hashed by tiles of columns.
 pub fn hash_column_leaves<H: Hasher>(
     grid_rows: usize,
@@ -565,15 +588,16 @@ pub fn hash_parts_leaves<H: Hasher>(
     }
 }
 
-/// Hashes one pool leaf from the `0x02` tag followed
-/// by each table's digest of the column, in pool order.
+/// Hashes one pool leaf from each table's digest of
+/// the column, in pool order, followed by the `0x02` tag.
 pub fn hash_parts_leaf<'a, H: Hasher>(digests: impl IntoIterator<Item = &'a [u8; 32]>) -> [u8; 32] {
     let mut hasher = H::new();
-    hasher.update(&[2u8]);
 
     for digest in digests {
         hasher.update(digest);
     }
+
+    hasher.update(&[Tag::PoolLeaf as u8]);
 
     hasher.finalize()
 }
@@ -592,11 +616,11 @@ fn hash_tile<H: Hasher>(
 
     scratch.resize(out.len() * stride, 0);
 
-    for prefix in scratch.iter_mut().step_by(stride) {
-        *prefix = 0;
+    for tag in scratch.iter_mut().skip(stride - 1).step_by(stride) {
+        *tag = Tag::Part as u8;
     }
 
-    let mut offset = 1;
+    let mut offset = 0;
     for row in 0..grid_rows {
         let base = row * encoded_width + first;
         for &(column, width) in code_views {
@@ -637,12 +661,12 @@ fn hash_layer<H: Hasher>(
     }
 }
 
-/// `H(0x01 ‖ left ‖ right)`, an internal node of [`MerkleTree`].
+/// `H(left ‖ right ‖ 0x01)`, an internal node of [`MerkleTree`].
 fn hash_node<H: Hasher>(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut node = [0u8; 65];
-    node[0] = 1;
-    node[1..33].copy_from_slice(left);
-    node[33..].copy_from_slice(right);
+    node[..32].copy_from_slice(left);
+    node[32..64].copy_from_slice(right);
+    node[64] = Tag::Node as u8;
 
     H::digest(&node)
 }
@@ -678,6 +702,20 @@ mod tests {
         distinct.into_iter().map(|i| (i, leaf_hashes[i])).collect()
     }
 
+    fn layer_nodes(leaves: &[[u8; 32]], level: usize) -> Vec<[u8; 32]> {
+        let mut layer = leaves.to_vec();
+        while layer.len() > 1 << level {
+            layer = layer
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[left, right]| hash_node::<H>(left, right))
+                .collect();
+        }
+
+        layer
+    }
+
     fn per_column_leaf(
         col: usize,
         grid_rows: usize,
@@ -685,14 +723,14 @@ mod tests {
         views: &[(&[u8], usize)],
     ) -> [u8; 32] {
         let mut hasher = H::new();
-        hasher.update(&[0u8]);
-
         for row in 0..grid_rows {
             for &(column, width) in views {
                 let start = (row * encoded_width + col) * width;
                 hasher.update(&column[start..start + width]);
             }
         }
+
+        hasher.update(&[0u8]);
 
         hasher.finalize()
     }
@@ -717,6 +755,25 @@ mod tests {
                 out
             })
             .collect()
+    }
+
+    fn check_tags<H: Hasher>() {
+        let right: [u8; 32] = core::array::from_fn(|i| 0x80 | i as u8);
+
+        for first in [0x00, 0x02] {
+            let mut left: [u8; 32] = core::array::from_fn(|i| i as u8);
+            left[0] = first;
+
+            let payload = [left, right].concat();
+            let tagged = |tag: u8| H::digest(&[&payload[..], &[tag][..]].concat());
+
+            let mut part = [[0u8; 32]];
+            hash_column_leaves::<H>(1, 1, &[(&payload[..], 64)], &mut part);
+
+            assert_eq!(part[0], tagged(0x00));
+            assert_eq!(hash_node::<H>(&left, &right), tagged(0x01));
+            assert_eq!(hash_parts_leaf::<H>([&left, &right]), tagged(0x02));
+        }
     }
 
     #[test]
@@ -885,11 +942,11 @@ mod tests {
             &[0, 1, 2, 5, 17, 63],
             &[1, 3, 5, 7, 9, 11, 40, 41],
         ] {
-            let siblings = tree.prove_batch(query).unwrap();
+            let proof = tree.prove_batch(query, query.len()).unwrap();
             let leaves = batch_leaves(query, &leaf_hashes);
 
             assert!(
-                MerkleTree::<Block128, H>::verify_batch(&root, 64, &leaves, &siblings),
+                MerkleTree::<Block128, H>::verify_batch(&root, 64, query.len(), &leaves, &proof),
                 "batch proof rejected for {query:?}"
             );
 
@@ -906,17 +963,18 @@ mod tests {
         let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
 
         let all: Vec<usize> = (0..32).collect();
-        let siblings = tree.prove_batch(&all).unwrap();
+        let proof = tree.prove_batch(&all, all.len()).unwrap();
 
-        assert!(siblings.is_empty(), "full leaf set needs zero siblings");
+        assert_eq!(proof, Multiproof::default());
 
         let leaves = batch_leaves(&all, &leaf_hashes);
 
         assert!(MerkleTree::<Block128, H>::verify_batch(
             &tree.root(),
             32,
+            all.len(),
             &leaves,
-            &siblings
+            &proof
         ));
     }
 
@@ -925,10 +983,15 @@ mod tests {
         let leaf_hashes: Vec<[u8; 32]> = (0..64u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
         let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
 
-        let siblings = tree.prove_batch(&[42]).unwrap();
+        let proof = tree.prove_batch(&[42], 1).unwrap();
 
-        assert_eq!(siblings.len(), 6, "single-leaf octopus is a full path");
-        assert_eq!(siblings, tree.prove(42).unwrap());
+        assert_eq!(
+            proof.siblings.len(),
+            6,
+            "single-leaf octopus is a full path"
+        );
+        assert_eq!(proof.siblings, tree.prove(42).unwrap());
+        assert!(proof.unreached.is_empty());
     }
 
     #[test]
@@ -938,11 +1001,12 @@ mod tests {
         let root = tree.root();
 
         let query = [3usize, 8, 8, 20, 55];
-        let siblings = tree.prove_batch(&query).unwrap();
+        let q = query.len();
+        let proof = tree.prove_batch(&query, q).unwrap();
         let leaves = batch_leaves(&query, &leaf_hashes);
 
         assert!(MerkleTree::<Block128, H>::verify_batch(
-            &root, 64, &leaves, &siblings
+            &root, 64, q, &leaves, &proof
         ));
 
         let mut wrong_leaf = leaves.clone();
@@ -951,45 +1015,47 @@ mod tests {
         assert!(!MerkleTree::<Block128, H>::verify_batch(
             &root,
             64,
+            q,
             &wrong_leaf,
-            &siblings
+            &proof
         ));
 
-        let mut extra = siblings.clone();
-        extra.push([0u8; 32]);
+        let mut extra = proof.clone();
+        extra.siblings.push([0u8; 32]);
 
         assert!(
-            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &leaves, &extra),
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, q, &leaves, &extra),
             "unconsumed extra sibling must reject"
         );
 
-        let missing = &siblings[..siblings.len() - 1];
+        let mut missing = proof.clone();
+        missing.siblings.pop();
 
         assert!(
-            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &leaves, missing),
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, q, &leaves, &missing),
             "missing sibling must reject"
         );
 
         assert!(!MerkleTree::<Block128, H>::verify_batch(
-            &[9u8; 32], 64, &leaves, &siblings
+            &[9u8; 32], 64, q, &leaves, &proof
         ));
 
         let unsorted = vec![leaves[2], leaves[0], leaves[1], leaves[3]];
 
         assert!(
-            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &unsorted, &siblings),
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, q, &unsorted, &proof),
             "unsorted leaves must reject"
         );
 
         let dup = vec![leaves[0], leaves[0], leaves[1]];
 
         assert!(
-            !MerkleTree::<Block128, H>::verify_batch(&root, 64, &dup, &siblings),
+            !MerkleTree::<Block128, H>::verify_batch(&root, 64, q, &dup, &proof),
             "duplicate leaf indices must reject"
         );
 
         assert!(
-            !MerkleTree::<Block128, H>::verify_batch(&root, 63, &leaves, &siblings),
+            !MerkleTree::<Block128, H>::verify_batch(&root, 63, q, &leaves, &proof),
             "non-power-of-two leaf count must reject"
         );
     }
@@ -1003,7 +1069,7 @@ mod tests {
         assert_eq!(padded, 8);
 
         let query = [0usize, 4];
-        let siblings = tree.prove_batch(&query).unwrap();
+        let proof = tree.prove_batch(&query, query.len()).unwrap();
         let padded_hashes: Vec<[u8; 32]> = (0..padded)
             .map(|i| {
                 if i < leaf_hashes.len() {
@@ -1019,8 +1085,9 @@ mod tests {
         assert!(MerkleTree::<Block128, H>::verify_batch(
             &tree.root(),
             padded,
+            query.len(),
             &leaves,
-            &siblings
+            &proof
         ));
     }
 
@@ -1029,54 +1096,7 @@ mod tests {
         let leaf_hashes: Vec<[u8; 32]> = (0..8u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
         let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
 
-        assert!(tree.prove_batch(&[0, 8]).is_err());
-    }
-
-    #[test]
-    fn hash_leaf_row_blinded_includes_length_prefix() {
-        let data = [1u8, 2u8];
-        let code = [3u8, 4u8, 5u8];
-
-        let data_views = vec![(&data[..], data.len())];
-        let code_views = vec![(&code[..], code.len())];
-
-        let expected = {
-            let mut h = H::new();
-            h.update(&[0u8]);
-            h.update(&(data.len() as u64).to_le_bytes());
-            h.update(&data);
-            h.update(&code);
-
-            h.finalize()
-        };
-
-        let got = hash_leaf_row_blinded::<H>(0, &data_views, &code_views, &[]);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn hash_leaf_row_blinded_rejects_ambiguous_concatenation() {
-        let data_a = [1u8, 2u8];
-        let code_a = [3u8];
-
-        let data_b = [1u8];
-        let code_b = [2u8, 3u8];
-
-        let h_a = hash_leaf_row_blinded::<H>(
-            0,
-            &[(&data_a[..], data_a.len())],
-            &[(&code_a[..], code_a.len())],
-            &[],
-        );
-
-        let h_b = hash_leaf_row_blinded::<H>(
-            0,
-            &[(&data_b[..], data_b.len())],
-            &[(&code_b[..], code_b.len())],
-            &[],
-        );
-
-        assert_ne!(h_a, h_b);
+        assert!(tree.prove_batch(&[0, 8], 2).is_err());
     }
 
     #[cfg(debug_assertions)]
@@ -1172,15 +1192,199 @@ mod tests {
         hash_parts_leaves::<H>(&views, &mut leaves);
 
         for (j, leaf) in leaves.iter().enumerate() {
-            let mut preimage = vec![2u8];
+            let mut preimage = Vec::new();
             for table in &tables {
                 preimage.extend_from_slice(&table[j]);
             }
+
+            preimage.push(2u8);
 
             // SAFETY: every slot starts initialized
             let leaf = unsafe { leaf.assume_init() };
 
             assert_eq!(leaf, H::digest(&preimage));
+        }
+    }
+
+    #[cfg(feature = "blake3")]
+    #[test]
+    fn blake3_preimages_end_in_their_tags() {
+        check_tags::<crate::blake3::Blake3Hasher>();
+    }
+
+    #[cfg(feature = "sha2")]
+    #[test]
+    fn sha256_preimages_end_in_their_tags() {
+        check_tags::<crate::sha256::Sha256Hasher>();
+    }
+
+    #[cfg(feature = "sha3")]
+    #[test]
+    fn sha3_preimages_end_in_their_tags() {
+        check_tags::<crate::sha3::Sha3_256Hasher>();
+    }
+
+    #[test]
+    fn layer_log_is_ceil_log2_capped_at_depth() {
+        for (queries, depth, want) in [
+            (0, 15, 0),
+            (1, 15, 0),
+            (2, 15, 1),
+            (5, 15, 3),
+            (121, 13, 7),
+            (153, 16, 8),
+            (256, 15, 8),
+            (287, 15, 9),
+            (513, 15, 10),
+            (287, 6, 6),
+            (4, 0, 0),
+        ] {
+            assert_eq!(
+                layer_log(queries, depth),
+                want,
+                "{queries} queries, depth {depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreached_section_is_layer_minus_reached_positions() {
+        let leaf_hashes: Vec<[u8; 32]> =
+            (0..256u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+
+        for query in [
+            &[200usize][..],
+            &[0, 255],
+            &[9, 9, 9, 9, 9],
+            &[3, 8, 8, 20, 55, 130, 131, 254],
+            &[1, 17, 33, 49, 65, 81, 97, 113, 129, 145, 161, 177, 193],
+        ] {
+            let level = layer_log(query.len(), 8);
+            let layer = layer_nodes(&leaf_hashes, level);
+
+            let expected: Vec<[u8; 32]> = (0..1usize << level)
+                .filter(|&p| query.iter().all(|&idx| idx >> (8 - level) != p))
+                .map(|p| layer[p])
+                .collect();
+
+            let proof = tree.prove_batch(query, query.len()).unwrap();
+
+            assert_eq!(proof.unreached, expected, "{query:?}");
+            assert!(MerkleTree::<Block128, H>::verify_batch(
+                &tree.root(),
+                256,
+                query.len(),
+                &batch_leaves(query, &leaf_hashes),
+                &proof
+            ));
+        }
+    }
+
+    #[test]
+    fn layer_at_depth_ships_unopened_leaves() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..16u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+
+        let query = [2usize, 7, 11].repeat(6);
+        let proof = tree.prove_batch(&query, query.len()).unwrap();
+
+        let unopened: Vec<[u8; 32]> = (0..16)
+            .filter(|i| ![2, 7, 11].contains(i))
+            .map(|i| leaf_hashes[i])
+            .collect();
+
+        assert_eq!(layer_log(query.len(), 4), 4);
+        assert!(proof.siblings.is_empty());
+        assert_eq!(proof.unreached, unopened);
+        assert!(MerkleTree::<Block128, H>::verify_batch(
+            &tree.root(),
+            16,
+            query.len(),
+            &batch_leaves(&query, &leaf_hashes),
+            &proof
+        ));
+    }
+
+    #[test]
+    fn verify_batch_rejects_forged_unreached_section() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..64u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+        let root = tree.root();
+
+        let query = [3usize, 8, 8, 20, 55];
+        let q = query.len();
+        let proof = tree.prove_batch(&query, q).unwrap();
+        let leaves = batch_leaves(&query, &leaf_hashes);
+
+        assert_eq!(proof.unreached.len(), 4);
+
+        let mut flipped = proof.clone();
+        flipped.unreached[2][0] ^= 1;
+
+        let mut extra = proof.clone();
+        extra.unreached.push([0u8; 32]);
+
+        let mut missing = proof.clone();
+        missing.unreached.pop();
+
+        let mut swapped = proof.clone();
+        swapped.unreached.swap(0, 1);
+
+        for forged in [flipped, extra, missing, swapped] {
+            assert!(!MerkleTree::<Block128, H>::verify_batch(
+                &root, 64, q, &leaves, &forged
+            ));
+        }
+
+        for other in [4, 9] {
+            assert!(!MerkleTree::<Block128, H>::verify_batch(
+                &root, 64, other, &leaves, &proof
+            ));
+        }
+    }
+
+    #[test]
+    fn multiproof_roundtrips_across_depths_and_draw_counts() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for depth in 0..=9 {
+            let num_leaves = 1usize << depth;
+            let leaf_hashes: Vec<[u8; 32]> = (0..num_leaves as u32)
+                .map(|i| hash_bytes(&i.to_le_bytes()))
+                .collect();
+            let tree = MerkleTree::<Block128, H>::new(&leaf_hashes);
+
+            for draws in [1usize, 2, 3, 7, 64, 287, 600] {
+                let query: Vec<usize> = (0..draws)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+
+                        state as usize % num_leaves
+                    })
+                    .collect();
+
+                let level = layer_log(draws, depth);
+
+                let mut reached: Vec<usize> = query.iter().map(|i| i >> (depth - level)).collect();
+                reached.sort_unstable();
+                reached.dedup();
+
+                let proof = tree.prove_batch(&query, draws).unwrap();
+
+                assert_eq!(proof.unreached.len(), (1 << level) - reached.len());
+                assert!(
+                    MerkleTree::<Block128, H>::verify_batch(
+                        &tree.root(),
+                        num_leaves,
+                        draws,
+                        &batch_leaves(&query, &leaf_hashes),
+                        &proof
+                    ),
+                    "depth {depth}, {draws} draws"
+                );
+            }
         }
     }
 }

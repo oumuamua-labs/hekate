@@ -141,21 +141,15 @@ fn rejection<'a, F: TowerField>(
 
     for (m, slot) in rej.slots.iter().enumerate() {
         let candidate = bits(cs, ly.window_bits + shape.stride * m, shape.width);
-        let borrow = bits(cs, slot.borrow, shape.width + 1);
+        let borrow = bits(cs, slot.borrow, shape.width);
 
         // The borrow out of (q − 1) − c is set iff c ≥ q
-        borrow_chain(
-            cs,
-            &top,
-            &candidate,
-            &bits(cs, slot.result, shape.width),
-            &borrow,
-        );
+        borrow_chain(cs, &top, &candidate, &borrow);
 
         let count = bits(cs, rej.count(m), COUNT_BITS);
         let u = cs.col(slot.u);
 
-        let accept = one + borrow[shape.width];
+        let accept = one + borrow[shape.width - 1];
         let done = count[COUNT_BITS - 1];
 
         // A candidate is used on a rejection row when below q
@@ -284,18 +278,18 @@ fn ball_candidates<'a, F: TowerField>(
     cs.constrain(cs.col(ly.carry.index()) * (packed(cs, &next) + packed(cs, &after)));
     cs.constrain(cs.col(ly.absorb.index()) * (packed(cs, &count) + first_cell));
 
-    let borrow = bits(cs, bb.borrow, BYTE + 1);
+    let borrow = bits(cs, bb.borrow, BYTE);
 
     // The borrow out of i − j is set iff j > i,
     // the test of FIPS 204 Algorithm 29.
-    borrow_chain(cs, &count[..BYTE], &byte, &bits(cs, bb.diff, BYTE), &borrow);
+    borrow_chain(cs, &count[..BYTE], &byte, &borrow);
 
     let u = cs.col(bb.u);
     let done = count[COUNT_BITS - 1];
 
     cs.constrain_named(
         "sampler_ball_accept",
-        u + work * (one + borrow[BYTE]) * (one + done),
+        u + work * (one + borrow[BYTE - 1]) * (one + done),
     );
 
     increment(cs, &count, &after, &bits(cs, bb.carry, COUNT_BITS), u);
@@ -379,25 +373,13 @@ fn ball_sorted<'a, F: TowerField>(cs: &'a ConstraintSystem<F>, sb: &SortBits, so
         cs.constrain((one + sorted) * cell);
     }
 
-    let addr_borrow = bits(cs, sb.addr_borrow, BYTE + 1);
-    let time_borrow = bits(cs, sb.time_borrow, TIME_BITS + 1);
+    let addr_borrow = bits(cs, sb.addr_borrow, BYTE);
+    let time_borrow = bits(cs, sb.time_borrow, TIME_BITS);
 
     // The borrow out of addr − next addr is set iff
     // the next address is larger, and the same for time.
-    borrow_chain(
-        cs,
-        &addr,
-        &next_addr,
-        &bits(cs, sb.addr_diff, BYTE),
-        &addr_borrow,
-    );
-    borrow_chain(
-        cs,
-        &time,
-        &next_time,
-        &bits(cs, sb.time_diff, TIME_BITS),
-        &time_borrow,
-    );
+    borrow_chain(cs, &addr, &next_addr, &addr_borrow);
+    borrow_chain(cs, &time, &next_time, &time_borrow);
 
     // same = [the next access has this address], on linked rows only.
     // The same address repeats with a rising time; a new address rises.
@@ -408,11 +390,11 @@ fn ball_sorted<'a, F: TowerField>(cs: &'a ConstraintSystem<F>, sb: &SortBits, so
     );
     cs.constrain_named(
         "sampler_sib_order",
-        link * (one + same) * (one + addr_borrow[BYTE]),
+        link * (one + same) * (one + addr_borrow[BYTE - 1]),
     );
     cs.constrain_named(
         "sampler_sib_order",
-        link * same * (one + time_borrow[TIME_BITS]),
+        link * same * (one + time_borrow[TIME_BITS - 1]),
     );
 
     // A read returns the previous access's value at its address,

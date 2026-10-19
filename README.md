@@ -11,14 +11,10 @@ Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N)
 
 Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
 
-> [!WARNING]  
-> This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
-> without notice. Do not deploy to mainnet.
-
 > [!NOTE]  
-> The verifier, core SDK, and cryptographic chiplets are open-source under AGPL-3.0-only. The prover
-> and compression engine stay proprietary, shipped as free binaries for macOS (Apple Silicon),
+> Hekate's open code is AGPL-3.0-only; its signed prover ships as free binaries for macOS (Apple Silicon),
 > Linux (ARM64, glibc), iOS (ARM64, device and simulator), and Android (ARM64).
+> A product shipped under other terms, open source or closed, needs a commercial license.
 
 > [!IMPORTANT]  
 > [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed
@@ -26,15 +22,20 @@ Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
 > terminology across the boundary. Shipping ZK to edge devices? Start there, with the Swift and Kotlin
 > guides at [oumuamua.dev/mobile](https://oumuamua.dev/mobile).
 
+> [!WARNING]  
+> This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
+> without notice. Do not deploy to mainnet.
+
 ---
 
 ## ⚠️ Security Warning
 
 This workspace has not been independently audited and may contain bugs and security flaws.
 
-The failures fixed in 0.31.0 to 0.37.0 are written up as postmortems:
+The failures fixed in 0.31.0 to 0.38.0 are written up as postmortems:
 [0.32](docs/postmortem-0.32.md), [0.33](docs/postmortem-0.33.md), [0.34](docs/postmortem-0.34.md),
-[0.35](docs/postmortem-0.35.md), [0.36](docs/postmortem-0.36.md) and [0.37](docs/postmortem-0.37.md). Each states
+[0.35](docs/postmortem-0.35.md), [0.36](docs/postmortem-0.36.md), [0.37](docs/postmortem-0.37.md) and
+[0.38](docs/postmortem-0.38.md). Each states
 what broke, how it was found, what fixed it and what the release still does not promise.
 [Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security) collects the
 guarantees a proof gives today and the checks that stay with you.
@@ -108,6 +109,8 @@ binary you can run with `cargo run --release --example <name>`.
 
 - [ML-DSA signature verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa.rs) (FIPS 204;
   44 / 65 / 87 levels)
+- [Batched ML-DSA verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mldsa_batch.rs)
+  (FIPS 204; a batch of signatures under as many keys in one proof)
 - [RSA-2048 PKCS#1 v1.5 verification](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/rsa_pkcs1.rs)
   (RFC 8017, over the modexp and SHA-256 chiplets)
 - [ML-KEM sender](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/mlkem_sender.rs) (FIPS 203
@@ -169,7 +172,7 @@ The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in r
 
 Proving time, verification time, proof size and peak memory for the hashing, signature, encryption and
 integer-arithmetic examples are at [oumuamua.dev/hekate/benchmarks](https://oumuamua.dev/hekate/benchmarks),
-in zero-knowledge and base mode (`HEKATE_ZK=0`), with the machine, the build features and the command behind
+in zero-knowledge and base mode (`--no-zk`), with the machine, the build features and the command behind
 each run.
 
 ---

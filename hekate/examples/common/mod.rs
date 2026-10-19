@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use hekate_core::config::{CodeRate, Config};
 use hekate_core::proofs::InnerProof;
 use hekate_math::TowerField;
 use hekate_program::Program;
@@ -13,6 +14,47 @@ use tracing_subscriber::fmt::format::FmtSpan;
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[derive(clap::Parser)]
+pub struct RunArgs {
+    /// Code rate of the pool commitment: 1/2 or 1/4.
+    #[arg(long, default_value = "1/2", value_parser = parse_rate)]
+    rate: CodeRate,
+
+    /// Prove in the clear instead of in zero knowledge.
+    #[arg(long)]
+    no_zk: bool,
+
+    /// The audited program_id a deployment pins, 64 lowercase hex chars.
+    /// Unset, the run derives its own and the verifier's drift check cannot fire.
+    #[arg(long, value_parser = parse_id)]
+    program_id: Option<[u8; 32]>,
+}
+
+impl RunArgs {
+    /// The `Config` this run proves and verifies under.
+    pub fn config(&self) -> Config {
+        Config {
+            zero_knowledge: !self.no_zk,
+            ..Config::prod_at(self.rate)
+        }
+    }
+
+    /// The `program_id` the verifier pins this run to.
+    pub fn audited_id<F: TowerField, P: Program<F>>(&self, program: &P) -> [u8; 32] {
+        match self.program_id {
+            Some(pinned) => pinned,
+            None => {
+                println!(
+                    "program_id: {}",
+                    program_id_hex(program).expect("program_id_hex")
+                );
+
+                program_id(program).expect("program_id")
+            }
+        }
+    }
+}
 
 pub fn init(name: &str) {
     let _ = tracing_subscriber::fmt()
@@ -122,7 +164,7 @@ where
     let eval_sc_sz = enc_size(&proof.eval_proof.sumcheck_proof, bin_cfg);
     let eval_tensor_sz = enc_size(&proof.eval_proof.tensor_vec, bin_cfg);
     let eval_master_sz = enc_size(&proof.eval_proof.masters, bin_cfg);
-    let ldt_batch_sz = enc_size(&proof.eval_proof.ldt_proof.batch_path, bin_cfg);
+    let ldt_batch_sz = enc_size(&proof.eval_proof.ldt_proof.multiproof, bin_cfg);
     let ldt_opened_sz = enc_size(&proof.eval_proof.ldt_proof.opened_columns, bin_cfg);
     let eval_h_sz = enc_size(&proof.eval_proof.h_ldt_proof, bin_cfg);
 
@@ -225,9 +267,9 @@ where
         enc_size(&outer.pad_opening.columns, cfg) + enc_size(&outer.aux_opening.columns, cfg);
 
     let pad_values_sz = enc_size(&outer.pad_opening.values, cfg);
-    let pad_path_sz = enc_size(&outer.pad_opening.siblings, cfg);
+    let pad_path_sz = enc_size(&outer.pad_opening.multiproof, cfg);
     let aux_values_sz = enc_size(&outer.aux_opening.values, cfg);
-    let aux_path_sz = enc_size(&outer.aux_opening.siblings, cfg);
+    let aux_path_sz = enc_size(&outer.aux_opening.multiproof, cfg);
 
     println!("  Outer Argument (zk-Ligero):");
     println!("    AUX Root:             {:>8} bytes", aux_root_sz);
@@ -254,39 +296,16 @@ pub fn result(is_valid: bool) {
     }
 }
 
-/// `HEKATE_ZK=0` proves in the clear,
-/// anything else in zero knowledge.
-pub fn zero_knowledge() -> bool {
-    std::env::var("HEKATE_ZK").as_deref() != Ok("0")
+fn parse_rate(s: &str) -> Result<CodeRate, String> {
+    match s {
+        "1/2" => Ok(CodeRate::Half),
+        "1/4" => Ok(CodeRate::Quarter),
+        _ => Err(format!("expected 1/2 or 1/4, got {s}")),
+    }
 }
 
-#[allow(dead_code)]
-pub fn num_vars(default: usize) -> usize {
-    std::env::var("HEKATE_NUM_VARS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
-
-#[allow(dead_code)]
-pub fn level(default: &str) -> String {
-    std::env::var("HEKATE_LEVEL").unwrap_or_else(|_| default.to_string())
-}
-
-/// `HEKATE_PROGRAM_ID=<64 hex>` is the audited constant
-/// a deployment pins. Unset, the run derives its own
-/// and the verifier's drift check cannot fire.
-pub fn audited_id<F: TowerField, P: Program<F>>(program: &P) -> [u8; 32] {
-    let Ok(pinned) = std::env::var("HEKATE_PROGRAM_ID") else {
-        println!(
-            "program_id: {}",
-            program_id_hex(program).expect("program_id_hex")
-        );
-
-        return program_id(program).expect("program_id");
-    };
-
-    decode_id(&pinned).expect("HEKATE_PROGRAM_ID must be 64 lowercase hex chars")
+fn parse_id(s: &str) -> Result<[u8; 32], String> {
+    decode_id(s).ok_or_else(|| "expected 64 lowercase hex chars".to_string())
 }
 
 fn decode_id(s: &str) -> Option<[u8; 32]> {

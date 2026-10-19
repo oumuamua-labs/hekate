@@ -5,11 +5,11 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
@@ -110,15 +110,14 @@ fn generate_combined_trace(
 }
 
 fn main() {
+    let args = common::RunArgs::parse();
+
     common::init("ROM Chiplet");
 
     let num_vars = 20;
     let num_rows = 1 << num_vars;
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -154,8 +153,8 @@ fn main() {
     common::proof_breakdown(&proof);
 
     let mut verifier_transcript = Transcript::<H>::new(b"ROM_Example");
-    let pinned_id = common::audited_id(&air);
 
+    let pinned_id = args.audited_id(&air);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

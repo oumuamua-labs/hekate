@@ -109,8 +109,7 @@ where
 
     transcript.append_field_list(b"outer_p0", &outer.quadratic);
 
-    let columns =
-        protocol::challenge_outer_queries::<F, H>(transcript, geom.queries, geom.domain_len)?;
+    let columns = protocol::challenge_outer_queries(transcript, geom.queries, geom.domain_len)?;
 
     let aux_rows = layout.total_rows() - layout.pad_rows;
 
@@ -131,22 +130,8 @@ where
     let openings = || {
         trace_span!("openings").in_scope(|| {
             let (pad, aux) = join(
-                || {
-                    verify_opening::<F, H>(
-                        pad_root,
-                        geom.domain_len,
-                        layout.pad_rows,
-                        &outer.pad_opening,
-                    )
-                },
-                || {
-                    verify_opening::<F, H>(
-                        &outer.aux_root,
-                        geom.domain_len,
-                        aux_rows,
-                        &outer.aux_opening,
-                    )
-                },
+                || verify_opening::<F, H>(pad_root, &geom, layout.pad_rows, &outer.pad_opening),
+                || verify_opening::<F, H>(&outer.aux_root, &geom, aux_rows, &outer.aux_opening),
             );
 
             pad && aux

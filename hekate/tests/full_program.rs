@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use hekate::core::config::Config;
+use hekate::core::config::{CodeRate, Config};
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
@@ -463,4 +463,52 @@ proptest! {
 
         prop_assert!(ok, "Program verification failed for num_vars={num_vars}");
     }
+}
+
+#[test]
+fn quarter_rate_proof_verifies_at_derived_count() {
+    let num_vars = 12;
+    let num_rows = 1 << num_vars;
+
+    let trace = generate_fib_trace(num_vars);
+    let expected_pub = trace.get_element(1, num_rows - 1).unwrap().to_tower();
+    let instance = ProgramInstance::new(num_rows, vec![expected_pub]);
+    let air = fib_program(num_rows);
+
+    let quarter = Config::prod_at(CodeRate::Quarter);
+
+    assert_eq!(quarter.num_queries, 153);
+
+    let proof = prove(
+        b"FibAir_Quarter",
+        &air,
+        &instance,
+        &ProgramWitness::new(trace),
+        &quarter,
+        [0x4B; 32],
+        None,
+    )
+    .unwrap();
+
+    let verify = |config: &Config| {
+        HekateVerifier::<F, H>::verify(
+            &program_id(&air).unwrap(),
+            &air,
+            &instance,
+            &proof,
+            &mut Transcript::<H>::new(b"FibAir_Quarter"),
+            config,
+        )
+    };
+
+    assert!(matches!(verify(&quarter), Ok(true)));
+    assert!(!matches!(verify(&Config::prod()), Ok(true)));
+
+    let half_rate = Config {
+        code_rate: CodeRate::Half,
+        min_security_bits: 0,
+        ..quarter
+    };
+
+    assert!(matches!(verify(&half_rate), Ok(false)));
 }

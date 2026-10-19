@@ -2083,3 +2083,95 @@ fn one_live_row_clears_the_inert_report() {
 
     assert!(report.is_clean());
 }
+
+// =================================================================
+// BUS CHUNK BOUNDARY
+// (a Lookup bus live on every row of a 2^13 table: a mismatch
+//  past the first 4,096-row chunk reports its own row index)
+// =================================================================
+
+#[derive(Clone)]
+struct CpuWithFullLookup;
+
+fn full_lookup_spec() -> PermutationCheckSpec {
+    PermutationCheckSpec::new_lookup(
+        vec![
+            (Source::Column(BusCols::ADDR), b"k0"),
+            (Source::Column(BusCols::VAL), b"k1"),
+        ],
+        None,
+    )
+}
+
+impl Air<F> for CpuWithFullLookup {
+    fn num_columns(&self) -> usize {
+        BusCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(BusCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![("lookup_bus".to_string(), full_lookup_spec())]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+impl Program<F> for CpuWithFullLookup {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
+        Ok(vec![ChipletDef::from_air(&MemFullLookupChiplet)?])
+    }
+}
+
+#[derive(Clone)]
+struct MemFullLookupChiplet;
+
+impl Air<F> for MemFullLookupChiplet {
+    fn num_columns(&self) -> usize {
+        BusCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(BusCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![("lookup_bus".to_string(), full_lookup_spec())]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+#[test]
+fn lookup_mismatch_past_first_bus_chunk() {
+    let num_vars = 13;
+    let num_rows = 1 << num_vars;
+
+    let (cpu_trace, mut mem_trace) = matching_bus_traces(num_vars, num_rows);
+
+    let TraceColumn::B32(val) = &mut mem_trace.columns[BusCols::VAL] else {
+        panic!("VAL is a B32 column");
+    };
+
+    val[4100] = Block32::from(7u32).to_hardware();
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let witness = ProgramWitness::<F>::new(cpu_trace).with_chiplets(vec![mem_trace]);
+
+    let report = preflight(&CpuWithFullLookup, &instance, &witness).unwrap();
+
+    assert_eq!(report.bus_diagnostics.len(), 1);
+
+    let d = &report.bus_diagnostics[0];
+
+    assert!(d.bus_imbalance);
+    assert_eq!(d.mismatching_rows, [4100]);
+}

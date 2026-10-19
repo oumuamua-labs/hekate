@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 use hekate_gadgets::atoms::int_arith::{
     ModAddLayout, ModAddWitness, ModReductionLayout, ModReductionWitness, SchoolbookMulLayout,
-    SchoolbookMulWitness, mod_reduction, schoolbook_mul,
+    SchoolbookMulWitness, borrow_out, mod_reduction, schoolbook_mul,
 };
 use hekate_math::TowerField;
 use hekate_program::constraint::builder::{ConstraintSystem, Expr};
@@ -13,24 +13,18 @@ use hekate_program::constraint::builder::{ConstraintSystem, Expr};
 /// Columns of one modular-addition gadget.
 #[derive(Clone, Debug)]
 pub struct ModAddCols {
-    pub lhs_result: usize,
-    pub lhs_carry: usize,
-    pub rhs_result: usize,
-    pub rhs_carry: usize,
+    pub carry: usize,
+    pub borrow: usize,
     pub flag: usize,
-    pub range_result: usize,
     pub range_borrow: usize,
 }
 
 impl ModAddCols {
     pub(crate) fn alloc(add: &ModAddLayout, alloc: &mut impl FnMut(usize) -> usize) -> Self {
         Self {
-            lhs_result: alloc(add.result_width),
-            lhs_carry: alloc(add.carry_width),
-            rhs_result: alloc(add.result_width),
-            rhs_carry: alloc(add.carry_width),
+            carry: alloc(add.carry_width),
+            borrow: alloc(add.borrow_width),
             flag: alloc(1),
-            range_result: alloc(add.range_result_width),
             range_borrow: alloc(add.range_borrow_width),
         }
     }
@@ -48,7 +42,6 @@ pub struct MulModCols {
     pub red_results: Vec<(usize, usize)>,
     pub red_carries: Vec<(usize, usize)>,
     pub red_add_carry: (usize, usize),
-    pub red_range_result: (usize, usize),
     pub red_range_borrow: (usize, usize),
 }
 
@@ -68,7 +61,7 @@ impl MulModCols {
 
         let quot = span(bw);
         let rem = span(bw);
-        let quot_x_q = span(red.product_width);
+        let quot_x_q = span(red.quot_x_mod_width);
 
         let red_results = red
             .mul_layout
@@ -95,7 +88,6 @@ impl MulModCols {
             red_results,
             red_carries,
             red_add_carry: span(red.add_carry_width),
-            red_range_result: span(red.range_result_width),
             red_range_borrow: span(red.range_borrow_width),
         }
     }
@@ -146,7 +138,6 @@ impl MulModCols {
                 mul_scratch_results: &result_refs,
                 mul_scratch_carries: &carry_refs,
                 add_carry_bits: &span(self.red_add_carry),
-                range_result_bits: &span(self.red_range_result),
                 range_borrow_bits: &span(self.red_range_borrow),
             },
             q,
@@ -157,36 +148,27 @@ impl MulModCols {
 }
 
 pub(crate) struct ModAddExprs<'a, F: TowerField> {
-    lhs_result: Vec<Expr<'a, F>>,
-    lhs_carry: Vec<Expr<'a, F>>,
-    rhs_result: Vec<Expr<'a, F>>,
-    rhs_carry: Vec<Expr<'a, F>>,
+    carry: Vec<Expr<'a, F>>,
+    borrow: Vec<Expr<'a, F>>,
     flag: Expr<'a, F>,
-    range_result: Vec<Expr<'a, F>>,
     range_borrow: Vec<Expr<'a, F>>,
 }
 
 impl<'a, F: TowerField> ModAddExprs<'a, F> {
     pub(crate) fn new(cs: &'a ConstraintSystem<F>, cols: &ModAddCols, add: &ModAddLayout) -> Self {
         Self {
-            lhs_result: bits(cs, cols.lhs_result, add.result_width),
-            lhs_carry: bits(cs, cols.lhs_carry, add.carry_width),
-            rhs_result: bits(cs, cols.rhs_result, add.result_width),
-            rhs_carry: bits(cs, cols.rhs_carry, add.carry_width),
+            carry: bits(cs, cols.carry, add.carry_width),
+            borrow: bits(cs, cols.borrow, add.borrow_width),
             flag: cs.col(cols.flag),
-            range_result: bits(cs, cols.range_result, add.range_result_width),
             range_borrow: bits(cs, cols.range_borrow, add.range_borrow_width),
         }
     }
 
     pub(crate) fn witness(&self) -> ModAddWitness<'a, '_, F> {
         ModAddWitness {
-            lhs_result: &self.lhs_result,
-            lhs_carry: &self.lhs_carry,
-            rhs_result: &self.rhs_result,
-            rhs_carry: &self.rhs_carry,
+            carry: &self.carry,
+            borrow: &self.borrow,
             flag: self.flag,
-            range_result: &self.range_result,
             range_borrow: &self.range_borrow,
         }
     }
@@ -229,41 +211,19 @@ pub(crate) fn padded<'a, F: TowerField>(
         .collect()
 }
 
-/// `a + b = sum` over bits only; emits no booleanity
-/// root and leaves `carry[a.len()]` to the caller.
-pub(crate) fn carry_chain<'a, F: TowerField>(
-    cs: &'a ConstraintSystem<F>,
-    a: &[Expr<'a, F>],
-    b: &[Expr<'a, F>],
-    sum: &[Expr<'a, F>],
-    carry: &[Expr<'a, F>],
-) {
-    cs.constrain(carry[0]);
-
-    for i in 0..a.len() {
-        let (x, y, c) = (a[i], b[i], carry[i]);
-
-        cs.constrain(sum[i] + x + y + c);
-        cs.constrain(carry[i + 1] + x * y + x * c + y * c);
-    }
-}
-
-/// `a − b = diff` over bits only; emits no booleanity
-/// root and leaves `borrow[a.len()]` to the caller.
+/// Borrows of `a − b` over bits only: `borrow[k]` is the
+/// borrow out of bit `k`; no result cells, no booleanity root.
 pub(crate) fn borrow_chain<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     a: &[Expr<'a, F>],
     b: &[Expr<'a, F>],
-    diff: &[Expr<'a, F>],
     borrow: &[Expr<'a, F>],
 ) {
-    cs.constrain(borrow[0]);
+    let mut borrow_in = None;
+    for ((&x, &y), &w) in a.iter().zip(b).zip(borrow) {
+        cs.constrain(w + borrow_out(cs, x, y, borrow_in));
 
-    for i in 0..a.len() {
-        let (x, y, w) = (a[i], b[i], borrow[i]);
-
-        cs.constrain(diff[i] + x + y + w);
-        cs.constrain(borrow[i + 1] + y + x * y + w + x * w + y * w);
+        borrow_in = Some(w);
     }
 }
 

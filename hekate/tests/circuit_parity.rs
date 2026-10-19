@@ -470,13 +470,7 @@ impl Air<F> for HandFibRaw {
             .map(|i| cs.col(FibIntVirt::CARRY_BITS + i))
             .collect();
 
-        let zero = cs.constant(F::ZERO);
-
-        let mut carry = Vec::with_capacity(33);
-        carry.push(zero);
-        carry.extend(carry_v.iter().copied());
-
-        int_arith::add_carry_chain_with_carry_in(&cs, &a_bits, &b_bits, &sum_bits, &carry);
+        int_arith::add_carry_chain(&cs, &a_bits, &b_bits, &sum_bits, &carry_v);
 
         let q = cs.col(FibIntVirt::Q);
         let b_packed = cs.col(FibIntVirt::B_PACKED);
@@ -514,13 +508,7 @@ fn circuit_fib_raw(num_rows: usize) -> CircuitProgram<F> {
     let sum_bits: Vec<_> = words.bits(2).iter().map(|c| cs.col(c.index())).collect();
     let carry_v: Vec<_> = words.bits(3).iter().map(|c| cs.col(c.index())).collect();
 
-    let zero = cs.constant(F::ZERO);
-
-    let mut carry = Vec::with_capacity(33);
-    carry.push(zero);
-    carry.extend(carry_v.iter().copied());
-
-    int_arith::add_carry_chain_with_carry_in(cs, &a_bits, &b_bits, &sum_bits, &carry);
+    int_arith::add_carry_chain(cs, &a_bits, &b_bits, &sum_bits, &carry_v);
 
     let q_cell = cs.col(q.index());
     let b_packed = cs.col(b_packed_col.index());

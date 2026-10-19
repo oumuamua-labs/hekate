@@ -5,6 +5,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
 use hekate::math::{Bit, Block8, Block128, TowerField};
@@ -14,7 +15,6 @@ use hekate_aes::{
     host_selector_shape,
     trace::{Aes128Call, Aes256Call, expand_key, expand_key_256},
 };
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
@@ -53,6 +53,24 @@ const FIPS256_KEY: [u8; 32] = [
 // =================================================================
 
 const CPU_IO_PER_BLOCK: usize = 2;
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Level {
+    #[value(name = "128")]
+    Aes128,
+    #[value(name = "256")]
+    Aes256,
+}
+
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// AES key size in bits.
+    #[arg(long, value_enum, default_value = "128")]
+    level: Level,
+}
 
 fn build_aes128_program(
     cpu_rows: usize,
@@ -138,6 +156,7 @@ fn extract_ciphertext(
 }
 
 fn prove_and_verify<P: Program<F>>(
+    run: &common::RunArgs,
     air: &P,
     cpu_rows: usize,
     cpu_trace: ColumnTrace,
@@ -146,10 +165,7 @@ fn prove_and_verify<P: Program<F>>(
 ) {
     // Phase 3:
     // Prove
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = run.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -174,7 +190,7 @@ fn prove_and_verify<P: Program<F>>(
 
     // Phase 4:
     // Verify
-    let pinned_id = common::audited_id(air);
+    let pinned_id = run.audited_id(air);
     let is_valid = common::phase_with_mem("Verifying", || {
         let mut vt = Transcript::<H>::new(transcript_label);
         HekateVerifier::<F, H>::verify(&pinned_id, air, &instance, &proof, &mut vt, &config)
@@ -237,7 +253,7 @@ fn print_sample_blocks(plaintexts: &[[u8; 16]], ciphertexts: &[[u8; 16]]) {
 // 4. AES-128 PIPELINE
 // =================================================================
 
-fn run_aes128() {
+fn run_aes128(run: &common::RunArgs) {
     const ROWS_PER_BLOCK: usize = 11;
     const SBOX_ROUNDS: usize = 10;
 
@@ -290,7 +306,14 @@ fn run_aes128() {
         (air, cpu_trace, chiplet_traces)
     });
 
-    prove_and_verify(&air, cpu_rows, cpu_trace, chiplet_traces, b"AES128_Example");
+    prove_and_verify(
+        run,
+        &air,
+        cpu_rows,
+        cpu_trace,
+        chiplet_traces,
+        b"AES128_Example",
+    );
 }
 
 fn build_cpu128_trace(
@@ -341,7 +364,7 @@ fn build_cpu128_trace(
 // 5. AES-256 PIPELINE
 // =================================================================
 
-fn run_aes256() {
+fn run_aes256(run: &common::RunArgs) {
     const ROWS_PER_BLOCK: usize = 15;
     const SBOX_ROUNDS: usize = 14;
 
@@ -394,7 +417,14 @@ fn run_aes256() {
         (air, cpu_trace, chiplet_traces)
     });
 
-    prove_and_verify(&air, cpu_rows, cpu_trace, chiplet_traces, b"AES256_Example");
+    prove_and_verify(
+        run,
+        &air,
+        cpu_rows,
+        cpu_trace,
+        chiplet_traces,
+        b"AES256_Example",
+    );
 }
 
 fn build_cpu256_trace(
@@ -445,20 +475,16 @@ fn build_cpu256_trace(
 // =================================================================
 
 fn main() {
-    let level = common::level("128");
+    let args = Args::parse();
 
-    match level.as_str() {
-        "128" => {
+    match args.level {
+        Level::Aes128 => {
             common::init("AES-128 Chiplet");
-            run_aes128();
+            run_aes128(&args.run);
         }
-        "256" => {
+        Level::Aes256 => {
             common::init("AES-256 Chiplet");
-            run_aes256();
-        }
-        other => {
-            eprintln!("Usage: HEKATE_LEVEL=[128|256] aes (got {:?})", other);
-            std::process::exit(1);
+            run_aes256(&args.run);
         }
     }
 }

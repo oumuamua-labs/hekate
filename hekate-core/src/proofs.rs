@@ -6,6 +6,7 @@ use crate::poly::univariate::UnivariatePoly;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use hekate_crypto::merkle::Multiproof;
 use hekate_math::TowerField;
 use serde::{Deserialize, Serialize};
 
@@ -95,7 +96,7 @@ impl<F: TowerField> InnerProof<F> {
 pub struct OuterOpening<F: TowerField> {
     pub columns: Vec<u32>,
     pub values: Vec<F>,
-    pub siblings: Vec<[u8; 32]>,
+    pub multiproof: Multiproof,
 }
 
 /// The zk-Ligero segment after the base protocol:
@@ -116,7 +117,7 @@ pub struct OuterProof<F: TowerField> {
 // ===================================
 
 /// LDT opening payload for one Brakedown commitment:
-/// the opened encoded columns and one octopus multiproof
+/// the opened encoded columns and one multiproof
 /// that a verifier replays against the commitment root.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BrakedownProof<F: TowerField> {
@@ -125,18 +126,17 @@ pub struct BrakedownProof<F: TowerField> {
     /// Only encoded code bytes, data stays private.
     pub opened_columns: Vec<Vec<u8>>,
 
-    /// Octopus multiproof: pruned Merkle sibling
-    /// set covering all queried columns.
-    pub batch_path: Vec<[u8; 32]>,
+    /// Opens every queried column against the root.
+    pub multiproof: Multiproof,
 
     _marker: PhantomData<F>,
 }
 
 impl<F: TowerField> BrakedownProof<F> {
-    pub fn new(opened_columns: Vec<Vec<u8>>, batch_path: Vec<[u8; 32]>) -> Self {
+    pub fn new(opened_columns: Vec<Vec<u8>>, multiproof: Multiproof) -> Self {
         Self {
             opened_columns,
-            batch_path,
+            multiproof,
             _marker: PhantomData,
         }
     }

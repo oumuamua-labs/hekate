@@ -80,6 +80,14 @@ pub enum Source {
     EmitRank(Side),
 }
 
+/// ZeroCheck weights of one bus: its consistency
+/// term, and its bus-sum term with its claimed sum.
+#[derive(Clone, Copy)]
+pub struct BusWeights<F: HardwareField> {
+    pub consistency: Flat<F>,
+    pub bus_sum: Flat<F>,
+}
+
 /// One endpoint of a LogUp bus.
 ///
 /// Per row `i`:
@@ -560,6 +568,21 @@ where
     acc
 }
 
+/// Bus `k` from `start = α^o`: consistency at `α^(o+2k)`, bus-sum at
+/// `α^(o+2k+1)`. One shared power pins only the sum of the two terms,
+/// and a constant consistency residual then moves the claimed sum.
+pub fn bus_alpha_weights<F: HardwareField>(
+    start: Flat<F>,
+    alpha: Flat<F>,
+) -> impl Iterator<Item = BusWeights<F>> {
+    let alpha_sq = alpha * alpha;
+
+    core::iter::successors(Some(start), move |&w| Some(w * alpha_sq)).map(move |w| BusWeights {
+        consistency: w,
+        bus_sum: w * alpha,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,5 +855,20 @@ mod tests {
         substituted[1].shape = FixedShape::LastRow;
 
         assert!(validate_fixed_selectors(&specs, &substituted).is_err());
+    }
+
+    #[test]
+    fn bus_alpha_weights_take_consecutive_powers() {
+        let alpha = Block128::from(0x9E37_79B9u128).to_hardware();
+        let start = Block128::from(0x1234u128).to_hardware();
+
+        let mut expected = start;
+        for w in bus_alpha_weights(start, alpha).take(4) {
+            assert_eq!(w.consistency, expected);
+            expected *= alpha;
+
+            assert_eq!(w.bus_sum, expected);
+            expected *= alpha;
+        }
     }
 }

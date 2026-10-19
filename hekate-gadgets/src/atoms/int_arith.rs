@@ -2,31 +2,114 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Emulated integer arithmetic over binary tower fields.
-//!
-//! GF(2^k) addition is XOR with no integer carry.
-//! Proving mod-q operations requires bit-decomposed
-//! operands with explicit carry/borrow chain constraints.
+//! Integer arithmetic over binary tower fields as carry and
+//! borrow chains over bit cells. Every bit slice must be a
+//! cell that holds only 0 or 1; no atom asserts booleanity.
+//! A bit expanded from a packed word qualifies; a `Bit`
+//! column read whole does not and needs `assert_boolean`.
 
 use alloc::vec::Vec;
 use hekate_math::TowerField;
 use hekate_program::constraint::builder::{ConstraintSystem, Expr};
 
-/// Constrain n-bit unsigned addition:
-/// a + b = result.
-///
-/// GF(2) carry chain:
-/// `result[i] = a[i] + b[i] + carry[i]`,
-/// `carry[i+1] = a[i]*b[i] + a[i]*carry[i] + b[i]*carry[i]`.
-///
-/// `carry_bits[0]` forced to zero;
-/// `carry_bits[n]` is overflow.
-///
-/// Bit slices:
-/// length n.
-///
-/// Carry slice:
-/// length n+1.
+/// Signed digit `±2^shift` of a non-adjacent form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NafDigit {
+    pub shift: usize,
+    pub negative: bool,
+}
+
+/// Layout for `mul_const` scratch allocation.
+#[derive(Clone, Debug)]
+pub struct MulConstLayout {
+    pub digits: Vec<NafDigit>,
+    pub scratch_result_widths: Vec<usize>,
+    pub scratch_carry_widths: Vec<usize>,
+    pub result_width: usize,
+}
+
+/// Layout for modular reduction scratch allocation.
+#[derive(Clone, Debug)]
+pub struct ModReductionLayout {
+    pub mul_layout: MulConstLayout,
+    pub quot_x_mod_width: usize,
+    pub add_carry_width: usize,
+    pub range_borrow_width: usize,
+}
+
+/// Witness columns for modular reduction.
+pub struct ModReductionWitness<'a, 'b, F: TowerField> {
+    pub quot_x_mod_bits: &'b [Expr<'a, F>],
+    pub mul_scratch_results: &'b [&'b [Expr<'a, F>]],
+    pub mul_scratch_carries: &'b [&'b [Expr<'a, F>]],
+    pub add_carry_bits: &'b [Expr<'a, F>],
+    pub range_borrow_bits: &'b [Expr<'a, F>],
+}
+
+/// Layout for schoolbook multiplication scratch allocation.
+#[derive(Clone, Debug)]
+pub struct SchoolbookMulLayout {
+    pub pp0_width: usize,
+    pub sum_widths: Vec<usize>,
+    pub carry_widths: Vec<usize>,
+    pub product_width: usize,
+}
+
+/// Witness columns for schoolbook multiplication.
+pub struct SchoolbookMulWitness<'a, 'b, F: TowerField> {
+    pub pp0: &'b [Expr<'a, F>],
+    pub sums: &'b [&'b [Expr<'a, F>]],
+    pub carries: &'b [&'b [Expr<'a, F>]],
+}
+
+/// Witness columns for modular addition.
+pub struct ModAddWitness<'a, 'b, F: TowerField> {
+    pub carry: &'b [Expr<'a, F>],
+    pub borrow: &'b [Expr<'a, F>],
+    pub flag: Expr<'a, F>,
+    pub range_borrow: &'b [Expr<'a, F>],
+}
+
+/// Scratch layout for modular addition.
+#[derive(Clone, Debug)]
+pub struct ModAddLayout {
+    pub carry_width: usize,
+    pub borrow_width: usize,
+    pub range_borrow_width: usize,
+}
+
+/// Majority of `a`, `b`, `c` as `(a + c)(b + c) + c`;
+/// exact on boolean `c` only.
+pub fn carry_out<'a, F: TowerField>(
+    a: Expr<'a, F>,
+    b: Expr<'a, F>,
+    carry_in: Option<Expr<'a, F>>,
+) -> Expr<'a, F> {
+    match carry_in {
+        Some(c) => (a + c) * (b + c) + c,
+        None => a * b,
+    }
+}
+
+/// Borrow of `a - b` with borrow-in `w` as
+/// `(1 + a + w)(b + w) + w`; exact on boolean `w` only.
+pub fn borrow_out<'a, F: TowerField>(
+    cs: &'a ConstraintSystem<F>,
+    a: Expr<'a, F>,
+    b: Expr<'a, F>,
+    borrow_in: Option<Expr<'a, F>>,
+) -> Expr<'a, F> {
+    let one = cs.one();
+
+    match borrow_in {
+        Some(w) => (one + a + w) * (b + w) + w,
+        None => (one + a) * b,
+    }
+}
+
+/// Constrain n-bit addition `a + b = result`.
+/// `carry_bits[k]` is the carry out of position k;
+/// `carry_bits[n-1]` is the overflow, left to the caller.
 pub fn add_carry_chain<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     a_bits: &[Expr<'a, F>],
@@ -34,163 +117,32 @@ pub fn add_carry_chain<'a, F: TowerField>(
     result_bits: &[Expr<'a, F>],
     carry_bits: &[Expr<'a, F>],
 ) {
-    let n = a_bits.len();
-    assert_eq!(
-        b_bits.len(),
-        n,
-        "add_carry_chain: b_bits length {} != a_bits length {n}",
-        b_bits.len()
-    );
-    assert_eq!(
-        result_bits.len(),
-        n,
-        "add_carry_chain: result_bits length {} != operand width {n}",
-        result_bits.len()
-    );
-    assert_eq!(
-        carry_bits.len(),
-        n + 1,
-        "add_carry_chain: carry_bits length {} != n+1 ({})",
-        carry_bits.len(),
-        n + 1
-    );
-
-    // carry[0] = 0
-    cs.constrain(carry_bits[0]);
-
-    for i in 0..n {
-        let a = a_bits[i];
-        let b = b_bits[i];
-        let c = carry_bits[i];
-        let r = result_bits[i];
-        let c_next = carry_bits[i + 1];
-
-        cs.assert_boolean(r);
-        cs.assert_boolean(c_next);
-
-        cs.constrain(r + a + b + c);
-        cs.constrain(c_next + a * b + a * c + b * c);
-    }
+    chain(cs, None, a_bits, b_bits, result_bits, carry_bits, false);
 }
 
-/// Like `add_carry_chain` but `carry_bits[0]`
-/// is not forced to zero, caller controls
-/// the initial carry for multi-word chaining.
+/// `add_carry_chain` with `carry_in` feeding position 0.
 pub fn add_carry_chain_with_carry_in<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
+    carry_in: Expr<'a, F>,
     a_bits: &[Expr<'a, F>],
     b_bits: &[Expr<'a, F>],
     result_bits: &[Expr<'a, F>],
     carry_bits: &[Expr<'a, F>],
 ) {
-    let n = a_bits.len();
-
-    assert_eq!(
-        b_bits.len(),
-        n,
-        "add_carry_chain_with_carry_in: b_bits length {} != a_bits length {n}",
-        b_bits.len()
+    chain(
+        cs,
+        Some(carry_in),
+        a_bits,
+        b_bits,
+        result_bits,
+        carry_bits,
+        false,
     );
-    assert_eq!(
-        result_bits.len(),
-        n,
-        "add_carry_chain_with_carry_in: result_bits length {} != operand width {n}",
-        result_bits.len()
-    );
-    assert_eq!(
-        carry_bits.len(),
-        n + 1,
-        "add_carry_chain_with_carry_in: carry_bits length {} != n+1 ({})",
-        carry_bits.len(),
-        n + 1
-    );
-
-    for i in 0..n {
-        let a = a_bits[i];
-        let b = b_bits[i];
-        let c = carry_bits[i];
-        let r = result_bits[i];
-        let c_next = carry_bits[i + 1];
-
-        cs.assert_boolean(r);
-        cs.assert_boolean(c_next);
-
-        cs.constrain(r + a + b + c);
-        cs.constrain(c_next + a * b + a * c + b * c);
-    }
 }
 
-/// Like `add_carry_chain_with_carry_in` but
-/// every emitted constraint is multiplied by
-/// `selector`. Use for multi-opcode chiplets
-/// where ADD applies only on `selector = 1` rows.
-pub fn add_carry_chain_with_carry_in_gated<'a, F: TowerField>(
-    cs: &'a ConstraintSystem<F>,
-    selector: Expr<'a, F>,
-    a_bits: &[Expr<'a, F>],
-    b_bits: &[Expr<'a, F>],
-    result_bits: &[Expr<'a, F>],
-    carry_bits: &[Expr<'a, F>],
-) {
-    let n = a_bits.len();
-
-    assert_eq!(
-        b_bits.len(),
-        n,
-        "add_carry_chain_with_carry_in_gated: b_bits length {} != a_bits length {n}",
-        b_bits.len()
-    );
-    assert_eq!(
-        result_bits.len(),
-        n,
-        "add_carry_chain_with_carry_in_gated: result_bits length {} != operand width {n}",
-        result_bits.len()
-    );
-    assert_eq!(
-        carry_bits.len(),
-        n + 1,
-        "add_carry_chain_with_carry_in_gated: carry_bits length {} != n+1 ({})",
-        carry_bits.len(),
-        n + 1
-    );
-
-    let one = cs.one();
-
-    for i in 0..n {
-        let a = a_bits[i];
-        let b = b_bits[i];
-        let c = carry_bits[i];
-        let r = result_bits[i];
-        let c_next = carry_bits[i + 1];
-
-        cs.assert_zero_when(selector, r * (r + one));
-        cs.assert_zero_when(selector, c_next * (c_next + one));
-
-        cs.assert_zero_when(selector, r + a + b + c);
-        cs.assert_zero_when(selector, c_next + a * b + a * c + b * c);
-    }
-}
-
-// =====================================================================
-// Integer Subtraction (Borrow Chain)
-// =====================================================================
-
-/// Constrain n-bit unsigned subtraction:
-/// a - b = result.
-///
-/// GF(2) borrow chain (!a = a+1):
-/// `result[i] = a[i] + b[i] + borrow[i]`,
-/// `borrow[i+1] = b[i] + a[i]*b[i] + borrow[i]`
-///   `+ a[i]*borrow[i] + b[i]*borrow[i]`.
-///
-/// `borrow_bits[0]` forced to zero;
-/// `borrow_bits[n] = 1` means underflow (a < b).
-///
-/// Bit slices:
-/// length n.
-///
-/// Borrow slice:
-/// length n+1.
+/// Constrain n-bit subtraction `a - b = result`.
+/// `borrow_bits[k]` is the borrow out of position k;
+/// `borrow_bits[n-1] = 1` means `a < b`, left to the caller.
 pub fn sub_borrow_chain<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     a_bits: &[Expr<'a, F>],
@@ -198,111 +150,15 @@ pub fn sub_borrow_chain<'a, F: TowerField>(
     result_bits: &[Expr<'a, F>],
     borrow_bits: &[Expr<'a, F>],
 ) {
-    let n = a_bits.len();
-
-    assert_eq!(
-        b_bits.len(),
-        n,
-        "sub_borrow_chain: b_bits length {} != a_bits length {n}",
-        b_bits.len()
-    );
-    assert_eq!(
-        result_bits.len(),
-        n,
-        "sub_borrow_chain: result_bits length {} != operand width {n}",
-        result_bits.len()
-    );
-    assert_eq!(
-        borrow_bits.len(),
-        n + 1,
-        "sub_borrow_chain: borrow_bits length {} != n+1 ({})",
-        borrow_bits.len(),
-        n + 1
-    );
-
-    // borrow[0] = 0
-    cs.constrain(borrow_bits[0]);
-
-    for i in 0..n {
-        let a = a_bits[i];
-        let b = b_bits[i];
-        let w = borrow_bits[i];
-        let r = result_bits[i];
-        let w_next = borrow_bits[i + 1];
-
-        cs.assert_boolean(r);
-        cs.assert_boolean(w_next);
-
-        cs.constrain(r + a + b + w);
-        cs.constrain(w_next + b + a * b + w + a * w + b * w);
-    }
+    chain(cs, None, a_bits, b_bits, result_bits, borrow_bits, true);
 }
 
-/// Like `sub_borrow_chain` but every emitted
-/// constraint is multiplied by `selector`.
-/// Use for multi-opcode chiplets where SUB
-/// applies only on `selector = 1` rows.
-pub fn sub_borrow_chain_gated<'a, F: TowerField>(
-    cs: &'a ConstraintSystem<F>,
-    selector: Expr<'a, F>,
-    a_bits: &[Expr<'a, F>],
-    b_bits: &[Expr<'a, F>],
-    result_bits: &[Expr<'a, F>],
-    borrow_bits: &[Expr<'a, F>],
-) {
-    let n = a_bits.len();
-
-    assert_eq!(
-        b_bits.len(),
-        n,
-        "sub_borrow_chain_gated: b_bits length {} != a_bits length {n}",
-        b_bits.len()
-    );
-    assert_eq!(
-        result_bits.len(),
-        n,
-        "sub_borrow_chain_gated: result_bits length {} != operand width {n}",
-        result_bits.len()
-    );
-    assert_eq!(
-        borrow_bits.len(),
-        n + 1,
-        "sub_borrow_chain_gated: borrow_bits length {} != n+1 ({})",
-        borrow_bits.len(),
-        n + 1
-    );
-
-    let one = cs.one();
-
-    cs.assert_zero_when(selector, borrow_bits[0]);
-
-    for i in 0..n {
-        let a = a_bits[i];
-        let b = b_bits[i];
-        let w = borrow_bits[i];
-        let r = result_bits[i];
-        let w_next = borrow_bits[i + 1];
-
-        cs.assert_zero_when(selector, r * (r + one));
-        cs.assert_zero_when(selector, w_next * (w_next + one));
-
-        cs.assert_zero_when(selector, r + a + b + w);
-        cs.assert_zero_when(selector, w_next + b + a * b + w + a * w + b * w);
-    }
-}
-
-// =====================================================================
-// Range Check
-// =====================================================================
-
-/// Constrain value < bound (unsigned).
-///
-/// Computes (bound-1), value via borrow chain;
-/// final borrow forced to zero proves value < bound.
+/// Constrain `value < bound` as the borrow chain of
+/// `(bound - 1) - value`: `borrow_bits` holds the borrows
+/// out of positions `0..n-1`, the last one is the root.
 pub fn range_check<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     value_bits: &[Expr<'a, F>],
-    result_bits: &[Expr<'a, F>],
     borrow_bits: &[Expr<'a, F>],
     bound: u32,
 ) {
@@ -310,60 +166,37 @@ pub fn range_check<'a, F: TowerField>(
 
     assert!(bound > 0, "range_check: bound must be > 0");
     assert_eq!(
-        result_bits.len(),
-        n,
-        "range_check: result_bits length {} != value width {n}",
-        result_bits.len()
-    );
-    assert_eq!(
         borrow_bits.len(),
-        n + 1,
-        "range_check: borrow_bits length {} != n+1 ({})",
+        n - 1,
+        "range_check: borrow_bits length {} != n-1 ({})",
         borrow_bits.len(),
-        n + 1
+        n - 1
     );
 
     let bound_minus_1 = bound - 1;
 
-    // borrow[0] = 0
-    cs.constrain(borrow_bits[0]);
+    let mut borrow_in: Option<Expr<'a, F>> = None;
+    for (k, &v) in value_bits.iter().enumerate() {
+        let minuend = match bound_minus_1.checked_shr(k as u32).unwrap_or(0) & 1 {
+            1 => cs.one(),
+            _ => cs.constant(F::ZERO),
+        };
 
-    for i in 0..n {
-        let bm1_bit = (bound_minus_1 >> i) & 1;
-        let v = value_bits[i];
-        let w = borrow_bits[i];
-        let r = result_bits[i];
-        let w_next = borrow_bits[i + 1];
+        let out = borrow_out(cs, minuend, v, borrow_in);
 
-        cs.assert_boolean(r);
-        cs.assert_boolean(w_next);
+        match borrow_bits.get(k) {
+            Some(&w) => {
+                cs.constrain(w + out);
 
-        if bm1_bit == 1 {
-            let one = cs.one();
-            cs.constrain(r + one + v + w);
-
-            // GF(2):
-            // pairs cancel → w_next + v*w
-            cs.constrain(w_next + v * w);
-        } else {
-            cs.constrain(r + v + w);
-            cs.constrain(w_next + v + w + v * w);
+                borrow_in = Some(w);
+            }
+            None => cs.constrain(out),
         }
     }
-
-    // Final borrow must be 0
-    cs.constrain(borrow_bits[n]);
 }
 
-// =====================================================================
-// Constant Multiplication
-// =====================================================================
-
-/// Constrain result = operand * constant
-/// (unsigned integer multiply).
-///
-/// Cascades additions of shifted operand
-/// copies, one per set bit of the constant.
+/// Constrain `result = operand * constant` as a cascade
+/// over the signed digits of `constant`, high to low.
 pub fn mul_const<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     operand_bits: &[Expr<'a, F>],
@@ -372,30 +205,39 @@ pub fn mul_const<'a, F: TowerField>(
     scratch_carries: &[&[Expr<'a, F>]],
     constant: u32,
 ) {
-    assert!(constant > 0, "mul_const: constant must be > 0");
-
     let n = operand_bits.len();
-    let set_bits: Vec<usize> = (0..32).filter(|&i| (constant >> i) & 1 == 1).collect();
-    let m = set_bits.len();
+    let layout = mul_const_scratch_widths(n, constant);
+    let digits = &layout.digits;
+    let m = digits.len();
+
+    assert_eq!(
+        result_bits.len(),
+        layout.result_width,
+        "mul_const: result_bits length {} != {}",
+        result_bits.len(),
+        layout.result_width
+    );
 
     if m == 0 {
-        for r in result_bits {
-            cs.constrain(*r);
+        for &r in result_bits {
+            cs.constrain(r);
         }
 
         return;
     }
 
-    if m == 1 {
-        let shift = set_bits[0];
-        let result_width = result_bits.len();
+    let zero = cs.constant(F::ZERO);
 
-        for k in 0..result_width {
-            if k < shift || k >= shift + n {
-                cs.constrain(result_bits[k]);
-            } else {
-                cs.constrain(result_bits[k] + operand_bits[k - shift]);
-            }
+    let shifted = |shift: usize, k: usize| -> Expr<'a, F> {
+        match k.checked_sub(shift) {
+            Some(i) if i < n => operand_bits[i],
+            _ => zero,
+        }
+    };
+
+    if m == 1 {
+        for (k, &r) in result_bits.iter().enumerate() {
+            cs.constrain(r + shifted(digits[0].shift, k));
         }
 
         return;
@@ -404,163 +246,57 @@ pub fn mul_const<'a, F: TowerField>(
     assert_eq!(
         scratch_results.len(),
         m - 2,
-        "mul_const: scratch_results length {} != popcount-2 ({})",
+        "mul_const: scratch_results length {} != digits-2 ({})",
         scratch_results.len(),
         m - 2
     );
     assert_eq!(
         scratch_carries.len(),
         m - 1,
-        "mul_const: scratch_carries length {} != popcount-1 ({})",
+        "mul_const: scratch_carries length {} != digits-1 ({})",
         scratch_carries.len(),
         m - 1
     );
 
-    let zero = cs.constant(F::ZERO);
+    let top = digits[0].shift;
 
-    let shifted_bit = |j: usize, k: usize| -> Expr<'a, F> {
-        let shift = set_bits[j];
-        if k >= shift && k < shift + n {
-            operand_bits[k - shift]
-        } else {
-            zero
+    let mut acc: Vec<Expr<'a, F>> = (0..top + n).map(|k| shifted(top, k)).collect();
+    for (j, digit) in digits.iter().enumerate().skip(1) {
+        let width = layout.scratch_carry_widths[j - 1];
+
+        let a: Vec<Expr<'a, F>> = (0..width)
+            .map(|k| acc.get(k).copied().unwrap_or(zero))
+            .collect();
+        let b: Vec<Expr<'a, F>> = (0..width).map(|k| shifted(digit.shift, k)).collect();
+
+        let result: &[Expr<'a, F>] = match j == m - 1 {
+            true => result_bits,
+            false => scratch_results[j - 1],
+        };
+
+        let padded: Vec<Expr<'a, F>> = (0..width)
+            .map(|k| result.get(k).copied().unwrap_or(zero))
+            .collect();
+
+        chain(
+            cs,
+            None,
+            &a,
+            &b,
+            &padded,
+            scratch_carries[j - 1],
+            digit.negative,
+        );
+
+        for &cell in result.iter().skip(width) {
+            cs.constrain(cell);
         }
-    };
 
-    // First addition:
-    // shifted[0] + shifted[1]
-    let first_span = core::cmp::max(set_bits[0] + n, set_bits[1] + n);
-    let width_0 = first_span + 1; // +1 for carry growth
-    let carry_0 = scratch_carries[0];
-
-    assert_eq!(
-        carry_0.len(),
-        width_0 + 1,
-        "mul_const: carry_0 length {} != width+1 ({})",
-        carry_0.len(),
-        width_0 + 1
-    );
-
-    if m == 2 {
-        assert_eq!(
-            result_bits.len(),
-            width_0,
-            "mul_const: result_bits length {} != expected width {width_0}",
-            result_bits.len()
-        );
-
-        let a_bits: Vec<Expr<'a, F>> = (0..width_0).map(|k| shifted_bit(0, k)).collect();
-        let b_bits: Vec<Expr<'a, F>> = (0..width_0).map(|k| shifted_bit(1, k)).collect();
-
-        add_carry_chain(cs, &a_bits, &b_bits, result_bits, carry_0);
-
-        return;
-    }
-
-    // First addition -> scratch_results[0]
-    {
-        let a_bits: Vec<Expr<'a, F>> = (0..width_0).map(|k| shifted_bit(0, k)).collect();
-        let b_bits: Vec<Expr<'a, F>> = (0..width_0).map(|k| shifted_bit(1, k)).collect();
-
-        add_carry_chain(cs, &a_bits, &b_bits, scratch_results[0], carry_0);
-    }
-
-    // Middle additions
-    for j in 2..m - 1 {
-        let prev = scratch_results[j - 2];
-        let cur_width = scratch_results[j - 1].len();
-        let carry_j = scratch_carries[j - 1];
-
-        assert_eq!(
-            carry_j.len(),
-            cur_width + 1,
-            "mul_const: carry[{j}] length {} != width+1 ({})",
-            carry_j.len(),
-            cur_width + 1
-        );
-
-        let prev_width = prev.len();
-        let a_bits: Vec<Expr<'a, F>> = (0..cur_width)
-            .map(|k| if k < prev_width { prev[k] } else { zero })
-            .collect();
-        let b_bits: Vec<Expr<'a, F>> = (0..cur_width).map(|k| shifted_bit(j, k)).collect();
-
-        add_carry_chain(cs, &a_bits, &b_bits, scratch_results[j - 1], carry_j);
-    }
-
-    // Final addition -> result_bits
-    {
-        let prev = scratch_results[m - 3];
-        let final_width = result_bits.len();
-        let carry_last = scratch_carries[m - 2];
-
-        assert_eq!(
-            carry_last.len(),
-            final_width + 1,
-            "mul_const: final carry length {} != width+1 ({})",
-            carry_last.len(),
-            final_width + 1
-        );
-
-        let prev_width = prev.len();
-        let a_bits: Vec<Expr<'a, F>> = (0..final_width)
-            .map(|k| if k < prev_width { prev[k] } else { zero })
-            .collect();
-        let b_bits: Vec<Expr<'a, F>> = (0..final_width).map(|k| shifted_bit(m - 1, k)).collect();
-
-        add_carry_chain(cs, &a_bits, &b_bits, result_bits, carry_last);
+        acc = padded;
     }
 }
 
-// =====================================================================
-// Modular Reduction
-// =====================================================================
-
-/// Layout for modular reduction
-/// scratch allocation.
-#[derive(Clone, Debug)]
-pub struct ModReductionLayout {
-    pub mul_layout: MulConstLayout,
-    pub product_width: usize,
-    pub add_carry_width: usize,
-    pub range_result_width: usize,
-    pub range_borrow_width: usize,
-    pub total_scratch_bits: usize,
-}
-
-/// Witness columns for modular
-/// reduction verification.
-pub struct ModReductionWitness<'a, 'b, F: TowerField> {
-    /// quotient * modulus
-    /// (product_width bits, witness).
-    pub quot_x_mod_bits: &'b [Expr<'a, F>],
-
-    /// Intermediate result columns
-    /// for constant multiply tree.
-    pub mul_scratch_results: &'b [&'b [Expr<'a, F>]],
-
-    /// Carry chain columns for
-    /// constant multiply tree.
-    pub mul_scratch_carries: &'b [&'b [Expr<'a, F>]],
-
-    /// Carry chain for
-    /// quot_x_mod + remainder = product
-    /// (product_width+1 bits).
-    pub add_carry_bits: &'b [Expr<'a, F>],
-
-    /// Result of (modulus-1) - remainder
-    /// (remainder_width bits, witness).
-    pub range_result_bits: &'b [Expr<'a, F>],
-
-    /// Borrow chain for range check
-    /// (remainder_width+1 bits, witness).
-    pub range_borrow_bits: &'b [Expr<'a, F>],
-}
-
-/// Constrain modular reduction:
-/// product = quotient * modulus + remainder,
-/// with 0 <= remainder < modulus.
-#[allow(clippy::too_many_arguments)]
+/// Constrain `product = quotient * modulus + remainder` with `remainder < modulus`.
 pub fn mod_reduction<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     product_bits: &[Expr<'a, F>],
@@ -569,10 +305,6 @@ pub fn mod_reduction<'a, F: TowerField>(
     scratch: &ModReductionWitness<'a, '_, F>,
     modulus: u32,
 ) {
-    let product_width = product_bits.len();
-    let remainder_width = remainder_bits.len();
-
-    // 1. quotient * modulus = quot_x_mod
     mul_const(
         cs,
         quotient_bits,
@@ -582,73 +314,36 @@ pub fn mod_reduction<'a, F: TowerField>(
         modulus,
     );
 
-    // 2. quot_x_mod + remainder = product
+    let width = scratch.add_carry_bits.len();
+
+    assert!(
+        width >= product_bits.len() && width >= scratch.quot_x_mod_bits.len(),
+        "mod_reduction: add_carry_bits length {width} below the operand widths"
+    );
+
     let zero = cs.constant(F::ZERO);
-    let remainder_padded: Vec<Expr<'a, F>> = (0..product_width)
-        .map(|k| {
-            if k < remainder_width {
-                remainder_bits[k]
-            } else {
-                zero
-            }
-        })
-        .collect();
+
+    let pad = |bits: &[Expr<'a, F>]| -> Vec<Expr<'a, F>> {
+        (0..width)
+            .map(|k| bits.get(k).copied().unwrap_or(zero))
+            .collect()
+    };
 
     add_carry_chain(
         cs,
-        scratch.quot_x_mod_bits,
-        &remainder_padded,
-        product_bits,
+        &pad(scratch.quot_x_mod_bits),
+        &pad(remainder_bits),
+        &pad(product_bits),
         scratch.add_carry_bits,
     );
 
-    // Overflow carry must be 0
-    cs.constrain(scratch.add_carry_bits[product_width]);
+    cs.constrain(scratch.add_carry_bits[width - 1]);
 
-    // 3. remainder < modulus
-    range_check(
-        cs,
-        remainder_bits,
-        scratch.range_result_bits,
-        scratch.range_borrow_bits,
-        modulus,
-    );
-}
-
-// =====================================================================
-// Schoolbook Multiplication (Variable × Variable)
-// =====================================================================
-
-/// Layout for schoolbook multiplication
-/// scratch allocation.
-#[derive(Clone, Debug)]
-pub struct SchoolbookMulLayout {
-    /// Width of the materialized first
-    /// partial product (= a_width bits).
-    pub pp0_width: usize,
-
-    /// Width of each intermediate sum.
-    /// Length = b_width - 2.
-    pub sum_widths: Vec<usize>,
-
-    /// Width of each carry chain
-    /// (includes +1 for carry-out).
-    /// Length = b_width - 1.
-    pub carry_widths: Vec<usize>,
-
-    /// Width of the final product.
-    pub product_width: usize,
-
-    /// Total scratch bit columns needed
-    /// (pp0 + intermediate sums + carries).
-    pub total_scratch_bits: usize,
+    range_check(cs, remainder_bits, scratch.range_borrow_bits, modulus);
 }
 
 /// Compute column layout for schoolbook
 /// multiplication of two variable operands.
-///
-/// First partial product is materialized
-/// to keep constraint degree ≤ 4 with gating.
 pub fn schoolbook_mul_layout(a_width: usize, b_width: usize) -> SchoolbookMulLayout {
     assert!(
         a_width > 0 && b_width > 0,
@@ -658,87 +353,20 @@ pub fn schoolbook_mul_layout(a_width: usize, b_width: usize) -> SchoolbookMulLay
     let product_width = a_width + b_width;
     let pp0_width = a_width;
 
-    if b_width == 1 {
-        return SchoolbookMulLayout {
-            pp0_width,
-            sum_widths: Vec::new(),
-            carry_widths: Vec::new(),
-            product_width,
-            total_scratch_bits: pp0_width,
-        };
-    }
-
-    let mut sum_widths = Vec::with_capacity(b_width - 2);
-    let mut carry_widths = Vec::with_capacity(b_width - 1);
-
-    let first_span = 1 + a_width;
-    let width_1 = first_span + 1;
-
-    carry_widths.push(width_1 + 1);
-
-    if b_width == 2 {
-        let scratch = pp0_width + carry_widths.iter().sum::<usize>();
-
-        return SchoolbookMulLayout {
-            pp0_width,
-            sum_widths,
-            carry_widths,
-            product_width: width_1,
-            total_scratch_bits: scratch,
-        };
-    }
-
-    sum_widths.push(width_1);
-
-    let mut current_width = width_1;
-    for j in 2..b_width - 1 {
-        let shifted_max = j + a_width;
-        current_width = core::cmp::max(current_width, shifted_max) + 1;
-
-        carry_widths.push(current_width + 1);
-        sum_widths.push(current_width);
-    }
-
-    let shifted_max = (b_width - 1) + a_width;
-    let final_width = core::cmp::max(current_width, shifted_max) + 1;
-
-    carry_widths.push(final_width + 1);
-
-    let total_scratch: usize =
-        pp0_width + sum_widths.iter().sum::<usize>() + carry_widths.iter().sum::<usize>();
+    let carry_widths: Vec<usize> = (1..b_width).map(|j| a_width + j + 1).collect();
+    let sum_widths: Vec<usize> = carry_widths[..carry_widths.len().saturating_sub(1)].to_vec();
 
     SchoolbookMulLayout {
         pp0_width,
         sum_widths,
         carry_widths,
-        product_width: final_width,
-        total_scratch_bits: total_scratch,
+        product_width,
     }
 }
 
-/// Witness columns for
-/// schoolbook multiplication.
-pub struct SchoolbookMulWitness<'a, 'b, F: TowerField> {
-    /// Materialized first partial product
-    /// (pp0_width bits).
-    /// `pp0[k] = b[0]*a[k]`.
-    pub pp0: &'b [Expr<'a, F>],
-
-    /// Intermediate sum columns.
-    /// Length = b_width - 2 groups.
-    pub sums: &'b [&'b [Expr<'a, F>]],
-
-    /// Carry chain columns.
-    /// Length = b_width - 1 groups.
-    pub carries: &'b [&'b [Expr<'a, F>]],
-}
-
-/// Constrain schoolbook multiplication:
-/// product = a * b (unsigned integers).
-///
-/// `pp[j][k] = b[j] * a[k-j]` (degree-2).
-/// pp0 materialized as witness to keep
-/// constraint degree ≤ 3 (gated: ≤ 4).
+/// Constrain `product = a * b`. `pp0[k] = b[0] * a[k]` is
+/// committed to keep the carry roots at degree 3; each later
+/// `b[j] * a[k-j]` is one node shared by its sum and carry root.
 pub fn schoolbook_mul<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     a_bits: &[Expr<'a, F>],
@@ -754,8 +382,10 @@ pub fn schoolbook_mul<'a, F: TowerField>(
         "schoolbook_mul: operand widths must be > 0 (a={a_width}, b={b_width})"
     );
     assert_eq!(
-        a_width, b_width,
-        "schoolbook_mul: operand widths must match ({a_width} vs {b_width})"
+        scratch.pp0.len(),
+        a_width,
+        "schoolbook_mul: pp0 length {} != a width {a_width}",
+        scratch.pp0.len()
     );
     assert_eq!(
         scratch.carries.len(),
@@ -764,141 +394,66 @@ pub fn schoolbook_mul<'a, F: TowerField>(
         scratch.carries.len(),
         b_width - 1
     );
+    assert_eq!(
+        scratch.sums.len(),
+        b_width.saturating_sub(2),
+        "schoolbook_mul: sums length {} != b_width-2",
+        scratch.sums.len()
+    );
+
+    for (k, &pp0_k) in scratch.pp0.iter().enumerate() {
+        cs.constrain(pp0_k + b_bits[0] * a_bits[k]);
+    }
+
+    if b_width == 1 {
+        for (k, &prod_k) in product_bits.iter().enumerate() {
+            match scratch.pp0.get(k) {
+                Some(&pp0_k) => cs.constrain(prod_k + pp0_k),
+                None => cs.constrain(prod_k),
+            }
+        }
+
+        return;
+    }
 
     let zero = cs.constant(F::ZERO);
 
-    for (k, &pp0_k) in scratch.pp0.iter().enumerate() {
-        cs.assert_boolean(pp0_k);
+    let mut acc: &[Expr<'a, F>] = scratch.pp0;
+    for (j, &b_j) in b_bits.iter().enumerate().skip(1) {
+        let width = a_width + j + 1;
 
-        if k < a_width {
-            cs.constrain(pp0_k + b_bits[0] * a_bits[k]);
-        } else {
-            cs.constrain(pp0_k);
-        }
-    }
-
-    let gated = |j: usize, k: usize, width: usize| -> Expr<'a, F> {
-        if k >= j && k - j < a_width && k < width {
-            b_bits[j] * a_bits[k - j]
-        } else {
-            zero
-        }
-    };
-
-    if b_width == 1 {
-        let pp0_len = scratch.pp0.len();
-        for (k, &prod_k) in product_bits.iter().enumerate() {
-            if k < pp0_len {
-                cs.constrain(prod_k + scratch.pp0[k]);
-            } else {
-                cs.constrain(prod_k);
-            }
-        }
-
-        return;
-    }
-
-    // First addition:
-    // pp0 + pp[1]
-    let width_1 = scratch.carries[0].len() - 1;
-    let pp0_padded: Vec<Expr<'a, F>> = (0..width_1)
-        .map(|k| {
-            if k < scratch.pp0.len() {
-                scratch.pp0[k]
-            } else {
-                zero
-            }
-        })
-        .collect();
-
-    let pp1: Vec<Expr<'a, F>> = (0..width_1).map(|k| gated(1, k, width_1)).collect();
-
-    if b_width == 2 {
-        add_carry_chain(cs, &pp0_padded, &pp1, product_bits, scratch.carries[0]);
-        return;
-    }
-
-    // First addition -> sums[0]
-    add_carry_chain(cs, &pp0_padded, &pp1, scratch.sums[0], scratch.carries[0]);
-
-    // Middle additions
-    for j in 2..b_width - 1 {
-        let prev = scratch.sums[j - 2];
-        let cur_width = scratch.sums[j - 1].len();
-
-        let prev_width = prev.len();
-        let a_padded: Vec<Expr<'a, F>> = (0..cur_width)
-            .map(|k| if k < prev_width { prev[k] } else { zero })
+        let a: Vec<Expr<'a, F>> = (0..width)
+            .map(|k| acc.get(k).copied().unwrap_or(zero))
             .collect();
-        let b_shifted: Vec<Expr<'a, F>> = (0..cur_width).map(|k| gated(j, k, cur_width)).collect();
 
-        add_carry_chain(
-            cs,
-            &a_padded,
-            &b_shifted,
-            scratch.sums[j - 1],
-            scratch.carries[j - 1],
+        let b: Vec<Expr<'a, F>> = (0..width)
+            .map(|k| match k.checked_sub(j) {
+                Some(i) if i < a_width => b_j * a_bits[i],
+                _ => zero,
+            })
+            .collect();
+
+        let result: &[Expr<'a, F>] = match j == b_width - 1 {
+            true => product_bits,
+            false => scratch.sums[j - 1],
+        };
+
+        assert_eq!(
+            result.len(),
+            width,
+            "schoolbook_mul: stage {j} result length {} != chain width {width}",
+            result.len()
         );
+
+        add_carry_chain(cs, &a, &b, result, scratch.carries[j - 1]);
+
+        acc = result;
     }
-
-    // Final addition -> product
-    let last_j = b_width - 1;
-    let prev = scratch.sums[last_j - 2];
-    let final_width = product_bits.len();
-
-    let prev_width = prev.len();
-    let a_padded: Vec<Expr<'a, F>> = (0..final_width)
-        .map(|k| if k < prev_width { prev[k] } else { zero })
-        .collect();
-    let b_shifted: Vec<Expr<'a, F>> = (0..final_width)
-        .map(|k| gated(last_j, k, final_width))
-        .collect();
-
-    add_carry_chain(
-        cs,
-        &a_padded,
-        &b_shifted,
-        product_bits,
-        scratch.carries[last_j - 1],
-    );
 }
 
-// =====================================================================
-// Modular Addition / Subtraction
-// =====================================================================
-
-/// Witness columns for modular addition.
-pub struct ModAddWitness<'a, 'b, F: TowerField> {
-    /// LHS = a + b:
-    /// result bits.
-    pub lhs_result: &'b [Expr<'a, F>],
-
-    /// LHS carry chain.
-    pub lhs_carry: &'b [Expr<'a, F>],
-
-    /// RHS = result + flag*modulus:
-    /// result bits.
-    pub rhs_result: &'b [Expr<'a, F>],
-
-    /// RHS carry chain.
-    pub rhs_carry: &'b [Expr<'a, F>],
-
-    /// Reduction flag (boolean).
-    pub flag: Expr<'a, F>,
-
-    /// Range check result bits (result < modulus).
-    pub range_result: &'b [Expr<'a, F>],
-
-    /// Range check borrow chain.
-    pub range_borrow: &'b [Expr<'a, F>],
-}
-
-/// Constrain modular addition:
-/// result = (a + b) mod modulus.
-///
-/// Precondition:
-/// a + b < 2 * modulus
-/// (holds when both operands are reduced).
+/// Constrain `result = (a + b) mod modulus` for reduced
+/// operands (`a + b < 2 · modulus`): carries of `a + b`,
+/// borrows of `flag · modulus` off it, `result < modulus`.
 pub fn mod_add<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     a_bits: &[Expr<'a, F>],
@@ -921,119 +476,68 @@ pub fn mod_add<'a, F: TowerField>(
         "mod_add: result_bits length {} != operand width {n}",
         result_bits.len()
     );
-
-    cs.assert_boolean(scratch.flag);
-
-    // LHS:
-    // a + b
-    add_carry_chain(cs, a_bits, b_bits, scratch.lhs_result, scratch.lhs_carry);
-
-    // RHS:
-    // result + flag * modulus
-    let flag_q: Vec<Expr<'a, F>> = (0..n)
-        .map(|k| {
-            if (modulus >> k) & 1 == 1 {
-                scratch.flag
-            } else {
-                cs.constant(F::ZERO)
-            }
-        })
-        .collect();
-
-    add_carry_chain(
-        cs,
-        result_bits,
-        &flag_q,
-        scratch.rhs_result,
-        scratch.rhs_carry,
+    assert_eq!(
+        scratch.carry.len(),
+        n,
+        "mod_add: carry length {} != operand width {n}",
+        scratch.carry.len()
+    );
+    assert_eq!(
+        scratch.borrow.len(),
+        n,
+        "mod_add: borrow length {} != operand width {n}",
+        scratch.borrow.len()
     );
 
-    // LHS = RHS at each bit
-    let lhs_width = scratch.lhs_result.len();
-    let rhs_width = scratch.rhs_result.len();
-    let check_width = core::cmp::max(lhs_width, rhs_width);
     let zero = cs.constant(F::ZERO);
 
-    for k in 0..check_width {
-        let l = if k < lhs_width {
-            scratch.lhs_result[k]
-        } else {
-            zero
-        };
-        let r = if k < rhs_width {
-            scratch.rhs_result[k]
-        } else {
-            zero
-        };
+    let mut carry_in: Option<Expr<'a, F>> = None;
+    for k in 0..n {
+        cs.constrain(scratch.carry[k] + carry_out(a_bits[k], b_bits[k], carry_in));
 
-        cs.constrain(l + r);
+        carry_in = Some(scratch.carry[k]);
     }
 
-    // Overflow carries must match
-    cs.constrain(scratch.lhs_carry[lhs_width] + scratch.rhs_carry[rhs_width]);
+    let mut borrow_in: Option<Expr<'a, F>> = None;
+    for k in 0..n {
+        let sum = match k {
+            0 => a_bits[0] + b_bits[0],
+            _ => a_bits[k] + b_bits[k] + scratch.carry[k - 1],
+        };
 
-    // result < modulus
-    range_check(
-        cs,
-        result_bits,
-        scratch.range_result,
-        scratch.range_borrow,
-        modulus,
-    );
+        let flag_q = match modulus.checked_shr(k as u32).unwrap_or(0) & 1 {
+            1 => scratch.flag,
+            _ => zero,
+        };
+
+        let diff = match borrow_in {
+            Some(w) => result_bits[k] + sum + flag_q + w,
+            None => result_bits[k] + sum + flag_q,
+        };
+
+        cs.constrain(diff);
+        cs.constrain(scratch.borrow[k] + borrow_out(cs, sum, flag_q, borrow_in));
+
+        borrow_in = Some(scratch.borrow[k]);
+    }
+
+    cs.constrain(scratch.carry[n - 1] + scratch.borrow[n - 1]);
+
+    range_check(cs, result_bits, scratch.range_borrow, modulus);
 }
 
-/// Scratch layout for modular
-/// addition/subtraction.
-#[derive(Clone, Debug)]
-pub struct ModAddLayout {
-    /// Width of LHS/RHS result columns.
-    pub result_width: usize,
-
-    /// Width of LHS/RHS carry columns.
-    pub carry_width: usize,
-
-    /// Width of range result columns.
-    pub range_result_width: usize,
-
-    /// Width of range borrow columns.
-    pub range_borrow_width: usize,
-
-    /// Total scratch bits
-    /// (2×result + 2×carry + 1 flag +
-    /// range_result + range_borrow).
-    pub total_scratch_bits: usize,
-}
-
-/// Compute scratch layout for
-/// modular addition (or subtraction).
+/// Scratch layout of `mod_add` on `operand_width`-bit operands.
 pub fn mod_add_scratch_count(operand_width: usize) -> ModAddLayout {
-    let result_width = operand_width;
-    let carry_width = operand_width + 1;
-    let range_result_width = operand_width;
-    let range_borrow_width = operand_width + 1;
-
     ModAddLayout {
-        result_width,
-        carry_width,
-        range_result_width,
-        range_borrow_width,
-        total_scratch_bits: 2 * result_width
-            + 2 * carry_width
-            + 1  // flag
-            + range_result_width
-            + range_borrow_width,
+        carry_width: operand_width,
+        borrow_width: operand_width,
+        range_borrow_width: operand_width - 1,
     }
 }
 
-// =====================================================================
-// Bit Packing (Bus <> Decomposition Binding)
-// =====================================================================
-
-/// Constrain bus_col = Σ bit_k · 2^k.
-///
-/// F::from(2^k) maps to the element with
-/// bit k set; XOR addition preserves the
-/// bit pattern. Emits one degree-1 constraint.
+/// Constrain bus_col = Σ bit_k · 2^k: F::from(2^k) is
+/// the element with bit k set and XOR addition preserves
+/// the bit pattern. One degree-1 constraint.
 pub fn bit_packing<'a, F: TowerField>(
     cs: &'a ConstraintSystem<F>,
     bus_col: Expr<'a, F>,
@@ -1053,241 +557,432 @@ pub fn bit_packing<'a, F: TowerField>(
     cs.constrain(bus_col + reconstruction);
 }
 
-// =====================================================================
-// Helpers
-// =====================================================================
+/// Non-adjacent form of `constant`, highest digit first.
+pub fn naf_digits(constant: u32) -> Vec<NafDigit> {
+    let mut digits = Vec::new();
+    let mut c = constant as i64;
+    let mut shift = 0usize;
 
-/// Compute scratch column widths for
-/// `mul_const` with given operand
-/// width and constant.
+    while c != 0 {
+        if c & 1 == 1 {
+            let d = 2 - (c & 3);
+
+            digits.push(NafDigit {
+                shift,
+                negative: d < 0,
+            });
+
+            c -= d;
+        }
+
+        c >>= 1;
+        shift += 1;
+    }
+
+    digits.reverse();
+
+    digits
+}
+
+/// Scratch widths for `mul_const`: result `j` is as wide
+/// as `partial_j · (2^n - 1)`; no carry-out needs a pin.
 pub fn mul_const_scratch_widths(operand_width: usize, constant: u32) -> MulConstLayout {
-    let set_bits: Vec<usize> = (0..32).filter(|&i| (constant >> i) & 1 == 1).collect();
-    let m = set_bits.len();
+    let digits = naf_digits(constant);
+    let n = operand_width;
+    let max_operand = (1u128 << n) - 1;
 
-    if m <= 1 {
-        let result_width = if m == 0 {
-            1
-        } else {
-            set_bits[0] + operand_width
-        };
+    let bits = |value: u128| -> usize { (u128::BITS - value.leading_zeros()) as usize };
+
+    if digits.is_empty() {
         return MulConstLayout {
+            digits,
             scratch_result_widths: Vec::new(),
             scratch_carry_widths: Vec::new(),
-            result_width,
+            result_width: 1,
         };
     }
 
-    let mut scratch_result_widths = Vec::with_capacity(m.saturating_sub(2));
-    let mut scratch_carry_widths = Vec::with_capacity(m - 1);
+    let mut partial: i128 = 1i128 << digits[0].shift;
+    let mut prev_width = digits[0].shift + n;
 
-    let first_span = core::cmp::max(set_bits[0] + operand_width, set_bits[1] + operand_width);
-    let first_width = first_span + 1; // +1 for carry growth
+    let mut result_widths = Vec::with_capacity(digits.len());
+    let mut carry_widths = Vec::with_capacity(digits.len());
 
-    scratch_carry_widths.push(first_width + 1);
+    for digit in &digits[1..] {
+        let term = 1i128 << digit.shift;
 
-    if m == 2 {
-        return MulConstLayout {
-            scratch_result_widths,
-            scratch_carry_widths,
-            result_width: first_width,
+        partial += if digit.negative { -term } else { term };
+
+        let width = bits(partial as u128 * max_operand);
+        let chain_width = match digit.negative {
+            true => prev_width.max(digit.shift + n),
+            false => width,
         };
+
+        result_widths.push(width);
+        carry_widths.push(chain_width);
+
+        prev_width = width;
     }
 
-    scratch_result_widths.push(first_width);
-
-    let mut current_width = first_width;
-    for &shift in &set_bits[2..m - 1] {
-        let shifted_max = shift + operand_width;
-        current_width = core::cmp::max(current_width, shifted_max) + 1;
-        scratch_carry_widths.push(current_width + 1);
-        scratch_result_widths.push(current_width);
-    }
-
-    let shifted_max = set_bits[m - 1] + operand_width;
-    let result_width = core::cmp::max(current_width, shifted_max) + 1;
-    scratch_carry_widths.push(result_width + 1);
+    let result_width = result_widths.pop().unwrap_or(prev_width);
 
     MulConstLayout {
-        scratch_result_widths,
-        scratch_carry_widths,
+        digits,
+        scratch_result_widths: result_widths,
+        scratch_carry_widths: carry_widths,
         result_width,
     }
 }
 
-/// Layout for `mul_const` scratch allocation.
-#[derive(Clone, Debug)]
-pub struct MulConstLayout {
-    /// Width of each intermediate result array.
-    /// Length = popcount(constant) - 2.
-    pub scratch_result_widths: Vec<usize>,
-
-    /// Width of each carry chain
-    /// (includes the +1 for carry-out).
-    /// Length = popcount(constant) - 1.
-    pub scratch_carry_widths: Vec<usize>,
-
-    /// Width of the final product result.
-    pub result_width: usize,
-}
-
-/// Compute scratch layout for modular
-/// reduction with given parameters.
-pub fn mod_reduction_scratch_count(quotient_width: usize, modulus: u32) -> ModReductionLayout {
+/// Compute scratch layout for modular reduction of a
+/// `product_width`-bit product by `modulus`.
+pub fn mod_reduction_scratch_count(
+    quotient_width: usize,
+    product_width: usize,
+    modulus: u32,
+) -> ModReductionLayout {
     let mul_layout = mul_const_scratch_widths(quotient_width, modulus);
-    let product_width = mul_layout.result_width;
-
-    let mul_scratch_bits: usize = mul_layout.scratch_result_widths.iter().sum::<usize>()
-        + mul_layout.scratch_carry_widths.iter().sum::<usize>();
+    let quot_x_mod_width = mul_layout.result_width;
+    let add_carry_width = product_width.max(quot_x_mod_width);
+    let range_borrow_width = quotient_width - 1;
 
     ModReductionLayout {
         mul_layout,
-        product_width,
-        add_carry_width: product_width + 1,
-        range_result_width: quotient_width,
-        range_borrow_width: quotient_width + 1,
-        total_scratch_bits: product_width     // quot_x_mod
-            + mul_scratch_bits                // mul intermediates
-            + (product_width + 1)             // add carry
-            + quotient_width                  // range result
-            + (quotient_width + 1), // range borrow
+        quot_x_mod_width,
+        add_carry_width,
+        range_borrow_width,
+    }
+}
+
+fn chain<'a, F: TowerField>(
+    cs: &'a ConstraintSystem<F>,
+    carry_in: Option<Expr<'a, F>>,
+    a_bits: &[Expr<'a, F>],
+    b_bits: &[Expr<'a, F>],
+    result_bits: &[Expr<'a, F>],
+    carry_bits: &[Expr<'a, F>],
+    subtract: bool,
+) {
+    let n = a_bits.len();
+
+    assert_eq!(
+        b_bits.len(),
+        n,
+        "chain: b_bits length {} != a_bits length {n}",
+        b_bits.len()
+    );
+    assert_eq!(
+        result_bits.len(),
+        n,
+        "chain: result_bits length {} != operand width {n}",
+        result_bits.len()
+    );
+    assert_eq!(
+        carry_bits.len(),
+        n,
+        "chain: carry_bits length {} != operand width {n}",
+        carry_bits.len()
+    );
+
+    let mut carry = carry_in;
+    for k in 0..n {
+        let (a, b, r) = (a_bits[k], b_bits[k], result_bits[k]);
+
+        let sum = match carry {
+            Some(c) => r + a + b + c,
+            None => r + a + b,
+        };
+
+        let out = match subtract {
+            true => borrow_out(cs, a, b, carry),
+            false => carry_out(a, b, carry),
+        };
+
+        cs.constrain(sum);
+        cs.constrain(carry_bits[k] + out);
+
+        carry = Some(carry_bits[k]);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hekate_math::{Block128, Flat, HardwareField, TowerField};
+    use hekate_math::{Block128, Flat, HardwareField};
+    use hekate_program::constraint::ConstraintAst;
 
     type F = Block128;
 
+    struct Cols<'a> {
+        cs: &'a ConstraintSystem<F>,
+        next: usize,
+    }
+
+    impl<'a> Cols<'a> {
+        fn new(cs: &'a ConstraintSystem<F>) -> Self {
+            Self { cs, next: 0 }
+        }
+
+        fn take(&mut self, n: usize) -> Vec<Expr<'a, F>> {
+            let cols: Vec<_> = (self.next..self.next + n).map(|i| self.cs.col(i)).collect();
+            self.next += n;
+
+            cols
+        }
+    }
+
+    struct Row {
+        cells: Vec<Flat<F>>,
+    }
+
+    impl Row {
+        fn new(num_cols: usize) -> Self {
+            Self {
+                cells: alloc::vec![F::ZERO.to_hardware(); num_cols],
+            }
+        }
+
+        fn bits(&mut self, start: usize, width: usize, value: u128) {
+            for k in 0..width {
+                self.cells[start + k] = F::from((value >> k) & 1).to_hardware();
+            }
+        }
+
+        fn bit(&mut self, col: usize, on: bool) {
+            self.cells[col] = F::from(on as u128).to_hardware();
+        }
+
+        fn violations(&self, ast: &ConstraintAst<F>) -> Vec<usize> {
+            ast.evaluate(&self.cells, &self.cells)
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v != F::ZERO.to_hardware())
+                .map(|(i, _)| i)
+                .collect()
+        }
+    }
+
+    fn carries(a: u128, b: u128, width: usize) -> u128 {
+        let mut word = 0u128;
+        let mut c = false;
+
+        for k in 0..width {
+            let (x, y) = (((a >> k) & 1) == 1, ((b >> k) & 1) == 1);
+            c = (x & y) | (c & (x ^ y));
+            word |= (c as u128) << k;
+        }
+
+        word
+    }
+
+    fn borrows(a: u128, b: u128, width: usize) -> u128 {
+        let mut word = 0u128;
+        let mut w = false;
+
+        for k in 0..width {
+            let (x, y) = (((a >> k) & 1) == 1, ((b >> k) & 1) == 1);
+            w = (!x & y) | (!(x ^ y) & w);
+            word |= (w as u128) << k;
+        }
+
+        word
+    }
+
+    fn range_borrows(value: u128, bound: u32, width: usize) -> u128 {
+        borrows((bound - 1) as u128, value, width) & ((1u128 << (width - 1)) - 1)
+    }
+
+    fn mask(width: usize) -> u128 {
+        (1u128 << width) - 1
+    }
+
+    fn fill_mul_const(row: &mut Row, layout: &MulConstLayout, n: usize, x: u128, constant: u32) {
+        let mut col = n;
+        let result_start = col;
+        col += layout.result_width;
+
+        let result_starts: Vec<usize> = layout
+            .scratch_result_widths
+            .iter()
+            .map(|&w| {
+                let start = col;
+                col += w;
+                start
+            })
+            .collect();
+        let carry_starts: Vec<usize> = layout
+            .scratch_carry_widths
+            .iter()
+            .map(|&w| {
+                let start = col;
+                col += w;
+                start
+            })
+            .collect();
+
+        row.bits(0, n, x);
+        row.bits(result_start, layout.result_width, x * constant as u128);
+
+        let mut acc = x << layout.digits[0].shift;
+
+        for (j, digit) in layout.digits.iter().enumerate().skip(1) {
+            let term = x << digit.shift;
+            let width = layout.scratch_carry_widths[j - 1];
+
+            let (value, carry) = match digit.negative {
+                true => (acc - term, borrows(acc, term, width)),
+                false => (acc + term, carries(acc, term, width)),
+            };
+
+            row.bits(carry_starts[j - 1], width, carry);
+
+            if j < layout.digits.len() - 1 {
+                row.bits(
+                    result_starts[j - 1],
+                    layout.scratch_result_widths[j - 1],
+                    value,
+                );
+            }
+
+            acc = value;
+        }
+    }
+
+    fn mul_const_case(n: usize, constant: u32) -> (ConstraintAst<F>, MulConstLayout, usize) {
+        let layout = mul_const_scratch_widths(n, constant);
+
+        let cs = ConstraintSystem::<F>::new();
+        let mut cols = Cols::new(&cs);
+
+        let operand = cols.take(n);
+        let result = cols.take(layout.result_width);
+
+        let scratch_results: Vec<Vec<Expr<'_, F>>> = layout
+            .scratch_result_widths
+            .iter()
+            .map(|&w| cols.take(w))
+            .collect();
+        let scratch_carries: Vec<Vec<Expr<'_, F>>> = layout
+            .scratch_carry_widths
+            .iter()
+            .map(|&w| cols.take(w))
+            .collect();
+
+        let sr_refs: Vec<&[Expr<'_, F>]> = scratch_results.iter().map(|v| v.as_slice()).collect();
+        let sc_refs: Vec<&[Expr<'_, F>]> = scratch_carries.iter().map(|v| v.as_slice()).collect();
+
+        mul_const(&cs, &operand, &result, &sr_refs, &sc_refs, constant);
+
+        let num_cols = cols.next;
+
+        (cs.build(), layout, num_cols)
+    }
+
+    fn schoolbook_case(n: usize) -> (ConstraintAst<F>, SchoolbookMulLayout, usize) {
+        let layout = schoolbook_mul_layout(n, n);
+
+        let cs = ConstraintSystem::<F>::new();
+        let mut cols = Cols::new(&cs);
+
+        let a = cols.take(n);
+        let b = cols.take(n);
+        let product = cols.take(layout.product_width);
+        let pp0 = cols.take(layout.pp0_width);
+
+        let sum_cols: Vec<Vec<Expr<'_, F>>> =
+            layout.sum_widths.iter().map(|&w| cols.take(w)).collect();
+        let carry_cols: Vec<Vec<Expr<'_, F>>> =
+            layout.carry_widths.iter().map(|&w| cols.take(w)).collect();
+
+        let sum_refs: Vec<&[Expr<'_, F>]> = sum_cols.iter().map(|v| v.as_slice()).collect();
+        let carry_refs: Vec<&[Expr<'_, F>]> = carry_cols.iter().map(|v| v.as_slice()).collect();
+
+        schoolbook_mul(
+            &cs,
+            &a,
+            &b,
+            &product,
+            &SchoolbookMulWitness {
+                pp0: &pp0,
+                sums: &sum_refs,
+                carries: &carry_refs,
+            },
+        );
+
+        let num_cols = cols.next;
+
+        (cs.build(), layout, num_cols)
+    }
+
+    fn mod_add_case(n: usize, q: u32) -> (ConstraintAst<F>, usize) {
+        let layout = mod_add_scratch_count(n);
+
+        let cs = ConstraintSystem::<F>::new();
+        let mut cols = Cols::new(&cs);
+
+        let a = cols.take(n);
+        let b = cols.take(n);
+        let result = cols.take(n);
+        let carry = cols.take(layout.carry_width);
+        let borrow = cols.take(layout.borrow_width);
+        let flag = cols.take(1)[0];
+        let range_borrow = cols.take(layout.range_borrow_width);
+
+        mod_add(
+            &cs,
+            &a,
+            &b,
+            &result,
+            &ModAddWitness {
+                carry: &carry,
+                borrow: &borrow,
+                flag,
+                range_borrow: &range_borrow,
+            },
+            q,
+        );
+
+        let num_cols = cols.next;
+
+        (cs.build(), num_cols)
+    }
+
     #[test]
     fn add_carry_chain_constraint_count() {
-        // 12-bit addition:
-        // 12 sum + 12 carry + 1 carry_init = 25 constraints
         let cs = ConstraintSystem::<F>::new();
         let n = 12;
-        let a: Vec<_> = (0..n).map(|i| cs.col(i)).collect();
-        let b: Vec<_> = (0..n).map(|i| cs.col(n + i)).collect();
-        let r: Vec<_> = (0..n).map(|i| cs.col(2 * n + i)).collect();
-        let c: Vec<_> = (0..=n).map(|i| cs.col(3 * n + i)).collect();
+        let mut cols = Cols::new(&cs);
+        let (a, b, r, c) = (cols.take(n), cols.take(n), cols.take(n), cols.take(n));
+
+        add_carry_chain(&cs, &a, &b, &r, &c);
+
+        assert_eq!(cs.build().roots.len(), 2 * n);
+    }
+
+    #[test]
+    fn add_carry_chain_accepts_honest_rows_and_rejects_tampered() {
+        let cs = ConstraintSystem::<F>::new();
+        let n = 12;
+        let mut cols = Cols::new(&cs);
+        let (a, b, r, c) = (cols.take(n), cols.take(n), cols.take(n), cols.take(n));
 
         add_carry_chain(&cs, &a, &b, &r, &c);
 
         let ast = cs.build();
 
-        // 1 (carry init) + n * 4 (bool_r + bool_c + sum + carry per bit) = 49
-        assert_eq!(ast.roots.len(), 4 * n + 1);
-    }
+        for (x, y) in [(0u128, 0u128), (4095, 1), (2730, 1365), (3329, 4000)] {
+            let mut row = Row::new(4 * n);
+            row.bits(0, n, x);
+            row.bits(n, n, y);
+            row.bits(2 * n, n, (x + y) & mask(n));
+            row.bits(3 * n, n, carries(x, y, n));
 
-    #[test]
-    fn add_carry_chain_with_carry_in_gated_constraint_count() {
-        let cs = ConstraintSystem::<F>::new();
-        let n = 8;
-        let s = cs.col(0);
-        let a: Vec<_> = (0..n).map(|i| cs.col(1 + i)).collect();
-        let b: Vec<_> = (0..n).map(|i| cs.col(1 + n + i)).collect();
-        let r: Vec<_> = (0..n).map(|i| cs.col(1 + 2 * n + i)).collect();
-        let c: Vec<_> = (0..=n).map(|i| cs.col(1 + 3 * n + i)).collect();
+            assert!(row.violations(&ast).is_empty(), "{x} + {y}");
 
-        add_carry_chain_with_carry_in_gated(&cs, s, &a, &b, &r, &c);
+            row.bits(2 * n, n, ((x + y) & mask(n)) ^ 1);
 
-        let ast = cs.build();
-
-        assert_eq!(ast.roots.len(), 4 * n);
-    }
-
-    #[test]
-    fn add_carry_chain_with_carry_in_gated_body_vanishes_when_selector_zero() {
-        use hekate_math::{Flat, HardwareField, TowerField};
-
-        let cs = ConstraintSystem::<F>::new();
-        let n = 4;
-        let s = cs.col(0);
-        let a: Vec<_> = (0..n).map(|i| cs.col(1 + i)).collect();
-        let b: Vec<_> = (0..n).map(|i| cs.col(1 + n + i)).collect();
-        let r: Vec<_> = (0..n).map(|i| cs.col(1 + 2 * n + i)).collect();
-        let c: Vec<_> = (0..=n).map(|i| cs.col(1 + 3 * n + i)).collect();
-
-        add_carry_chain_with_carry_in_gated(&cs, s, &a, &b, &r, &c);
-
-        let ast = cs.build();
-
-        let zero = F::ZERO.to_hardware();
-        let selector_off = zero;
-        let garbage = F::from(0xDEADBEEFu128).to_hardware();
-
-        let mut row: Vec<Flat<F>> = Vec::with_capacity(1 + 3 * n + (n + 1));
-        row.push(selector_off);
-
-        for _ in 0..3 * n {
-            row.push(garbage);
-        }
-
-        for _ in 0..=n {
-            row.push(garbage);
-        }
-
-        let evals = ast.evaluate(&row, &row);
-        for (i, v) in evals.iter().enumerate() {
-            assert_eq!(
-                *v, zero,
-                "constraint {i} non-zero on selector=0 garbage row"
-            );
-        }
-    }
-
-    #[test]
-    fn sub_borrow_chain_gated_constraint_count() {
-        let cs = ConstraintSystem::<F>::new();
-        let n = 8;
-        let s = cs.col(0);
-        let a: Vec<_> = (0..n).map(|i| cs.col(1 + i)).collect();
-        let b: Vec<_> = (0..n).map(|i| cs.col(1 + n + i)).collect();
-        let r: Vec<_> = (0..n).map(|i| cs.col(1 + 2 * n + i)).collect();
-        let w: Vec<_> = (0..=n).map(|i| cs.col(1 + 3 * n + i)).collect();
-
-        sub_borrow_chain_gated(&cs, s, &a, &b, &r, &w);
-
-        let ast = cs.build();
-
-        assert_eq!(ast.roots.len(), 4 * n + 1);
-    }
-
-    #[test]
-    fn sub_borrow_chain_gated_body_vanishes_when_selector_zero() {
-        let cs = ConstraintSystem::<F>::new();
-        let n = 4;
-        let s = cs.col(0);
-        let a: Vec<_> = (0..n).map(|i| cs.col(1 + i)).collect();
-        let b: Vec<_> = (0..n).map(|i| cs.col(1 + n + i)).collect();
-        let r: Vec<_> = (0..n).map(|i| cs.col(1 + 2 * n + i)).collect();
-        let w: Vec<_> = (0..=n).map(|i| cs.col(1 + 3 * n + i)).collect();
-
-        sub_borrow_chain_gated(&cs, s, &a, &b, &r, &w);
-
-        let ast = cs.build();
-
-        let zero = F::ZERO.to_hardware();
-        let selector_off = zero;
-        let garbage = F::from(0xBADF00Du128).to_hardware();
-
-        let mut row: Vec<Flat<F>> = Vec::with_capacity(1 + 3 * n + (n + 1));
-        row.push(selector_off);
-
-        for _ in 0..3 * n {
-            row.push(garbage);
-        }
-
-        for _ in 0..=n {
-            row.push(garbage);
-        }
-
-        let evals = ast.evaluate(&row, &row);
-        for (i, v) in evals.iter().enumerate() {
-            assert_eq!(
-                *v, zero,
-                "constraint {i} non-zero on selector=0 garbage row"
-            );
+            assert!(!row.violations(&ast).is_empty(), "{x} + {y} tampered");
         }
     }
 
@@ -1295,201 +990,275 @@ mod tests {
     fn sub_borrow_chain_constraint_count() {
         let cs = ConstraintSystem::<F>::new();
         let n = 8;
-        let a: Vec<_> = (0..n).map(|i| cs.col(i)).collect();
-        let b: Vec<_> = (0..n).map(|i| cs.col(n + i)).collect();
-        let r: Vec<_> = (0..n).map(|i| cs.col(2 * n + i)).collect();
-        let w: Vec<_> = (0..=n).map(|i| cs.col(3 * n + i)).collect();
+        let mut cols = Cols::new(&cs);
+        let (a, b, r, w) = (cols.take(n), cols.take(n), cols.take(n), cols.take(n));
+
+        sub_borrow_chain(&cs, &a, &b, &r, &w);
+
+        assert_eq!(cs.build().roots.len(), 2 * n);
+    }
+
+    #[test]
+    fn sub_borrow_chain_accepts_honest_rows_and_rejects_tampered() {
+        let cs = ConstraintSystem::<F>::new();
+        let n = 8;
+        let mut cols = Cols::new(&cs);
+        let (a, b, r, w) = (cols.take(n), cols.take(n), cols.take(n), cols.take(n));
 
         sub_borrow_chain(&cs, &a, &b, &r, &w);
 
         let ast = cs.build();
 
-        // Same pattern as addition:
-        // 1 + 4*n = 33
-        assert_eq!(ast.roots.len(), 4 * n + 1);
+        for (x, y) in [(0u128, 0u128), (255, 1), (100, 200), (37, 37)] {
+            let mut row = Row::new(4 * n);
+            row.bits(0, n, x);
+            row.bits(n, n, y);
+            row.bits(2 * n, n, x.wrapping_sub(y) & mask(n));
+            row.bits(3 * n, n, borrows(x, y, n));
+
+            assert!(row.violations(&ast).is_empty(), "{x} - {y}");
+            assert_eq!((borrows(x, y, n) >> (n - 1)) & 1 == 1, x < y);
+
+            row.bits(3 * n, n, borrows(x, y, n) ^ 1);
+
+            assert!(!row.violations(&ast).is_empty(), "{x} - {y} tampered");
+        }
     }
 
     #[test]
     fn range_check_constraint_count() {
         let cs = ConstraintSystem::<F>::new();
         let n = 12;
-        let v: Vec<_> = (0..n).map(|i| cs.col(i)).collect();
-        let r: Vec<_> = (0..n).map(|i| cs.col(n + i)).collect();
-        let w: Vec<_> = (0..=n).map(|i| cs.col(2 * n + i)).collect();
+        let mut cols = Cols::new(&cs);
+        let (v, w) = (cols.take(n), cols.take(n - 1));
 
-        range_check(&cs, &v, &r, &w, 3329);
+        range_check(&cs, &v, &w, 3329);
+
+        assert_eq!(cs.build().roots.len(), n);
+    }
+
+    #[test]
+    fn range_check_accepts_below_bound_and_rejects_at_bound() {
+        let cs = ConstraintSystem::<F>::new();
+        let n = 12;
+        let mut cols = Cols::new(&cs);
+        let (v, w) = (cols.take(n), cols.take(n - 1));
+
+        range_check(&cs, &v, &w, 3329);
 
         let ast = cs.build();
 
-        // 1 (borrow init) + 4*n (bool_r + bool_w + result + borrow per bit) + 1 (final borrow = 0) = 50
-        assert_eq!(ast.roots.len(), 4 * n + 2);
+        for value in [0u128, 1, 1664, 3328] {
+            let mut row = Row::new(2 * n - 1);
+            row.bits(0, n, value);
+            row.bits(n, n - 1, range_borrows(value, 3329, n));
+
+            assert!(row.violations(&ast).is_empty(), "{value}");
+        }
+
+        for value in [3329u128, 3330, 4095] {
+            let mut row = Row::new(2 * n - 1);
+            row.bits(0, n, value);
+            row.bits(n, n - 1, range_borrows(value, 3329, n));
+
+            assert!(!row.violations(&ast).is_empty(), "{value}");
+        }
+    }
+
+    #[test]
+    fn naf_digits_of_both_moduli() {
+        let digit = |shift: usize, negative: bool| NafDigit { shift, negative };
+
+        assert_eq!(
+            naf_digits(3329),
+            [
+                digit(12, false),
+                digit(10, true),
+                digit(8, false),
+                digit(0, false)
+            ]
+        );
+        assert_eq!(
+            naf_digits(8380417),
+            [digit(23, false), digit(13, true), digit(0, false)]
+        );
+        assert_eq!(naf_digits(0), []);
+        assert_eq!(naf_digits(1 << 9), [digit(9, false)]);
     }
 
     #[test]
     fn mul_const_layout_q3329() {
-        // q = 3329 = 0b110100000001
-        // Set bits:
-        // 0, 8, 10, 11 → popcount = 4
         let layout = mul_const_scratch_widths(12, 3329);
 
-        assert_eq!(layout.scratch_result_widths.len(), 2); // popcount - 2
-        assert_eq!(layout.scratch_carry_widths.len(), 3); // popcount - 1
-
-        // Result width:
-        // 24 (carry growth across 3 additions)
+        assert_eq!(layout.digits.len(), 4);
+        assert_eq!(layout.scratch_result_widths, [24, 24]);
+        assert_eq!(layout.scratch_carry_widths, [24, 24, 24]);
         assert_eq!(layout.result_width, 24);
     }
 
     #[test]
     fn mul_const_layout_q8380417() {
-        // q = 8380417 = 0b11111111110000000000001
-        // Set bits:
-        // 0, 13..22 → popcount = 11
         let layout = mul_const_scratch_widths(23, 8380417);
 
-        assert_eq!(layout.scratch_result_widths.len(), 9); // popcount - 2
-        assert_eq!(layout.scratch_carry_widths.len(), 10); // popcount - 1
-
-        // Result width:
-        // 46 (carry growth across 10 additions)
+        assert_eq!(layout.digits.len(), 3);
+        assert_eq!(layout.scratch_result_widths, [46]);
+        assert_eq!(layout.scratch_carry_widths, [46, 46]);
         assert_eq!(layout.result_width, 46);
     }
 
     #[test]
     fn mul_const_constraint_count() {
-        // Multiply 12-bit operand by 3329
-        // (popcount 5 → 4 additions).
-        let layout = mul_const_scratch_widths(12, 3329);
-        let total_cols = 12 // operand
-            + layout.result_width
-            + layout.scratch_result_widths.iter().sum::<usize>()
-            + layout.scratch_carry_widths.iter().sum::<usize>();
+        let (ast, layout, _) = mul_const_case(12, 3329);
 
-        let cs = ConstraintSystem::<F>::new();
-        let mut col_idx = 0;
-        let mut alloc = |n: usize| -> Vec<Expr<'_, F>> {
-            let cols: Vec<_> = (col_idx..col_idx + n).map(|i| cs.col(i)).collect();
-            col_idx += n;
-            cols
-        };
-
-        let operand = alloc(12);
-        let result = alloc(layout.result_width);
-
-        let scratch_results: Vec<Vec<Expr<'_, F>>> = layout
-            .scratch_result_widths
-            .iter()
-            .map(|&w| alloc(w))
-            .collect();
-        let scratch_carries: Vec<Vec<Expr<'_, F>>> = layout
-            .scratch_carry_widths
-            .iter()
-            .map(|&w| alloc(w))
-            .collect();
-
-        let sr_refs: Vec<&[Expr<'_, F>]> = scratch_results.iter().map(|v| v.as_slice()).collect();
-        let sc_refs: Vec<&[Expr<'_, F>]> = scratch_carries.iter().map(|v| v.as_slice()).collect();
-
-        mul_const(&cs, &operand, &result, &sr_refs, &sc_refs, 3329);
-
-        let ast = cs.build();
-
-        // 3 additions (popcount-1=3), each
-        // with (1 + 4*width) constraints
-        // (carry_init + 4 per bit).
-        let expected: usize = layout
-            .scratch_carry_widths
-            .iter()
-            .map(|&cw| {
-                let width = cw - 1;
-                4 * width + 1
-            })
-            .sum();
+        let expected: usize = layout.scratch_carry_widths.iter().map(|&w| 2 * w).sum();
 
         assert_eq!(ast.roots.len(), expected);
+        assert_eq!(expected, 144);
+    }
 
-        let _ = total_cols; // suppress unused
+    #[test]
+    fn mul_const_accepts_honest_rows_and_rejects_tampered() {
+        for (n, constant, operands) in [
+            (12usize, 3329u32, [0u128, 1, 4095, 2730]),
+            (23, 8380417, [0, 1, (1 << 23) - 1, 4_194_303]),
+            (8, 12, [0, 255, 7, 128]),
+        ] {
+            let (ast, layout, num_cols) = mul_const_case(n, constant);
+
+            for x in operands {
+                let mut row = Row::new(num_cols);
+                fill_mul_const(&mut row, &layout, n, x, constant);
+
+                assert!(row.violations(&ast).is_empty(), "{x} * {constant}");
+
+                row.bits(n, layout.result_width, (x * constant as u128) ^ 1);
+
+                assert!(
+                    !row.violations(&ast).is_empty(),
+                    "{x} * {constant} tampered"
+                );
+            }
+        }
     }
 
     #[test]
     fn mod_reduction_layout_q3329() {
-        let bl = mod_reduction_scratch_count(12, 3329);
+        let bl = mod_reduction_scratch_count(12, 24, 3329);
 
-        // Product width:
-        // 24 (12-bit quotient × 12-bit
-        // modulus, with carry growth).
-        assert_eq!(bl.product_width, 24);
-        assert_eq!(bl.add_carry_width, 25);
-        assert_eq!(bl.range_result_width, 12);
-        assert_eq!(bl.range_borrow_width, 13);
+        assert_eq!(bl.quot_x_mod_width, 24);
+        assert_eq!(bl.add_carry_width, 24);
+        assert_eq!(bl.range_borrow_width, 11);
     }
 
     #[test]
-    fn ast_sharing_across_multiple_add_chains() {
-        // Two independent 12-bit
-        // additions sharing the same
-        // ConstraintSystem should deduplicate
-        // the constant nodes.
+    fn mod_reduction_accepts_honest_rows_and_rejects_tampered() {
+        let (n, q) = (12usize, 3329u32);
+        let product_width = 24;
+        let layout = mod_reduction_scratch_count(n, product_width, q);
+
         let cs = ConstraintSystem::<F>::new();
+        let mut cols = Cols::new(&cs);
 
-        let a1: Vec<_> = (0..12).map(|i| cs.col(i)).collect();
-        let b1: Vec<_> = (12..24).map(|i| cs.col(i)).collect();
-        let r1: Vec<_> = (24..36).map(|i| cs.col(i)).collect();
-        let c1: Vec<_> = (36..49).map(|i| cs.col(i)).collect();
+        let product = cols.take(product_width);
+        let quot = cols.take(n);
+        let rem = cols.take(n);
+        let quot_x_q = cols.take(layout.quot_x_mod_width);
 
-        let a2: Vec<_> = (49..61).map(|i| cs.col(i)).collect();
-        let b2: Vec<_> = (61..73).map(|i| cs.col(i)).collect();
-        let r2: Vec<_> = (73..85).map(|i| cs.col(i)).collect();
-        let c2: Vec<_> = (85..98).map(|i| cs.col(i)).collect();
+        let result_cols: Vec<Vec<Expr<'_, F>>> = layout
+            .mul_layout
+            .scratch_result_widths
+            .iter()
+            .map(|&w| cols.take(w))
+            .collect();
 
-        add_carry_chain(&cs, &a1, &b1, &r1, &c1);
-        add_carry_chain(&cs, &a2, &b2, &r2, &c2);
+        let carry_cols: Vec<Vec<Expr<'_, F>>> = layout
+            .mul_layout
+            .scratch_carry_widths
+            .iter()
+            .map(|&w| cols.take(w))
+            .collect();
 
+        let add_carry = cols.take(layout.add_carry_width);
+        let range_borrow = cols.take(layout.range_borrow_width);
+
+        let result_refs: Vec<&[Expr<'_, F>]> = result_cols.iter().map(|v| v.as_slice()).collect();
+        let carry_refs: Vec<&[Expr<'_, F>]> = carry_cols.iter().map(|v| v.as_slice()).collect();
+
+        mod_reduction(
+            &cs,
+            &product,
+            &quot,
+            &rem,
+            &ModReductionWitness {
+                quot_x_mod_bits: &quot_x_q,
+                mul_scratch_results: &result_refs,
+                mul_scratch_carries: &carry_refs,
+                add_carry_bits: &add_carry,
+                range_borrow_bits: &range_borrow,
+            },
+            q,
+        );
+
+        let num_cols = cols.next;
         let ast = cs.build();
 
-        // Two additions of
-        // 12 bits = 2 * (4*12 + 1) = 98 constraints
-        assert_eq!(ast.roots.len(), 98);
+        for (x, y) in [(0u128, 0u128), (3328, 3328), (17, 1000), (2000, 2500)] {
+            let p = x * y;
+            let (quotient, remainder) = (p / q as u128, p % q as u128);
 
-        // AST arena should be smaller than 2x
-        // a single addition because the carry
-        // formula structure (maj pattern) is
-        // shared — the Mul nodes for a*b, a*c,
-        // b*c have the same shape, though with
-        // different column operands they won't
-        // deduplicate (cell dedup only matches
-        // same column index). Constants DO
-        // deduplicate: the zero constant
-        // for carry[0] is allocated once.
-        //
-        // Just verify the arena is non-empty and reasonable.
-        assert!(!ast.arena.is_empty());
+            let mut row = Row::new(num_cols);
+            row.bits(0, product_width, p);
+            row.bits(product_width, n, quotient);
+            row.bits(product_width + n, n, remainder);
+
+            let mut sub = Row::new(num_cols - product_width - n - n);
+            fill_mul_const(&mut sub, &layout.mul_layout, n, quotient, q);
+
+            let mul_cells = layout.quot_x_mod_width
+                + layout
+                    .mul_layout
+                    .scratch_result_widths
+                    .iter()
+                    .sum::<usize>()
+                + layout.mul_layout.scratch_carry_widths.iter().sum::<usize>();
+            row.cells[product_width + 2 * n..product_width + 2 * n + mul_cells]
+                .copy_from_slice(&sub.cells[n..n + mul_cells]);
+
+            let add_start = product_width + 2 * n + mul_cells;
+            row.bits(
+                add_start,
+                layout.add_carry_width,
+                carries(quotient * q as u128, remainder, layout.add_carry_width),
+            );
+            row.bits(
+                add_start + layout.add_carry_width,
+                layout.range_borrow_width,
+                range_borrows(remainder, q, n),
+            );
+
+            assert!(row.violations(&ast).is_empty(), "{x} * {y}");
+
+            row.bits(product_width + n, n, remainder ^ 1);
+
+            assert!(!row.violations(&ast).is_empty(), "{x} * {y} tampered");
+        }
     }
 
     #[test]
     fn schoolbook_mul_layout_12x12() {
         let layout = schoolbook_mul_layout(12, 12);
 
-        // 12-bit × 12-bit → 24-bit product
         assert_eq!(layout.product_width, 24);
         assert_eq!(layout.pp0_width, 12);
-
-        // 11 additions (b_width - 1)
         assert_eq!(layout.carry_widths.len(), 11);
-
-        // 10 intermediate sums (b_width - 2)
         assert_eq!(layout.sum_widths.len(), 10);
 
-        // Sum widths:
-        // 14, 15, 16, ..., 23
         for (i, &w) in layout.sum_widths.iter().enumerate() {
             assert_eq!(w, 14 + i);
         }
 
-        // Carry widths:
-        // sum_width + 1
         for (i, &w) in layout.carry_widths.iter().enumerate() {
-            assert_eq!(w, 15 + i);
+            assert_eq!(w, 14 + i);
         }
     }
 
@@ -1504,129 +1273,142 @@ mod tests {
     }
 
     #[test]
+    fn schoolbook_mul_layout_8x12() {
+        let layout = schoolbook_mul_layout(8, 12);
+
+        assert_eq!(layout.product_width, 20);
+        assert_eq!(layout.pp0_width, 8);
+        assert_eq!(layout.carry_widths.len(), 11);
+        assert_eq!(layout.sum_widths.len(), 10);
+    }
+
+    #[test]
     fn schoolbook_mul_constraint_count_4x4() {
-        // Small case:
-        // 4-bit × 4-bit = 8-bit.
-        let layout = schoolbook_mul_layout(4, 4);
+        let (ast, layout, _) = schoolbook_case(4);
 
-        let cs = ConstraintSystem::<F>::new();
-        let mut col_idx = 0;
+        let expected = layout.pp0_width + layout.carry_widths.iter().map(|&w| 2 * w).sum::<usize>();
 
-        let mut alloc = |n: usize| -> Vec<Expr<'_, F>> {
-            let cols: Vec<_> = (col_idx..col_idx + n).map(|i| cs.col(i)).collect();
-            col_idx += n;
+        assert_eq!(ast.roots.len(), expected);
+        assert_eq!(expected, 46);
+    }
 
-            cols
-        };
+    #[test]
+    fn schoolbook_mul_accepts_honest_rows_and_rejects_tampered() {
+        for n in [4usize, 12] {
+            let (ast, layout, num_cols) = schoolbook_case(n);
 
-        let a = alloc(4);
-        let b = alloc(4);
-        let product = alloc(layout.product_width);
-        let pp0 = alloc(layout.pp0_width);
+            for (x, y) in [(0u128, 0u128), (mask(n), mask(n)), (5, 9), (mask(n), 1)] {
+                let mut row = Row::new(num_cols);
+                row.bits(0, n, x);
+                row.bits(n, n, y);
+                row.bits(2 * n, layout.product_width, x * y);
 
-        let sums: Vec<Vec<Expr<'_, F>>> = layout.sum_widths.iter().map(|&w| alloc(w)).collect();
-        let carries: Vec<Vec<Expr<'_, F>>> =
-            layout.carry_widths.iter().map(|&w| alloc(w)).collect();
+                let mut col = 2 * n + layout.product_width;
 
-        let sum_refs: Vec<&[Expr<'_, F>]> = sums.iter().map(|v| v.as_slice()).collect();
-        let carry_refs: Vec<&[Expr<'_, F>]> = carries.iter().map(|v| v.as_slice()).collect();
+                let partial = |j: usize| -> u128 {
+                    match (y >> j) & 1 {
+                        1 => x << j,
+                        _ => 0,
+                    }
+                };
 
-        schoolbook_mul(
-            &cs,
-            &a,
-            &b,
-            &product,
-            &SchoolbookMulWitness {
-                pp0: &pp0,
-                sums: &sum_refs,
-                carries: &carry_refs,
-            },
-        );
+                row.bits(col, layout.pp0_width, partial(0));
 
-        let ast = cs.build();
+                col += layout.pp0_width;
 
-        // pp0 materialization:
-        // 4 × (boolean + constrain) = 8
-        // 3 additions (b_width - 1):
-        //   carry widths: [7, 8, 9]
-        //   each: 4*width + 1 constraints
-        //   = 29 + 33 + 37 = 99
-        // Total: 8 + 99 = 107
-        let pp0_constraints = 2 * layout.pp0_width;
-        let add_constraints: usize = layout.carry_widths.iter().map(|&cw| 4 * (cw - 1) + 1).sum();
+                let sum_start = col;
 
-        assert_eq!(ast.roots.len(), pp0_constraints + add_constraints,);
+                col += layout.sum_widths.iter().sum::<usize>();
+
+                let carry_start = col;
+
+                let mut acc = partial(0);
+                let (mut sum_col, mut carry_col) = (sum_start, carry_start);
+
+                for j in 1..n {
+                    let width = layout.carry_widths[j - 1];
+
+                    row.bits(carry_col, width, carries(acc, partial(j), width));
+                    carry_col += width;
+
+                    acc += partial(j);
+
+                    if j < n - 1 {
+                        row.bits(sum_col, layout.sum_widths[j - 1], acc);
+                        sum_col += layout.sum_widths[j - 1];
+                    }
+                }
+
+                assert!(row.violations(&ast).is_empty(), "{x} * {y} at {n} bits");
+
+                row.bits(2 * n, layout.product_width, (x * y) ^ 1);
+
+                assert!(!row.violations(&ast).is_empty(), "{x} * {y} tampered");
+            }
+        }
     }
 
     #[test]
     fn mod_add_layout_q3329() {
         let layout = mod_add_scratch_count(12);
 
-        assert_eq!(layout.result_width, 12);
-        assert_eq!(layout.carry_width, 13);
-        assert_eq!(layout.range_result_width, 12);
-        assert_eq!(layout.range_borrow_width, 13);
-
-        // 2×12 + 2×13 + 1 + 12 + 13 = 76
-        assert_eq!(layout.total_scratch_bits, 76);
+        assert_eq!(layout.carry_width, 12);
+        assert_eq!(layout.borrow_width, 12);
+        assert_eq!(layout.range_borrow_width, 11);
     }
 
     #[test]
     fn mod_add_constraint_count_q3329() {
-        let layout = mod_add_scratch_count(12);
-        let cs = ConstraintSystem::<F>::new();
+        let (ast, _) = mod_add_case(12, 3329);
 
-        let mut col_idx = 0;
+        assert_eq!(ast.roots.len(), 4 * 12 + 1);
+    }
 
-        let mut alloc = |n: usize| -> Vec<Expr<'_, F>> {
-            let cols: Vec<_> = (col_idx..col_idx + n).map(|i| cs.col(i)).collect();
-            col_idx += n;
+    #[test]
+    fn mod_add_accepts_honest_rows_and_rejects_tampered() {
+        for (n, q) in [(12usize, 3329u32), (23, 8380417)] {
+            let (ast, num_cols) = mod_add_case(n, q);
+            let q = q as u128;
 
-            cols
-        };
+            for (x, y) in [
+                (0u128, 0u128),
+                (q - 1, q - 1),
+                (q - 1, 1),
+                (1, 2),
+                (q / 2, q / 2 + 1),
+            ] {
+                let s = x + y;
+                let flag = s >= q;
+                let r = s - if flag { q } else { 0 };
+                let fq = if flag { q } else { 0 };
 
-        let a = alloc(12);
-        let b = alloc(12);
-        let result = alloc(12);
-        let lhs_result = alloc(layout.result_width);
-        let lhs_carry = alloc(layout.carry_width);
-        let rhs_result = alloc(layout.result_width);
-        let rhs_carry = alloc(layout.carry_width);
-        let flag_col = alloc(1);
-        let range_result = alloc(layout.range_result_width);
-        let range_borrow = alloc(layout.range_borrow_width);
+                let mut row = Row::new(num_cols);
+                row.bits(0, n, x);
+                row.bits(n, n, y);
+                row.bits(2 * n, n, r);
+                row.bits(3 * n, n, carries(x, y, n));
+                row.bits(4 * n, n, borrows(s, fq, n));
+                row.bit(5 * n, flag);
+                row.bits(5 * n + 1, n - 1, range_borrows(r, q as u32, n));
 
-        mod_add(
-            &cs,
-            &a,
-            &b,
-            &result,
-            &ModAddWitness {
-                lhs_result: &lhs_result,
-                lhs_carry: &lhs_carry,
-                rhs_result: &rhs_result,
-                rhs_carry: &rhs_carry,
-                flag: flag_col[0],
-                range_result: &range_result,
-                range_borrow: &range_borrow,
-            },
-            3329,
-        );
+                assert!(row.violations(&ast).is_empty(), "{x} + {y} mod {q}");
 
-        let ast = cs.build();
+                row.bit(5 * n, !flag);
 
-        // flag boolean: 1
-        // LHS add (12-bit):
-        // 4*12 + 1 = 49
-        // RHS add (12-bit):
-        // 4*12 + 1 = 49
-        // Equality:
-        // 12 result bits + 1 carry = 13
-        // Range check (12-bit):
-        // 4*12 + 2 = 50
-        // Total:
-        // 1 + 49 + 49 + 13 + 50 = 162
-        assert_eq!(ast.roots.len(), 162);
+                assert!(
+                    !row.violations(&ast).is_empty(),
+                    "{x} + {y} mod {q} flag flipped"
+                );
+
+                row.bit(5 * n, flag);
+                row.bits(2 * n, n, r ^ 1);
+
+                assert!(
+                    !row.violations(&ast).is_empty(),
+                    "{x} + {y} mod {q} tampered"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1637,23 +1419,118 @@ mod tests {
 
         bit_packing(&cs, bus, &bits);
 
-        let ast = cs.build();
-
-        // Single degree-1 constraint
-        assert_eq!(ast.roots.len(), 1);
+        assert_eq!(cs.build().roots.len(), 1);
     }
 
     #[test]
-    fn schoolbook_mul_layout_8x12() {
-        let layout = schoolbook_mul_layout(8, 12);
+    fn add_carry_chain_with_carry_in_accepts_honest_rows_and_rejects_tampered() {
+        let cs = ConstraintSystem::<F>::new();
+        let n = 12;
 
-        assert_eq!(layout.product_width, 20);
-        assert_eq!(layout.pp0_width, 8);
+        let mut cols = Cols::new(&cs);
 
-        // 11 additions (b_width - 1)
-        assert_eq!(layout.carry_widths.len(), 11);
+        let carry_in = cols.take(1)[0];
+        let (a, b, r, c) = (cols.take(n), cols.take(n), cols.take(n), cols.take(n));
 
-        // 10 intermediate sums (b_width - 2)
-        assert_eq!(layout.sum_widths.len(), 10);
+        add_carry_chain_with_carry_in(&cs, carry_in, &a, &b, &r, &c);
+
+        let ast = cs.build();
+
+        for (x, y, cin) in [
+            (4095u128, 0u128, 1u128),
+            (2730, 1365, 1),
+            (0, 0, 1),
+            (3329, 4000, 0),
+        ] {
+            let carry = (0..n).fold(0u128, |word, k| {
+                let low = mask(k + 1);
+                word | ((((x & low) + (y & low) + cin) >> (k + 1)) << k)
+            });
+
+            let mut row = Row::new(1 + 4 * n);
+            row.bit(0, cin == 1);
+            row.bits(1, n, x);
+            row.bits(1 + n, n, y);
+            row.bits(1 + 2 * n, n, (x + y + cin) & mask(n));
+            row.bits(1 + 3 * n, n, carry);
+
+            assert!(row.violations(&ast).is_empty(), "{x} + {y} + {cin}");
+
+            row.bit(0, cin == 0);
+
+            assert!(
+                !row.violations(&ast).is_empty(),
+                "{x} + {y} + {cin} carry-in flipped"
+            );
+        }
+    }
+
+    #[test]
+    fn mod_add_accepts_only_honest_fill_on_every_boolean_witness() {
+        let n = 3;
+        for m in [5u32, 6, 7] {
+            let (ast, num_cols) = mod_add_case(n, m);
+            let q = m as u128;
+
+            for (x, y) in (0..q).flat_map(|x| (0..q).map(move |y| (x, y))) {
+                let s = x + y;
+                let flag = s >= q;
+                let r = s - if flag { q } else { 0 };
+                let fq = if flag { q } else { 0 };
+
+                let honest = r
+                    | (carries(x, y, n) << n)
+                    | (borrows(s, fq, n) << (2 * n))
+                    | ((flag as u128) << (3 * n))
+                    | (range_borrows(r, m, n) << (3 * n + 1));
+
+                let mut row = Row::new(num_cols);
+                row.bits(0, n, x);
+                row.bits(n, n, y);
+
+                let accepted: Vec<u128> = (0..1u128 << (4 * n))
+                    .filter(|&word| {
+                        row.bits(2 * n, 4 * n, word);
+                        row.violations(&ast).is_empty()
+                    })
+                    .collect();
+
+                assert_eq!(accepted, [honest], "{x} + {y} mod {m}");
+            }
+        }
+    }
+
+    #[test]
+    fn range_check_accepts_only_honest_borrows_on_every_boolean_witness() {
+        let n = 4;
+        for bound in 1u32..=16 {
+            let cs = ConstraintSystem::<F>::new();
+            let mut cols = Cols::new(&cs);
+
+            let (v, w) = (cols.take(n), cols.take(n - 1));
+
+            range_check(&cs, &v, &w, bound);
+
+            let ast = cs.build();
+
+            for value in 0..1u128 << n {
+                let expected: Vec<u128> = match value < bound as u128 {
+                    true => alloc::vec![range_borrows(value, bound, n)],
+                    false => Vec::new(),
+                };
+
+                let mut row = Row::new(2 * n - 1);
+                row.bits(0, n, value);
+
+                let accepted: Vec<u128> = (0..1u128 << (n - 1))
+                    .filter(|&word| {
+                        row.bits(n, n - 1, word);
+                        row.violations(&ast).is_empty()
+                    })
+                    .collect();
+
+                assert_eq!(accepted, expected, "{value} < {bound}");
+            }
+        }
     }
 }

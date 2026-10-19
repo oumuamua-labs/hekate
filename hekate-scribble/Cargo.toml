@@ -13,14 +13,13 @@ categories = ["cryptography", "development-tools::testing"]
 
 [features]
 default = ["parallel"]
-parallel = ["dep:rayon"]
+parallel = ["hekate-sdk/parallel"]
 
 [dependencies]
 hekate-math = { workspace = true, features = ["std"] }
 hekate-sdk = { workspace = true, default-features = false, features = ["std", "blake3"] }
 hekate-core = { workspace = true, default-features = false, features = ["std", "blake3"] }
 hekate-program = { workspace = true, default-features = false, features = ["std"] }
-rayon = { workspace = true, optional = true }
 proptest = "1.5"
 
 [dev-dependencies]

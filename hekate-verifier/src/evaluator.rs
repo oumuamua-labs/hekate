@@ -7,7 +7,7 @@ use crate::sumcheck::verify;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use hekate_core::config::{Config, INV_RATE};
+use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::proofs::EvalBatchProof;
 use hekate_core::tensor::TensorProduct;
@@ -236,7 +236,7 @@ where
             grid_cols,
             encoded_width,
             support = geom.support_size,
-            fractional = encoded_width == grid_cols * INV_RATE,
+            fractional = encoded_width == grid_cols * config.code_rate.inv_rate(),
             "pool geometry"
         );
 
@@ -508,7 +508,7 @@ where
 /// `q_flat = [q_data(grid_cols), q_support(ldt)]`. Layout must
 /// match the prover's `rs_encode_grid`; `q_eval` reads `q_data`
 /// alone, the support masks openings without entering the claim.
-fn rs_encode_at<F: HardwareField + BinaryFieldExtras>(
+pub fn rs_encode_at<F: HardwareField + BinaryFieldExtras>(
     q_flat: &[Flat<F>],
     grid_cols: usize,
     config: &Config,

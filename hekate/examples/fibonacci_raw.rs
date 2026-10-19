@@ -5,14 +5,14 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use hekate::core::trace::{ColumnTrace, ColumnType};
 use hekate::crypto::DefaultHasher;
 use hekate::math::{Block32, Block128, TowerField};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{Trace, TraceBuilder};
 use hekate_crypto::transcript::Transcript;
-use hekate_gadgets::atoms::int_arith::add_carry_chain_with_carry_in;
+use hekate_gadgets::atoms::int_arith::add_carry_chain;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::define_columns;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
@@ -28,12 +28,22 @@ use zeroize::Zeroizing;
 type F = Block128;
 type H = DefaultHasher;
 
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    run: common::RunArgs,
+
+    /// Trace rows as a power of two.
+    #[arg(long, default_value_t = 24)]
+    num_vars: usize,
+}
+
 // =================================================================
 // 2. INTEGER FIBONACCI AIR DEFINITION
 //
 // Real 32-bit integer Fibonacci over GF(2^k):
 // the carry chain is emulated bit-by-bit via
-// `add_carry_chain_with_carry_in`. Four B32
+// `add_carry_chain`. Four B32
 // physical columns (A, B, SUM, CARRY) expand
 // virtually into 128 bit slots the adder operates
 // on; the same four expose a packed view for
@@ -66,13 +76,7 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     let sum_bits: Vec<_> = words.bits(2).iter().map(|c| cs.col(c.index())).collect();
     let carry_v: Vec<_> = words.bits(3).iter().map(|c| cs.col(c.index())).collect();
 
-    let zero = cs.constant(F::ZERO);
-
-    let mut carry = Vec::with_capacity(33);
-    carry.push(zero);
-    carry.extend(carry_v.iter().copied());
-
-    add_carry_chain_with_carry_in(cs, &a_bits, &b_bits, &sum_bits, &carry);
+    add_carry_chain(cs, &a_bits, &b_bits, &sum_bits, &carry_v);
 
     let q_cell = cs.col(q.index());
     let b_packed = cs.col(b_packed_col.index());
@@ -97,8 +101,8 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
 // 3. TRACE GENERATION
 //
 // carry_word layout:
-// bit k = adder's carry[k+1]. Bit 31 is the
-// overflow (adder's carry[32]), constrained
+// bit k = adder's carry out of position k.
+// Bit 31 is the overflow, constrained
 // by the adder but otherwise unused.
 // =================================================================
 fn generate_fib_trace(num_vars: usize) -> errors::Result<ColumnTrace> {
@@ -142,15 +146,14 @@ fn generate_fib_trace(num_vars: usize) -> errors::Result<ColumnTrace> {
 // 4. MAIN EXECUTION
 // =================================================================
 fn main() {
+    let args = Args::parse();
+
     common::init("Fibonacci (integer, 32-bit)");
 
-    let num_vars = common::num_vars(24);
+    let num_vars = args.num_vars;
     let num_rows = 1 << num_vars;
 
-    let config = Config {
-        zero_knowledge: common::zero_knowledge(),
-        ..Config::default()
-    };
+    let config = args.run.config();
 
     let mut blinding_seed = Zeroizing::new([0u8; 32]);
     OsRng.try_fill_bytes(&mut *blinding_seed).unwrap();
@@ -190,8 +193,7 @@ fn main() {
 
     let mut verifier_transcript = Transcript::<H>::new(b"FibonacciInt");
 
-    let pinned_id = common::audited_id::<F, _>(&program);
-
+    let pinned_id = args.run.audited_id::<F, _>(&program);
     let is_valid = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,

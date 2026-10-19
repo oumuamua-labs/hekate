@@ -35,7 +35,6 @@ pub struct NttLayout {
 
     pub s2: usize,
     pub s2_sub: ModAddCols,
-    pub s2_range_result: usize,
     pub s2_range_borrow: usize,
 
     pub mul_pp0: usize,
@@ -49,7 +48,6 @@ pub struct NttLayout {
     pub red_results: Vec<(usize, usize)>,
     pub red_carries: Vec<(usize, usize)>,
     pub red_add_carry: usize,
-    pub red_range_result: usize,
     pub red_range_borrow: usize,
 
     pub num_bits: usize,
@@ -94,7 +92,7 @@ impl NttLayout {
         registers: usize,
     ) -> Self {
         let mul = schoolbook_mul_layout(bit_width, bit_width);
-        let red = mod_reduction_scratch_count(bit_width, q);
+        let red = mod_reduction_scratch_count(bit_width, mul.product_width, q);
         let add = mod_add_scratch_count(bit_width);
 
         let mut next = 0usize;
@@ -117,8 +115,7 @@ impl NttLayout {
 
         let s2 = alloc(bit_width);
         let s2_sub = ModAddCols::alloc(&add, &mut alloc);
-        let s2_range_result = alloc(bit_width);
-        let s2_range_borrow = alloc(bit_width + 1);
+        let s2_range_borrow = alloc(bit_width - 1);
 
         let mul_pp0 = alloc(mul.pp0_width);
         let mul_sums = mul.sum_widths.iter().map(|&n| (alloc(n), n)).collect();
@@ -127,7 +124,7 @@ impl NttLayout {
 
         let quot = alloc(bit_width);
         let p = alloc(bit_width);
-        let quot_x_q = alloc(red.product_width);
+        let quot_x_q = alloc(red.quot_x_mod_width);
 
         let red_results = red
             .mul_layout
@@ -144,7 +141,6 @@ impl NttLayout {
             .collect();
 
         let red_add_carry = alloc(red.add_carry_width);
-        let red_range_result = alloc(red.range_result_width);
         let red_range_borrow = alloc(red.range_borrow_width);
 
         let num_bits = next;
@@ -171,7 +167,6 @@ impl NttLayout {
             s1_add,
             s2,
             s2_sub,
-            s2_range_result,
             s2_range_borrow,
             mul_pp0,
             mul_sums,
@@ -183,7 +178,6 @@ impl NttLayout {
             red_results,
             red_carries,
             red_add_carry,
-            red_range_result,
             red_range_borrow,
             num_bits,
             num_packed,
@@ -235,11 +229,10 @@ impl NttLayout {
             product: (self.product, self.mul.product_width),
             quot: (self.quot, self.bit_width),
             rem: (self.p, self.bit_width),
-            quot_x_q: (self.quot_x_q, self.red.product_width),
+            quot_x_q: (self.quot_x_q, self.red.quot_x_mod_width),
             red_results: self.red_results.clone(),
             red_carries: self.red_carries.clone(),
             red_add_carry: (self.red_add_carry, self.red.add_carry_width),
-            red_range_result: (self.red_range_result, self.red.range_result_width),
             red_range_borrow: (self.red_range_borrow, self.red.range_borrow_width),
         }
     }

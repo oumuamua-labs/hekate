@@ -8,8 +8,10 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::Range;
 use hashbrown::HashMap;
 use hekate_core::errors;
+use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{Trace, TraceColumn, TraceCompatibleField};
 use hekate_math::{Block128, Flat, TowerField};
 use hekate_program::chiplet::ChipletDef;
@@ -24,6 +26,7 @@ use hekate_program::{
 use rayon::prelude::*;
 
 const MAX_REPORTED_MISMATCH_ROWS: usize = 32;
+const BUS_CHUNK_ROWS: usize = 1 << 12;
 
 const FMT_MAX_ROW_PREVIEW: usize = 8;
 const FMT_MAX_MISMATCH_PREVIEW: usize = 16;
@@ -172,7 +175,43 @@ where
     P: Air<F>,
     T: Trace,
 {
-    let (mut constraints, mut pins) = collect_air_violations(air, trace, table)?;
+    let (mut constraints, mut pins) = collect_air_violations(air, trace, table, None)?;
+
+    report.constraint_violations.append(&mut constraints);
+    report.fixed_column_violations.append(&mut pins);
+
+    Ok(())
+}
+
+/// Checks constraints and fixed columns at `rows`
+/// only, each once in ascending order, and errors
+/// on a row at or past the trace height.
+pub fn check_air_rows<F, P, T>(
+    air: &P,
+    trace: &T,
+    table: TableId,
+    rows: &[usize],
+    report: &mut PreflightReport<F>,
+) -> errors::Result<()>
+where
+    F: TraceCompatibleField,
+    P: Air<F>,
+    T: Trace,
+{
+    let num_rows = trace.num_rows()?;
+
+    let mut sorted = rows.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+
+    if let Some(&row_idx) = sorted.last()
+        && row_idx >= num_rows
+    {
+        return Err(hekate_core::trace::Error::RowIndexOutOfBounds { row_idx, num_rows }.into());
+    }
+
+    let (mut constraints, mut pins) = collect_air_violations(air, trace, table, Some(&sorted))?;
+
     report.constraint_violations.append(&mut constraints);
     report.fixed_column_violations.append(&mut pins);
 
@@ -294,6 +333,7 @@ fn collect_air_violations<F, P, T>(
     air: &P,
     trace: &T,
     table: TableId,
+    rows: Option<&[usize]>,
 ) -> errors::Result<AirViolations<F>>
 where
     F: TraceCompatibleField,
@@ -322,6 +362,32 @@ where
 
     let ast_arena_len = ast.arena.len();
     let consts = ast.precompute_hardware_consts();
+
+    if let Some(rows) = rows {
+        let mut scratch = RowScratch::<F>::new(num_virtual_cols, ast_arena_len, phys_row_bytes);
+        let mut constraints: Vec<ConstraintViolation<F>> = Vec::new();
+        let mut pin_violations: Vec<FixedColumnViolation<F>> = Vec::new();
+
+        for &row_idx in rows {
+            evaluate_air_row(
+                air,
+                trace,
+                table,
+                &ast,
+                &consts,
+                &pins,
+                num_virtual_cols,
+                has_virtual_expansion,
+                num_rows,
+                row_idx,
+                &mut scratch,
+                &mut constraints,
+                &mut pin_violations,
+            )?;
+        }
+
+        return Ok((constraints, pin_violations));
+    }
 
     #[cfg(not(feature = "parallel"))]
     {
@@ -515,7 +581,9 @@ where
             .par_iter()
             .zip(chiplet_traces.par_iter())
             .enumerate()
-            .map(|(idx, (def, trace))| collect_air_violations(def, trace, TableId::Chiplet(idx)))
+            .map(|(idx, (def, trace))| {
+                collect_air_violations(def, trace, TableId::Chiplet(idx), None)
+            })
             .collect();
 
         for result in per_chiplet {
@@ -555,6 +623,81 @@ struct EndpointStats<F> {
     clock_collision: Option<(usize, usize)>,
 }
 
+enum BusColumns<'a, F: TraceCompatibleField, T> {
+    Virtual(Vec<PolyVariant<'a, F>>),
+    Physical(&'a T),
+}
+
+impl<'a, F: TraceCompatibleField, T: Trace> BusColumns<'a, F, T> {
+    fn new<A: Air<F>>(air: &A, trace: &'a T) -> errors::Result<Self> {
+        match air.virtual_expander() {
+            Some(expander) => Ok(Self::Virtual(expander.expand_variants(trace, 0)?)),
+            None => Ok(Self::Physical(trace)),
+        }
+    }
+
+    fn get(&self, col: usize, row: usize) -> errors::Result<Flat<F>> {
+        match self {
+            Self::Virtual(variants) => {
+                let variant = variants.get(col).ok_or(errors::Error::Protocol {
+                    protocol: "preflight",
+                    message: "bus spec reads a column past the virtual layout",
+                })?;
+
+                Ok(variant.get_at(row))
+            }
+            Self::Physical(trace) => trace.get_element(col, row),
+        }
+    }
+
+    fn selector(&self, spec: &PermutationCheckSpec, row: usize) -> errors::Result<Flat<F>> {
+        let s_send = match spec.selector {
+            Some(col) => self.get(col, row)?,
+            None => Flat::from_raw(F::ONE),
+        };
+
+        let s_recv = match spec.recv_selector {
+            Some(col) => self.get(col, row)?,
+            None => Flat::from_raw(F::ZERO),
+        };
+
+        Ok(s_send + s_recv)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ChunkStats<F> {
+    product: Flat<F>,
+    claimed_sum: Flat<F>,
+    active_rows: usize,
+}
+
+impl<F: TraceCompatibleField> ChunkStats<F> {
+    fn merge(self, other: Self) -> Self {
+        Self {
+            product: self.product * other.product,
+            claimed_sum: self.claimed_sum + other.claimed_sum,
+            active_rows: self.active_rows + other.active_rows,
+        }
+    }
+}
+
+struct ChunkScratch<F> {
+    keys: Vec<Flat<F>>,
+    selectors: Vec<(usize, Flat<F>)>,
+    prefix: Vec<Flat<F>>,
+}
+
+impl<F> ChunkScratch<F> {
+    fn new() -> Self {
+        Self {
+            keys: Vec::with_capacity(BUS_CHUNK_ROWS),
+            selectors: Vec::with_capacity(BUS_CHUNK_ROWS),
+            prefix: Vec::with_capacity(BUS_CHUNK_ROWS),
+        }
+    }
+}
+
 /// Fixed γ, β for char-2 bus closure check;
 /// SZ collisions are 2^-128 rare.
 fn fixed_gamma<F: TraceCompatibleField>() -> Flat<F> {
@@ -565,17 +708,17 @@ fn fixed_beta<F: TraceCompatibleField>() -> Flat<F> {
     F::from(0x517cc1b727220a95u128).to_hardware()
 }
 
-fn resolve_source<F: TraceCompatibleField>(
+fn resolve_source<F: TraceCompatibleField, T: Trace>(
     source: &Source,
-    row: &[Flat<F>],
+    columns: &BusColumns<'_, F, T>,
     row_idx: usize,
     rank: Flat<F>,
     beta: Flat<F>,
     current_beta: Flat<F>,
-) -> (Flat<F>, Flat<F>) {
-    match source {
+) -> errors::Result<(Flat<F>, Flat<F>)> {
+    let resolved = match source {
         Source::Column(col_idx) | Source::PhaseColumn(col_idx) => {
-            let val = row[*col_idx];
+            let val = columns.get(*col_idx, row_idx)?;
             (val * current_beta, current_beta * beta)
         }
         Source::Columns(col_indices) => {
@@ -583,7 +726,7 @@ fn resolve_source<F: TraceCompatibleField>(
             let mut curr = current_beta;
 
             for &idx in col_indices {
-                acc += row[idx] * curr;
+                acc += columns.get(idx, row_idx)? * curr;
                 curr *= beta;
             }
 
@@ -613,7 +756,9 @@ fn resolve_source<F: TraceCompatibleField>(
             (v * current_beta, current_beta * beta)
         }
         Source::EmitRank(_) => (rank * current_beta, current_beta * beta),
-    }
+    };
+
+    Ok(resolved)
 }
 
 /// Compute `Π(γ + key)`, `claimed_sum = XOR
@@ -635,9 +780,6 @@ where
     T: Trace,
 {
     let num_rows = trace.num_rows()?;
-    let num_virtual = air.num_columns();
-
-    let has_expansion = air.virtual_expander().is_some();
     let want_h = spec.kind == BusKind::Lookup;
 
     let zero = Flat::from_raw(F::ZERO);
@@ -664,107 +806,102 @@ where
         }
     };
 
-    let mut product = one;
-    let mut claimed_sum = zero;
-    let mut active_rows = 0usize;
+    let columns = BusColumns::new(air, trace)?;
 
-    let clock_mask = separating_clock_mask(spec, num_rows.trailing_zeros() as usize);
-
-    let mut clock_seen: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut clock_collision: Option<(usize, usize)> = None;
-
-    let mut row_vec: Vec<Flat<F>> = Vec::with_capacity(num_virtual);
-    let mut row_bytes: Vec<u8> = Vec::new();
+    let clock_collision = match separating_clock_mask(spec, num_rows.trailing_zeros() as usize) {
+        Some(mask) => first_clock_collision(spec, &columns, num_rows, mask)?,
+        None => None,
+    };
 
     let mut h_rows: Vec<Flat<F>> = if want_h {
-        Vec::with_capacity(num_rows)
+        vec![zero; num_rows]
     } else {
         Vec::new()
     };
 
-    if has_expansion {
-        let phys_row_bytes: usize = air.column_layout().iter().map(|c| c.byte_size()).sum();
-        row_bytes = Vec::with_capacity(phys_row_bytes);
-    }
+    let identity = ChunkStats {
+        product: one,
+        claimed_sum: zero,
+        active_rows: 0,
+    };
 
-    let columns = trace.columns();
+    let num_chunks = num_rows.div_ceil(BUS_CHUNK_ROWS);
 
-    for row_idx in 0..num_rows {
-        row_vec.clear();
+    #[cfg(not(feature = "parallel"))]
+    let stats = {
+        let mut scratch = ChunkScratch::new();
+        let mut stats = identity;
 
-        if has_expansion {
-            extract_row_bytes(columns, row_idx, &mut row_bytes);
-            air.parse_virtual_row(&row_bytes, &mut row_vec);
-        } else {
-            for col in 0..num_virtual {
-                row_vec.push(trace.get_element::<F>(col, row_idx)?);
-            }
+        for chunk in 0..num_chunks {
+            let rows = chunk_rows(chunk, num_rows);
+            let h_out = if want_h {
+                Some(&mut h_rows[rows.clone()])
+            } else {
+                None
+            };
+
+            let chunk_stats = endpoint_chunk(
+                spec,
+                &columns,
+                &clock_column,
+                rows,
+                gamma,
+                beta,
+                &mut scratch,
+                h_out,
+            )?;
+
+            stats = stats.merge(chunk_stats);
         }
 
-        let s_send = match spec.selector {
-            Some(sel_col) => row_vec[sel_col],
-            None => one,
-        };
+        stats
+    };
 
-        let s_recv = match spec.recv_selector {
-            Some(sel_col) => row_vec[sel_col],
-            None => zero,
-        };
+    #[cfg(feature = "parallel")]
+    let stats = if want_h {
+        h_rows
+            .par_chunks_mut(BUS_CHUNK_ROWS)
+            .enumerate()
+            .map_init(ChunkScratch::new, |scratch, (chunk, h_out)| {
+                let rows = chunk_rows(chunk, num_rows);
 
-        let selector_val = s_send + s_recv;
+                endpoint_chunk(
+                    spec,
+                    &columns,
+                    &clock_column,
+                    rows,
+                    gamma,
+                    beta,
+                    scratch,
+                    Some(h_out),
+                )
+            })
+            .try_reduce(|| identity, |a, b| Ok(a.merge(b)))?
+    } else {
+        (0..num_chunks)
+            .into_par_iter()
+            .map_init(ChunkScratch::new, |scratch, chunk| {
+                let rows = chunk_rows(chunk, num_rows);
 
-        if selector_val == zero {
-            if want_h {
-                h_rows.push(zero);
-            }
-
-            continue;
-        }
-
-        active_rows += 1;
-
-        if let Some(mask) = clock_mask
-            && let Some(prev) = clock_seen.insert(row_idx & mask, row_idx)
-            && clock_collision.is_none()
-        {
-            clock_collision = Some((prev, row_idx));
-        }
-
-        let mut key = gamma;
-        let mut current_beta = one;
-
-        let rank = clock_column.get(row_idx).copied().unwrap_or(zero);
-
-        for (source, _label) in &spec.sources {
-            let (contrib, next_beta) =
-                resolve_source(source, &row_vec, row_idx, rank, beta, current_beta);
-
-            key += contrib;
-            current_beta = next_beta;
-        }
-
-        product *= key;
-
-        // invert(0) = 0 by hekate-math convention.
-        // Preflight γ is fixed (not random), so a
-        // user trace engineered to land on `key = 0`
-        // will deterministically produce h = 0 here;
-        // caller responsibility to avoid that input.
-        let inv = key.to_tower().invert().to_hardware();
-        let h_row = selector_val * inv;
-
-        claimed_sum += h_row;
-
-        if want_h {
-            h_rows.push(h_row);
-        }
-    }
+                endpoint_chunk(
+                    spec,
+                    &columns,
+                    &clock_column,
+                    rows,
+                    gamma,
+                    beta,
+                    scratch,
+                    None,
+                )
+            })
+            .try_reduce(|| identity, |a, b| Ok(a.merge(b)))?
+    };
 
     Ok(EndpointStats {
-        product,
-        claimed_sum,
+        product: stats.product,
+        claimed_sum: stats.claimed_sum,
         row_count: num_rows,
-        active_rows,
+        active_rows: stats.active_rows,
         h_rows,
         clock_collision,
     })
@@ -1232,5 +1369,158 @@ fn separating_clock_mask(spec: &PermutationCheckSpec, num_vars: usize) -> Option
     match has_clock && mask != all {
         true => Some(mask),
         false => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn endpoint_chunk<F, T>(
+    spec: &PermutationCheckSpec,
+    columns: &BusColumns<'_, F, T>,
+    clock_column: &[Flat<F>],
+    rows: Range<usize>,
+    gamma: Flat<F>,
+    beta: Flat<F>,
+    scratch: &mut ChunkScratch<F>,
+    mut h_out: Option<&mut [Flat<F>]>,
+) -> errors::Result<ChunkStats<F>>
+where
+    F: TraceCompatibleField,
+    T: Trace,
+{
+    let zero = Flat::from_raw(F::ZERO);
+    let one = Flat::from_raw(F::ONE);
+
+    scratch.keys.clear();
+    scratch.selectors.clear();
+
+    let mut product = one;
+    for row_idx in rows.clone() {
+        let selector_val = columns.selector(spec, row_idx)?;
+
+        if selector_val == zero {
+            continue;
+        }
+
+        let mut key = gamma;
+        let mut current_beta = one;
+
+        let rank = clock_column.get(row_idx).copied().unwrap_or(zero);
+
+        for (source, _label) in &spec.sources {
+            let (contrib, next_beta) =
+                resolve_source(source, columns, row_idx, rank, beta, current_beta)?;
+
+            key += contrib;
+            current_beta = next_beta;
+        }
+
+        product *= key;
+
+        scratch.keys.push(key);
+        scratch.selectors.push((row_idx - rows.start, selector_val));
+    }
+
+    // invert(0) = 0 by hekate-math convention.
+    // Preflight γ is fixed (not random), and a
+    // user trace engineered to land on `key = 0`
+    // will deterministically produce h = 0 here;
+    // caller responsibility to avoid that input.
+    invert_batch(&mut scratch.keys, &mut scratch.prefix);
+
+    let mut claimed_sum = zero;
+    for (&(offset, selector_val), &inv) in scratch.selectors.iter().zip(&scratch.keys) {
+        let h_row = selector_val * inv;
+
+        claimed_sum += h_row;
+
+        if let Some(out) = h_out.as_deref_mut() {
+            out[offset] = h_row;
+        }
+    }
+
+    Ok(ChunkStats {
+        product,
+        claimed_sum,
+        active_rows: scratch.selectors.len(),
+    })
+}
+
+fn first_clock_collision<F, T>(
+    spec: &PermutationCheckSpec,
+    columns: &BusColumns<'_, F, T>,
+    num_rows: usize,
+    mask: usize,
+) -> errors::Result<Option<(usize, usize)>>
+where
+    F: TraceCompatibleField,
+    T: Trace,
+{
+    let zero = Flat::from_raw(F::ZERO);
+
+    let mut seen: BTreeMap<usize, usize> = BTreeMap::new();
+    for row_idx in 0..num_rows {
+        if columns.selector(spec, row_idx)? == zero {
+            continue;
+        }
+
+        if let Some(prev) = seen.insert(row_idx & mask, row_idx) {
+            return Ok(Some((prev, row_idx)));
+        }
+    }
+
+    Ok(None)
+}
+
+fn chunk_rows(chunk: usize, num_rows: usize) -> Range<usize> {
+    let start = chunk * BUS_CHUNK_ROWS;
+
+    start..(start + BUS_CHUNK_ROWS).min(num_rows)
+}
+
+fn invert_batch<F: TraceCompatibleField>(values: &mut [Flat<F>], prefix: &mut Vec<Flat<F>>) {
+    let zero = Flat::from_raw(F::ZERO);
+
+    prefix.clear();
+
+    let mut acc = Flat::from_raw(F::ONE);
+    for &value in values.iter() {
+        prefix.push(acc);
+
+        if value != zero {
+            acc *= value;
+        }
+    }
+
+    let mut inv = acc.to_tower().invert().to_hardware();
+    for (value, &before) in values.iter_mut().zip(prefix.iter()).rev() {
+        if *value == zero {
+            continue;
+        }
+
+        let original = *value;
+
+        *value = inv * before;
+        inv *= original;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hekate_math::HardwareField;
+
+    #[test]
+    fn invert_batch_matches_single_inversions_around_zeros() {
+        let values: Vec<Flat<Block128>> = [0u128, 7, 0, 0x1234_5678_9abc_def0, 1, 0]
+            .into_iter()
+            .map(|v| Block128::from(v).to_hardware())
+            .collect();
+
+        let mut inverted = values.clone();
+        invert_batch(&mut inverted, &mut Vec::new());
+
+        for (value, inverse) in values.iter().zip(&inverted) {
+            assert_eq!(*inverse, value.to_tower().invert().to_hardware());
+        }
     }
 }

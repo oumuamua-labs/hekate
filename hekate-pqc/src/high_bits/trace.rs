@@ -15,8 +15,8 @@ use super::layout::{HighBitsLayout, W_BITS};
 use super::{HighBitsRow, bit_position, emits, lane_index, slots};
 use crate::mldsa::{MlDsaParams, Q};
 use crate::utils::{
-    Writer, fill_add_carry_packed, fill_mod_add, fill_mul_const, fill_sub_borrow_packed,
-    flush_bit_buffer, pack_bits, pack_one,
+    Writer, fill_borrows, fill_carries, fill_mod_add, fill_mul_const, flush_bit_buffer, pack_bits,
+    pack_one,
 };
 use crate::wiring::{N, Poly, Stream, hint_poly};
 
@@ -122,35 +122,32 @@ fn fill_bits(bits: &mut [u32], params: &MlDsaParams, ly: &HighBitsLayout, row: &
     pack_bits(bits, ly.r0u, row.r0u as u64, r0_width);
     pack_bits(bits, ly.qxd, qxd, ly.mul.result_width);
 
-    fill_mul_const(bits, two_g2, row.r1u, &ly.mul_results, &ly.mul_carries);
-    fill_add_carry_packed(
+    fill_mul_const(
         bits,
-        ly.add_carry,
-        ly.mul.result_width + 1,
-        qxd,
-        row.r0u as u64,
+        &ly.mul.digits,
+        row.r1u,
+        &ly.mul_results,
+        &ly.mul_carries,
     );
-    fill_sub_borrow_packed(
+    fill_carries(bits, ly.add_carry, ly.mul.result_width, qxd, row.r0u as u64);
+    fill_borrows(
         bits,
-        ly.rng_result,
         ly.rng_borrow,
-        r0_width,
+        r0_width - 1,
         (two_g2 - 1) as u64,
         row.r0u as u64,
     );
-    fill_sub_borrow_packed(
+    fill_borrows(
         bits,
-        ly.neg_result,
         ly.neg_borrow,
         r0_width,
         params.gamma2() as u64,
         row.r0u as u64,
     );
-    fill_sub_borrow_packed(
+    fill_borrows(
         bits,
-        ly.w_rng_result,
         ly.w_rng_borrow,
-        W_BITS,
+        W_BITS - 1,
         (Q - 1) as u64,
         row.w as u64,
     );

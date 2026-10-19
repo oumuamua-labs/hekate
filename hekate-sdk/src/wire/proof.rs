@@ -11,11 +11,12 @@ use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::{
     BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
 };
+use hekate_crypto::merkle::Multiproof;
 use hekate_math::TowerField;
 
 use crate::generated::proof as fb;
 
-const WIRE_PROOF_VERSION: u32 = 7;
+const WIRE_PROOF_VERSION: u32 = 8;
 
 pub fn serialize_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -87,20 +88,30 @@ fn serialize_outer_opening<'a, F: TowerField>(
         .map(|f| block128_from_field(f))
         .collect();
     let values = fbb.create_vector(&values);
-
-    let mut flat_siblings = Vec::with_capacity(opening.siblings.len() * 32);
-    for hash in &opening.siblings {
-        flat_siblings.extend_from_slice(hash);
-    }
-
-    let siblings = fbb.create_vector(&flat_siblings);
+    let multiproof = serialize_multiproof(fbb, &opening.multiproof);
 
     fb::OuterOpening::create(
         fbb,
         &fb::OuterOpeningArgs {
             columns: Some(columns),
             values: Some(values),
+            multiproof: Some(multiproof),
+        },
+    )
+}
+
+fn serialize_multiproof<'a>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    multiproof: &Multiproof,
+) -> flatbuffers::WIPOffset<fb::Multiproof<'a>> {
+    let siblings = fbb.create_vector(multiproof.siblings.as_flattened());
+    let unreached = fbb.create_vector(multiproof.unreached.as_flattened());
+
+    fb::Multiproof::create(
+        fbb,
+        &fb::MultiproofArgs {
             siblings: Some(siblings),
+            unreached: Some(unreached),
         },
     )
 }
@@ -306,7 +317,22 @@ fn deserialize_outer_opening<F: TowerField>(fb: fb::OuterOpening<'_>) -> Result<
     Ok(OuterOpening {
         columns,
         values: deserialize_field_vec::<F>(fb.values())?,
-        siblings: deserialize_hashes(fb.siblings(), "outer siblings length not a multiple of 32")?,
+        multiproof: deserialize_multiproof(fb.multiproof())?,
+    })
+}
+
+fn deserialize_multiproof(fb: Option<fb::Multiproof<'_>>) -> Result<Multiproof> {
+    let fb = fb.ok_or(wire_err("missing multiproof"))?;
+
+    Ok(Multiproof {
+        siblings: deserialize_hashes(
+            fb.siblings(),
+            "multiproof siblings length not a multiple of 32",
+        )?,
+        unreached: deserialize_hashes(
+            fb.unreached(),
+            "multiproof unreached length not a multiple of 32",
+        )?,
     })
 }
 
@@ -400,19 +426,13 @@ fn serialize_brakedown_proof<'a, F: TowerField>(
     }
 
     let cols = fbb.create_vector(&flat_cols);
-
-    let mut flat_path = Vec::with_capacity(proof.batch_path.len() * 32);
-    for hash in &proof.batch_path {
-        flat_path.extend_from_slice(hash);
-    }
-
-    let path = fbb.create_vector(&flat_path);
+    let multiproof = serialize_multiproof(fbb, &proof.multiproof);
 
     fb::BrakedownProof::create(
         fbb,
         &fb::BrakedownProofArgs {
             opened_columns: Some(cols),
-            batch_path: Some(path),
+            multiproof: Some(multiproof),
         },
     )
 }
@@ -643,20 +663,10 @@ fn deserialize_brakedown_proof<F: TowerField>(
         None => Vec::new(),
     };
 
-    let batch_path = match fb.batch_path() {
-        Some(data) => {
-            let bytes = data.bytes();
-
-            if !bytes.len().is_multiple_of(32) {
-                return Err(wire_err("batch_path length not a multiple of 32"));
-            }
-
-            bytes.as_chunks::<32>().0.to_vec()
-        }
-        None => Vec::new(),
-    };
-
-    Ok(BrakedownProof::new(opened_columns, batch_path))
+    Ok(BrakedownProof::new(
+        opened_columns,
+        deserialize_multiproof(fb.multiproof())?,
+    ))
 }
 
 fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux<F>> {

@@ -32,13 +32,7 @@ pub(crate) fn constrain<F: TowerField>(cs: &ConstraintSystem<F>, q: u32, ly: &Nt
     mod_add(cs, &a, &y, &s1, &s1_add.witness(), q);
     mod_add(cs, &s2, &y, &a, &s2_sub.witness(), q);
 
-    range_check(
-        cs,
-        &s2,
-        &bits(cs, ly.s2_range_result, bw),
-        &bits(cs, ly.s2_range_borrow, bw + 1),
-        q,
-    );
+    range_check(cs, &s2, &bits(cs, ly.s2_range_borrow, bw - 1), q);
 
     let pp0 = bits(cs, ly.mul_pp0, ly.mul.pp0_width);
     let sums = groups(cs, &ly.mul_sums);
@@ -59,7 +53,7 @@ pub(crate) fn constrain<F: TowerField>(cs: &ConstraintSystem<F>, q: u32, ly: &Nt
         },
     );
 
-    let quot_x_q = bits(cs, ly.quot_x_q, ly.red.product_width);
+    let quot_x_q = bits(cs, ly.quot_x_q, ly.red.quot_x_mod_width);
     let red_results = groups(cs, &ly.red_results);
     let red_carries = groups(cs, &ly.red_carries);
 
@@ -76,7 +70,6 @@ pub(crate) fn constrain<F: TowerField>(cs: &ConstraintSystem<F>, q: u32, ly: &Nt
             mul_scratch_results: &red_result_refs,
             mul_scratch_carries: &red_carry_refs,
             add_carry_bits: &bits(cs, ly.red_add_carry, ly.red.add_carry_width),
-            range_result_bits: &bits(cs, ly.red_range_result, ly.red.range_result_width),
             range_borrow_bits: &bits(cs, ly.red_range_borrow, ly.red.range_borrow_width),
         },
         q,
