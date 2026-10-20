@@ -38,7 +38,7 @@ hekate-program = { path = "hekate-program", version = "=0.38.0", default-feature
 hekate-verifier = { path = "hekate-verifier", version = "=0.38.0", default-features = false }
 hekate-sdk = { path = "hekate-sdk", version = "=0.38.0", default-features = false }
 hekate-gadgets = { path = "hekate-gadgets", version = "=0.38.0", default-features = false }
-hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.38.0", default-features = false }
+hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.38.1", default-features = false }
 hekate-scribble = { path = "hekate-scribble", version = "=0.38.0", default-features = false }
 hekate-keccak = { path = "hekate-keccak", version = "=0.11.0", default-features = false }
 hekate-aes = { path = "hekate-aes", version = "=0.11.0", default-features = false }
