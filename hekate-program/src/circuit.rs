@@ -19,7 +19,9 @@ use hekate_math::{HardwareField, TowerField};
 use crate::chiplet::ChipletDef;
 use crate::constraint::builder::ConstraintSystem;
 use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
+use crate::digest;
 use crate::expander::VirtualExpander;
+use crate::outer::TableStatics;
 use crate::permutation::{
     PermutationCheckSpec, RankTable, Service, Source, TableHeight, validate_bus_set,
     validate_fixed_selectors, validate_ordered_emits,
@@ -641,6 +643,8 @@ impl<F: TowerField + HardwareField> Circuit<F> {
             inline_chiplets: self.inline_chiplets,
             inline_kernels: self.inline_hints,
             chiplet_defs: self.chiplet_defs,
+            #[cfg(feature = "std")]
+            id: std::sync::OnceLock::new(),
         })
     }
 
@@ -744,6 +748,40 @@ pub struct CircuitProgram<F: TowerField> {
     inline_chiplets: Vec<ChipletDef<F>>,
     inline_kernels: Vec<InlineKernelHint>,
     chiplet_defs: Vec<ChipletDef<F>>,
+
+    /// Memo of `compute_id`;
+    /// whatever mutates a field above must reset it.
+    #[cfg(feature = "std")]
+    id: std::sync::OnceLock<[u8; 32]>,
+}
+
+impl<F: TowerField> CircuitProgram<F> {
+    /// [`digest::program_id`] of this program, hashed on the first call and kept.
+    #[cfg(feature = "std")]
+    pub fn program_id(&self) -> [u8; 32] {
+        *self.id.get_or_init(|| self.compute_id())
+    }
+
+    /// [`digest::program_id`] of this program, hashed on every call.
+    #[cfg(not(feature = "std"))]
+    pub fn program_id(&self) -> [u8; 32] {
+        self.compute_id()
+    }
+
+    /// Borrowed view of what the `Air` getters clone.
+    pub fn statics(&self) -> TableStatics<'_, F> {
+        self.table.statics()
+    }
+
+    fn compute_id(&self) -> [u8; 32] {
+        digest::program_id_from_parts(
+            &self.table,
+            self.num_public_inputs,
+            &self.chiplet_defs,
+            &self.inline_chiplets,
+            &self.inline_kernels,
+        )
+    }
 }
 
 impl<F: TowerField> Air<F> for CircuitProgram<F> {
@@ -825,8 +863,10 @@ fn validate_source_range(source: &Source, width: usize) -> errors::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::digest::program_id;
+    use crate::constraint::ConstraintArena;
+    use crate::digest::{program_id, program_id_hex};
     use crate::permutation::{BusKind, EMIT_RANK_LABEL, ServiceSlot, Side, Source};
+    use crate::{CadenceSegment, ProgramCell};
     use alloc::string::ToString;
     use alloc::vec;
     use hekate_math::Block128;
@@ -959,6 +999,145 @@ mod tests {
 
     fn rejected_by(res: errors::Result<CircuitProgram<F>>, prefix: &str) -> bool {
         matches!(res, Err(errors::Error::Protocol { message, .. }) if message.starts_with(prefix))
+    }
+
+    fn wide(seed: u128) -> F {
+        F::from(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835))
+    }
+
+    fn fixture_ast(seed: u128) -> ConstraintAst<F> {
+        let mut arena = ConstraintArena::new();
+
+        let a = arena.cell(ProgramCell::current(0));
+        let b = arena.cell(ProgramCell::next(1));
+        let k = arena.constant(wide(seed));
+        let s = arena.scale(wide(seed + 1), a);
+        let m = arena.mul(a, b);
+        let p = arena.add(k, s);
+        let sum = arena.sum(vec![p, m, b]);
+
+        ConstraintAst {
+            arena,
+            roots: vec![sum, m],
+            labels: vec![None, None],
+        }
+    }
+
+    fn every_fixed_shape(seed: u128) -> Vec<FixedColumn<F>> {
+        let shapes = [
+            FixedShape::LastRow,
+            FixedShape::FirstRow,
+            FixedShape::Custom(vec![true, false, true, true]),
+            FixedShape::Periodic {
+                period: 2,
+                values: vec![wide(seed), wide(seed + 1)],
+            },
+            FixedShape::Sparse(vec![(1, wide(seed + 2)), (6, wide(seed + 3))]),
+            FixedShape::Dense(vec![wide(seed + 4), F::ZERO, F::ONE, wide(seed + 5)]),
+            FixedShape::Cadence {
+                stride: 4,
+                count: 2,
+                origin: 1,
+                values: vec![F::ONE, F::ZERO, wide(seed + 6), F::ONE],
+            },
+            FixedShape::Segments(vec![
+                CadenceSegment {
+                    stride: 2,
+                    count: 1,
+                    origin: 0,
+                    values: vec![F::ONE, wide(seed + 7)],
+                },
+                CadenceSegment {
+                    stride: 4,
+                    count: 1,
+                    origin: 8,
+                    values: vec![wide(seed + 8), F::ZERO, F::ONE, F::ZERO],
+                },
+            ]),
+        ];
+
+        shapes
+            .into_iter()
+            .enumerate()
+            .map(|(col_idx, shape)| FixedColumn { col_idx, shape })
+            .collect()
+    }
+
+    fn fixture_specs() -> Vec<(String, PermutationCheckSpec)> {
+        let request = PermutationCheckSpec {
+            kind: BusKind::Permutation,
+            sources: vec![
+                (Source::Column(0), b"k_a"),
+                (Source::Columns(vec![1, 2]), b"k_b"),
+                (Source::RowIndexLeBytes(4), b"k_clk"),
+                (Source::Const(0x5eed), b"k_tag"),
+                (Source::RowIndexByte(1), b"k_byte"),
+                (Source::PhaseColumn(3), b"k_phase"),
+                (Source::EmitRank(Side::Request), EMIT_RANK_LABEL),
+            ],
+            selector: Some(4),
+            recv_selector: Some(5),
+            clock_waiver: Some("see digest fixture: never proven".to_string()),
+        };
+
+        let lookup = PermutationCheckSpec::new_lookup(vec![(Source::Column(1), b"k_rom")], None);
+
+        vec![
+            ("fixture_bus".to_string(), request),
+            ("fixture_rom".to_string(), lookup),
+        ]
+    }
+
+    fn fixture_table(name: &str, seed: u128, packed: bool) -> ChipletDef<F> {
+        let layout = vec![
+            ColumnType::B32,
+            ColumnType::B64,
+            ColumnType::Bit,
+            ColumnType::Bit,
+        ];
+
+        let expander = packed.then(|| {
+            VirtualExpander::new()
+                .expand_bits(1, ColumnType::B32)
+                .pass_through(1, ColumnType::B64)
+                .control_bits(2)
+                .build()
+                .unwrap()
+        });
+
+        ChipletDef::from_parts(
+            name.to_string(),
+            layout.len(),
+            fixture_ast(seed),
+            layout.clone(),
+            layout,
+            vec![
+                BoundaryConstraint::with_constant(0, 3, wide(seed + 9)),
+                BoundaryConstraint::with_public_input(1, 0, 0),
+            ],
+            every_fixed_shape(seed),
+            expander,
+            fixture_specs(),
+        )
+    }
+
+    fn digest_fixture(packed: bool) -> CircuitProgram<F> {
+        CircuitProgram {
+            table: fixture_table("digest_fixture", 1, packed),
+            num_public_inputs: 1,
+            inline_chiplets: vec![fixture_table("inline", 40, false)],
+            inline_kernels: vec![InlineKernelHint {
+                chiplet_idx: 0,
+                root_offset: 2,
+                column_offset: 5,
+            }],
+            chiplet_defs: vec![
+                fixture_table("plain", 20, false),
+                fixture_table("packed", 30, true),
+            ],
+            #[cfg(feature = "std")]
+            id: std::sync::OnceLock::new(),
+        }
     }
 
     #[test]
@@ -1467,5 +1646,49 @@ mod tests {
                 message: "bus outside a namespace carries its prefix",
             })
         );
+    }
+
+    #[test]
+    fn program_id_matches_recorded_ids() {
+        let recorded = match hekate_crypto::default_hasher_name() {
+            "hekate_crypto::blake3::Blake3Hasher" => [
+                "8731f993839ffc4a244d89bd1aa7980383b10d3b07ee1c33fc9e8406b09b7b1a",
+                "36ba6931e4b47ed20b9ba3a1da4b6091c2a85f0fd7ec0cfa9feb38e17911a2fa",
+            ],
+            "hekate_crypto::sha256::Sha256Hasher" => [
+                "94fea4a021dcad3b394122882b91e3ca9965adf0ef00eb39033398fe0f3694d1",
+                "ecd201fffd6b57d1fd00a3446c6fefe9ec98ac7f71bf0a84c11c326ea47185a1",
+            ],
+            "hekate_crypto::sha3::Sha3_256Hasher" => [
+                "f75b981a544fcdac0894b3e8d3232f165b8b0c24c6e3663db462a7fdb43a6a70",
+                "31adb38feaef7585294f2824924bb0cd190e5dc1dadbf26a5e15989e662ed2a7",
+            ],
+            other => panic!("no recorded ids for {other}"),
+        };
+
+        let ids =
+            [true, false].map(|packed| program_id_hex::<F, _>(&digest_fixture(packed)).unwrap());
+
+        assert_eq!(ids, recorded);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn cached_program_id_matches_digest() {
+        for packed in [true, false] {
+            let program = digest_fixture(packed);
+            let unfilled = program.clone();
+            let expected = program_id::<F, _>(&program).unwrap();
+
+            assert_eq!(program.id.get(), None);
+            assert_eq!(program.program_id(), expected);
+            assert_eq!(program.id.get(), Some(&expected));
+
+            let filled = program.clone();
+
+            assert_eq!(filled.id.get(), Some(&expected));
+            assert_eq!(filled.program_id(), expected);
+            assert_eq!(unfilled.program_id(), expected);
+        }
     }
 }
