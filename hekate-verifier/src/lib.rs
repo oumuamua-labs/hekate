@@ -282,7 +282,11 @@ where
             });
         }
 
-        validate_fixed_columns(main_fixed, &prepared.virtual_column_layout, Some(num_vars))?;
+        validate_fixed_columns(
+            main_fixed,
+            Air::<F>::virtual_column_layout(&prepared.main),
+            Some(num_vars),
+        )?;
 
         let mut chiplet_tables = Vec::with_capacity(chiplet_defs.len());
 
