@@ -120,8 +120,7 @@ fn serialize_expr<'a, F: TowerField, A: Allocator + 'a>(
             },
         ),
         ConstraintExpr::Const(val) => {
-            let bytes = val.to_bytes();
-            let block = block128_from_bytes(&bytes);
+            let block = block128_from_field(val);
 
             fb::AstNode::create(
                 fbb,
@@ -151,8 +150,7 @@ fn serialize_expr<'a, F: TowerField, A: Allocator + 'a>(
             },
         ),
         ConstraintExpr::Scale(scalar, child) => {
-            let bytes = scalar.to_bytes();
-            let block = block128_from_bytes(&bytes);
+            let block = block128_from_field(scalar);
 
             fb::AstNode::create(
                 fbb,
@@ -232,8 +230,9 @@ fn deserialize_expr<F: TowerField>(node: &fb::AstNode<'_>) -> Result<ConstraintE
     }
 }
 
-fn block128_from_bytes(bytes: &[u8]) -> fb::Block128 {
-    let (lo, hi) = super::field::bytes_to_lo_hi(bytes);
+fn block128_from_field<F: TowerField>(f: &F) -> fb::Block128 {
+    let (lo, hi) = super::field::field_to_lo_hi(f);
+
     fb::Block128::new(lo, hi)
 }
 

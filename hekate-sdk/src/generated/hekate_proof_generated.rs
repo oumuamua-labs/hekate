@@ -1125,141 +1125,6 @@ pub mod hekate {
                 ds.finish()
             }
         }
-        pub enum LogUpEntryOffset {}
-        #[derive(Copy, Clone, PartialEq)]
-
-        pub struct LogUpEntry<'a> {
-            pub _tab: ::flatbuffers::Table<'a>,
-        }
-
-        impl<'a> ::flatbuffers::Follow<'a> for LogUpEntry<'a> {
-            type Inner = LogUpEntry<'a>;
-            #[inline]
-            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                Self {
-                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
-                }
-            }
-        }
-
-        impl<'a> LogUpEntry<'a> {
-            pub const VT_BUS_ID: ::flatbuffers::VOffsetT = 4;
-            pub const VT_VALUE: ::flatbuffers::VOffsetT = 6;
-
-            #[inline]
-            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                LogUpEntry { _tab: table }
-            }
-            #[allow(unused_mut)]
-            pub fn create<
-                'bldr: 'args,
-                'args: 'mut_bldr,
-                'mut_bldr,
-                A: ::flatbuffers::Allocator + 'bldr,
-            >(
-                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args LogUpEntryArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<LogUpEntry<'bldr>> {
-                let mut builder = LogUpEntryBuilder::new(_fbb);
-                if let Some(x) = args.value {
-                    builder.add_value(x);
-                }
-                if let Some(x) = args.bus_id {
-                    builder.add_bus_id(x);
-                }
-                builder.finish()
-            }
-
-            #[inline]
-            pub fn bus_id(&self) -> Option<&'a str> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<&str>>(LogUpEntry::VT_BUS_ID, None)
-                }
-            }
-            #[inline]
-            pub fn value(&self) -> Option<&'a Block128> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe { self._tab.get::<Block128>(LogUpEntry::VT_VALUE, None) }
-            }
-        }
-
-        impl ::flatbuffers::Verifiable for LogUpEntry<'_> {
-            #[inline]
-            fn run_verifier(
-                v: &mut ::flatbuffers::Verifier,
-                pos: usize,
-            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
-                v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<&str>>(
-                        "bus_id",
-                        Self::VT_BUS_ID,
-                        false,
-                    )?
-                    .visit_field::<Block128>("value", Self::VT_VALUE, false)?
-                    .finish();
-                Ok(())
-            }
-        }
-        pub struct LogUpEntryArgs<'a> {
-            pub bus_id: Option<::flatbuffers::WIPOffset<&'a str>>,
-            pub value: Option<&'a Block128>,
-        }
-        impl<'a> Default for LogUpEntryArgs<'a> {
-            #[inline]
-            fn default() -> Self {
-                LogUpEntryArgs {
-                    bus_id: None,
-                    value: None,
-                }
-            }
-        }
-
-        pub struct LogUpEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
-            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
-        }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LogUpEntryBuilder<'a, 'b, A> {
-            #[inline]
-            pub fn add_bus_id(&mut self, bus_id: ::flatbuffers::WIPOffset<&'b str>) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<_>>(LogUpEntry::VT_BUS_ID, bus_id);
-            }
-            #[inline]
-            pub fn add_value(&mut self, value: &Block128) {
-                self.fbb_
-                    .push_slot_always::<&Block128>(LogUpEntry::VT_VALUE, value);
-            }
-            #[inline]
-            pub fn new(
-                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> LogUpEntryBuilder<'a, 'b, A> {
-                let start = _fbb.start_table();
-                LogUpEntryBuilder {
-                    fbb_: _fbb,
-                    start_: start,
-                }
-            }
-            #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<LogUpEntry<'a>> {
-                let o = self.fbb_.end_table(self.start_);
-                ::flatbuffers::WIPOffset::new(o.value())
-            }
-        }
-
-        impl ::core::fmt::Debug for LogUpEntry<'_> {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("LogUpEntry");
-                ds.field("bus_id", &self.bus_id());
-                ds.field("value", &self.value());
-                ds.finish()
-            }
-        }
         pub enum LogUpAuxOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -1306,31 +1171,29 @@ pub mod hekate {
             }
 
             #[inline]
-            pub fn h_evals(
-                &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>>
-            {
+            pub fn h_evals(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
-                    self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>(LogUpAux::VT_H_EVALS, None)
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                            LogUpAux::VT_H_EVALS,
+                            None,
+                        )
                 }
             }
             #[inline]
-            pub fn claimed_sums(
-                &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>>
-            {
+            pub fn claimed_sums(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
-                    self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>(LogUpAux::VT_CLAIMED_SUMS, None)
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                            LogUpAux::VT_CLAIMED_SUMS,
+                            None,
+                        )
                 }
             }
         }
@@ -1342,27 +1205,15 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>("h_evals", Self::VT_H_EVALS, false)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>("claimed_sums", Self::VT_CLAIMED_SUMS, false)?
-                    .finish();
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("h_evals", Self::VT_H_EVALS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("claimed_sums", Self::VT_CLAIMED_SUMS, false)?
+     .finish();
                 Ok(())
             }
         }
         pub struct LogUpAuxArgs<'a> {
-            pub h_evals: Option<
-                ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>,
-                >,
-            >,
-            pub claimed_sums: Option<
-                ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>,
-                >,
-            >,
+            pub h_evals: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub claimed_sums: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
         }
         impl<'a> Default for LogUpAuxArgs<'a> {
             #[inline]
@@ -1382,9 +1233,7 @@ pub mod hekate {
             #[inline]
             pub fn add_h_evals(
                 &mut self,
-                h_evals: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<LogUpEntry<'b>>>,
-                >,
+                h_evals: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
             ) {
                 self.fbb_
                     .push_slot_always::<::flatbuffers::WIPOffset<_>>(LogUpAux::VT_H_EVALS, h_evals);
@@ -1392,9 +1241,7 @@ pub mod hekate {
             #[inline]
             pub fn add_claimed_sums(
                 &mut self,
-                claimed_sums: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<LogUpEntry<'b>>>,
-                >,
+                claimed_sums: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     LogUpAux::VT_CLAIMED_SUMS,
