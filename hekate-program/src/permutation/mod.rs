@@ -10,8 +10,15 @@ use hekate_math::{Flat, HardwareField, TowerField};
 
 use crate::FixedColumn;
 
+mod bus_field;
+mod columns;
 mod rank;
 
+pub use bus_field::{BUS_LIMBS, BusElement, BusField, BusValue};
+pub use columns::{
+    BusColumn, BusFraction, BusGroup, bus_columns, bus_draw_events, bus_tag, key_schedule,
+    lookup_weight,
+};
 pub use rank::{
     OMEGA, OMEGA_ORDER, RankClock, RankTable, TableHeight, rank_clocks, validate_ordered_buses,
     validate_ordered_emits,
@@ -28,11 +35,8 @@ pub const EMIT_RANK_LABEL: ChallengeLabel = b"kappa_emit_rank";
 /// bytes; a wider clock truncates silently.
 pub const MAX_ROW_INDEX_BYTES: usize = 8;
 
-/// LogUp bus semantics.
-///
-/// Cross-bus check sums `claimed_sum` over all
-/// endpoints sharing a `bus_id` and rejects if
-/// the total is non-zero in `GF(2^128)`.
+/// logUp bus semantics: Permutation claimed sums cancel
+/// in one total over every table, Lookup ones per `bus_id`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BusKind {
     #[default]
@@ -48,7 +52,7 @@ pub enum Side {
     Response,
 }
 
-/// Byte source for the LogUp
+/// Byte source for the logUp
 /// key `Σ β^j · source_j(i)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -80,7 +84,18 @@ pub enum Source {
     EmitRank(Side),
 }
 
-/// ZeroCheck weights of one bus: its consistency
+/// One slot of a bus key:
+/// a trace column or a value the verifier computes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Column(usize),
+    Const(u128),
+    RowIndexLeBytes(usize),
+    RowIndexByte(usize),
+    EmitRank,
+}
+
+/// ZeroCheck weights of one limb column: its consistency
 /// term, and its bus-sum term with its claimed sum.
 #[derive(Clone, Copy)]
 pub struct BusWeights<F: HardwareField> {
@@ -88,12 +103,10 @@ pub struct BusWeights<F: HardwareField> {
     pub bus_sum: Flat<F>,
 }
 
-/// One endpoint of a LogUp bus.
+/// One endpoint of a logUp bus.
 ///
-/// Per row `i`:
-/// `h(i) = s(i) / (γ + Σ β^j · source_j(i))`.
-/// The endpoint contributes `claimed_sum = Σ_i h(i)` (Permutation)
-/// or `Σ_i Eq(r_bus, i) · h(i)` (Lookup) to the cross-bus check.
+/// Per row `i` it adds `s(i) / (γ + Σ β^j · source_j(i))` to
+/// its `h` column, a Permutation key closing with the bus tag.
 ///
 /// # Security
 /// `Permutation` kind cancels in char-2 by multiset parity;
@@ -173,6 +186,27 @@ impl PermutationCheckSpec {
 
     pub fn num_sources(&self) -> usize {
         self.sources.len()
+    }
+
+    /// Iterates the key slots in `β`-power order, flattening `Columns`.
+    pub fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
+        self.sources.iter().flat_map(|(source, _)| {
+            let (columns, single): (&[usize], Option<Slot>) = match source {
+                Source::Column(c) | Source::PhaseColumn(c) => (core::slice::from_ref(c), None),
+                Source::Columns(cs) => (cs.as_slice(), None),
+                Source::Const(v) => (&[], Some(Slot::Const(*v))),
+                Source::RowIndexLeBytes(n) => (&[], Some(Slot::RowIndexLeBytes(*n))),
+                Source::RowIndexByte(n) => (&[], Some(Slot::RowIndexByte(*n))),
+                Source::EmitRank(_) => (&[], Some(Slot::EmitRank)),
+            };
+
+            columns.iter().map(|&c| Slot::Column(c)).chain(single)
+        })
+    }
+
+    /// Counts the slots of the key polynomial, the Permutation tag included.
+    pub fn key_width(&self) -> usize {
+        self.slots().count() + usize::from(self.kind == BusKind::Permutation)
     }
 
     pub fn has_selector(&self) -> bool {
@@ -568,8 +602,8 @@ where
     acc
 }
 
-/// Bus `k` from `start = α^o`: consistency at `α^(o+2k)`, bus-sum at
-/// `α^(o+2k+1)`. One shared power pins only the sum of the two terms,
+/// Limb column `k` from `start = α^o`: consistency at `α^(o+2k)`, bus-sum
+/// at `α^(o+2k+1)`. One shared power pins only the sum of the two terms,
 /// and a constant consistency residual then moves the claimed sum.
 pub fn bus_alpha_weights<F: HardwareField>(
     start: Flat<F>,
