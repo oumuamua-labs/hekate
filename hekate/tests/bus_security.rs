@@ -13,7 +13,9 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{ChallengeLabel, PermutationCheckSpec, Source};
+use hekate_program::permutation::{
+    ChallengeLabel, PermutationCheckSpec, Source, bus_columns, bus_tag,
+};
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
@@ -645,7 +647,7 @@ fn h_eval_corruption_after_sumcheck_rejected() {
     let aux = &mut proof.chiplet_logup_aux[0];
     assert!(!aux.h_evals.is_empty());
 
-    aux.h_evals[0].1 += F::ONE;
+    aux.h_evals[0] += F::ONE;
 
     assert!(
         verify_rejects(&air, &instance, &config, &proof),
@@ -704,7 +706,8 @@ fn h_root_omitted_on_bused_proof_rejected() {
 }
 
 // =====================================================
-// bus_id label decoupled from bus_specs ordering
+// Proof made under other bus ids
+// (program_id binds the transcript to the bus layout)
 // =====================================================
 
 const FAKE_BUS_ID: &str = "fake_bus_z";
@@ -803,7 +806,7 @@ fn n9_chiplet_trace(num_vars: usize, key: u32) -> ColumnTrace {
 }
 
 #[test]
-fn logup_bus_id_proof_label_diverged_from_program_specs_rejected() {
+fn proof_under_other_bus_ids_rejected() {
     let num_vars = 4;
     let num_rows = 1 << num_vars;
 
@@ -834,9 +837,7 @@ fn logup_bus_id_proof_label_diverged_from_program_specs_rejected() {
     )
     .expect("prove under fake-label mode");
 
-    for aux in &proof.chiplet_logup_aux {
-        assert_eq!(aux.claimed_sums[0].0, FAKE_BUS_ID);
-    }
+    assert!(preflight(&air, &instance, &witness).unwrap().is_clean());
 
     mode_honest.store(true, Ordering::SeqCst);
 
@@ -845,10 +846,7 @@ fn logup_bus_id_proof_label_diverged_from_program_specs_rejected() {
 
     let res = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        res.is_err() || !res.unwrap(),
-        "SECURITY FAILURE: proof bus_id labels diverge from program bus_specs"
-    );
+    assert!(res.is_err() || !res.unwrap());
 }
 
 // =====================================================
@@ -880,10 +878,7 @@ fn zero_bus_main_injected_claimed_sum_rejected() {
         "precondition: MultiBusProgram main is a zero-bus table"
     );
 
-    proof
-        .main_logup_aux
-        .claimed_sums
-        .push((MULTI_BUS_0.into(), F::ONE));
+    proof.main_logup_aux.claimed_sums.push(F::ONE);
 
     let mut vt = Transcript::<H>::new(b"AuditP0");
     let pinned_id = program_id(&air).unwrap();
@@ -1112,5 +1107,237 @@ fn unreached_section_off_derived_count_rejected() {
 
     for forged in [extra, short] {
         assert!(verify_rejects(&air, &instance, &config, &forged));
+    }
+}
+
+// =====================================================
+// Bus tag keeps buses of one tuple shape apart
+// =====================================================
+
+const TAG_BUS_A: &str = "tag_bus_a";
+const TAG_BUS_B: &str = "tag_bus_b";
+const TAG_VARS: usize = 4;
+
+const TAG_WAIVER: &str =
+    "see hekate/tests/bus_security.rs: keys are distinct row values by construction";
+
+#[derive(Clone)]
+struct TwoBuses {
+    specs: Vec<(String, PermutationCheckSpec)>,
+    cubic: bool,
+}
+
+impl Air<F> for TwoBuses {
+    fn name(&self) -> String {
+        "tag_two_buses".to_string()
+    }
+
+    fn num_columns(&self) -> usize {
+        3
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        &[ColumnType::B32, ColumnType::B32, ColumnType::B32]
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        self.specs.clone()
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        let cs = ConstraintSystem::<F>::new();
+
+        if self.cubic {
+            let zero = cs.col(2);
+            cs.constrain(zero * zero * zero);
+        }
+
+        cs.build()
+    }
+}
+
+impl Program<F> for TwoBuses {}
+
+fn tag_endpoint(
+    bus_id: &str,
+    sources: Vec<(Source, ChallengeLabel)>,
+) -> (String, PermutationCheckSpec) {
+    let spec = PermutationCheckSpec::new(sources, None).with_clock_waiver(TAG_WAIVER);
+
+    (bus_id.into(), spec)
+}
+
+fn tag_trace() -> ColumnTrace {
+    let mut tb = TraceBuilder::new(
+        &[ColumnType::B32, ColumnType::B32, ColumnType::B32],
+        TAG_VARS,
+    )
+    .unwrap();
+
+    for row in 0..tb.num_rows() {
+        tb.set_b32(0, row, Block32::from(row as u32 + 1)).unwrap();
+        tb.set_b32(1, row, Block32::from(row as u32 + 0x100))
+            .unwrap();
+    }
+
+    tb.build()
+}
+
+fn tag_outcome(air: &TwoBuses, zero_knowledge: bool) -> hekate_core::errors::Result<bool> {
+    let instance = ProgramInstance::new(1 << TAG_VARS, vec![]);
+    let witness = ProgramWitness::new(tag_trace());
+
+    let config = Config {
+        zero_knowledge,
+        ..cfg()
+    };
+
+    let proof = prove(
+        b"AuditP0", air, &instance, &witness, &config, [0x7A; 32], None,
+    )
+    .expect("tag fixture prove");
+
+    verify_result(air, &instance, &config, &proof)
+}
+
+fn rejected_at_bus_matching(outcome: &hekate_core::errors::Result<bool>) -> bool {
+    matches!(
+        outcome,
+        Err(Error::Protocol {
+            protocol: "LogUp",
+            message: "bus endpoint sums do not cancel to zero",
+        })
+    )
+}
+
+#[test]
+fn crossed_buses_of_one_tuple_shape_rejected() {
+    let column = |c| vec![(Source::Column(c), b"v" as ChallengeLabel)];
+
+    let air = TwoBuses {
+        specs: vec![
+            tag_endpoint(TAG_BUS_A, column(0)),
+            tag_endpoint(TAG_BUS_A, column(1)),
+            tag_endpoint(TAG_BUS_B, column(1)),
+            tag_endpoint(TAG_BUS_B, column(0)),
+        ],
+        cubic: false,
+    };
+
+    let instance = ProgramInstance::new(1 << TAG_VARS, vec![]);
+    let report = preflight(&air, &instance, &ProgramWitness::new(tag_trace())).unwrap();
+
+    assert_eq!(report.bus_diagnostics.len(), 2);
+    assert!(report.bus_diagnostics.iter().all(|d| d.bus_imbalance));
+
+    let raw = tag_outcome(&air, false);
+    assert!(rejected_at_bus_matching(&raw), "{raw:?}");
+
+    let zk = tag_outcome(&air, true);
+    assert!(matches!(zk, Ok(false)), "{zk:?}");
+}
+
+#[test]
+fn slot_zero_const_does_not_merge_two_buses() {
+    let lo = |bus_id: &str| bus_tag(bus_id).split().0;
+    let offset = (lo(TAG_BUS_A) + lo(TAG_BUS_B)).0;
+
+    let keyed = |constant: u128| {
+        vec![
+            (Source::Const(constant), b"c" as ChallengeLabel),
+            (Source::Column(0), b"v" as ChallengeLabel),
+        ]
+    };
+
+    let air = TwoBuses {
+        specs: vec![
+            tag_endpoint(TAG_BUS_A, keyed(offset)),
+            tag_endpoint(TAG_BUS_B, keyed(0)),
+        ],
+        cubic: false,
+    };
+
+    let raw = tag_outcome(&air, false);
+    assert!(rejected_at_bus_matching(&raw), "{raw:?}");
+
+    let zk = tag_outcome(&air, true);
+    assert!(matches!(zk, Ok(false)), "{zk:?}");
+}
+
+#[test]
+fn buses_crossed_inside_pair_columns_rejected() {
+    let column = |c| vec![(Source::Column(c), b"v" as ChallengeLabel)];
+
+    let air = TwoBuses {
+        specs: vec![
+            tag_endpoint(TAG_BUS_A, column(0)),
+            tag_endpoint(TAG_BUS_B, column(1)),
+            tag_endpoint(TAG_BUS_A, column(1)),
+            tag_endpoint(TAG_BUS_B, column(0)),
+        ],
+        cubic: true,
+    };
+
+    let columns = bus_columns(&air.specs, air.constraint_ast().max_degree() + 1);
+
+    assert_eq!(columns.len(), 2);
+    assert!(columns.iter().all(|c| {
+        let second = c.second.expect("degree 4 pairs every Permutation column");
+        air.specs[c.first].0 != air.specs[second].0
+    }));
+
+    let raw = tag_outcome(&air, false);
+    assert!(rejected_at_bus_matching(&raw), "{raw:?}");
+
+    let zk = tag_outcome(&air, true);
+    assert!(matches!(zk, Ok(false)), "{zk:?}");
+}
+
+#[test]
+fn balanced_twins_of_tag_fixtures_verify() {
+    let column = |c| vec![(Source::Column(c), b"v" as ChallengeLabel)];
+    let keyed = vec![
+        (Source::Const(5), b"c" as ChallengeLabel),
+        (Source::Column(0), b"v" as ChallengeLabel),
+    ];
+
+    let twins = [
+        (
+            vec![
+                tag_endpoint(TAG_BUS_A, column(0)),
+                tag_endpoint(TAG_BUS_A, column(0)),
+                tag_endpoint(TAG_BUS_B, column(1)),
+                tag_endpoint(TAG_BUS_B, column(1)),
+            ],
+            false,
+        ),
+        (
+            vec![
+                tag_endpoint(TAG_BUS_A, keyed.clone()),
+                tag_endpoint(TAG_BUS_A, keyed),
+            ],
+            false,
+        ),
+        (
+            vec![
+                tag_endpoint(TAG_BUS_A, column(0)),
+                tag_endpoint(TAG_BUS_B, column(1)),
+                tag_endpoint(TAG_BUS_A, column(0)),
+                tag_endpoint(TAG_BUS_B, column(1)),
+            ],
+            true,
+        ),
+    ];
+
+    for (specs, cubic) in twins {
+        let air = TwoBuses { specs, cubic };
+        for zero_knowledge in [false, true] {
+            let outcome = tag_outcome(&air, zero_knowledge);
+
+            assert!(
+                matches!(outcome, Ok(true)),
+                "cubic={cubic} zero_knowledge={zero_knowledge}: {outcome:?}"
+            );
+        }
     }
 }
