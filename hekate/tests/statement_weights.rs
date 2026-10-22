@@ -14,16 +14,17 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::expander::{PoolLayout, RingSwitchPlan};
 use hekate_program::linearized::{self, RingGadget};
 use hekate_program::outer::{
-    BusRow, BusSource, ConsistencyInputs, EvalRecord, OuterLayout, OuterStatement, TableRecord,
+    BusColumnRow, ConsistencyInputs, EvalRecord, OuterLayout, OuterStatement, TableRecord,
     TableShape, assemble, linear_tensor_vars, linear_weights, linear_weights_of_rows,
     statement_rows, table_plan,
 };
-use hekate_program::permutation::{BusKind, Source};
+use hekate_program::permutation::{BUS_LIMBS, BusFraction, BusKind, BusValue, Slot, bus_columns};
 use hekate_program::predicate::Unknown;
 use hekate_sha2::Sha256Chiplet;
 
 const NUM_ROWS: usize = 256;
 const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
+const KARATSUBA_WIRES: u32 = 3;
 
 type F = Block128;
 type Snapshot = (&'static str, errors::Result<Vec<ChipletDef<F>>>);
@@ -101,46 +102,82 @@ fn record(
 ) -> (TableRecord<'_, F>, u32) {
     let statics = def.statics();
     let seed = base as u128;
-    let one = Flat::from_raw(F::ONE);
 
     let half = shape.eval_claims() as u32;
     let columns = shape.num_columns as u32;
-    let buses = statics.specs.len() as u32;
+    let limbs = shape.h_columns() as u32;
 
     let h_pad = base + 2 * half;
-    let sums_pad = h_pad + buses;
-    let mask_pad = sums_pad + buses;
+    let sums_pad = h_pad + limbs;
+    let mask_pad = sums_pad + limbs;
 
-    let bus_rows = statics
-        .specs
+    let wide = |s: u128| BusValue {
+        lo: mix(s),
+        hi: mix(s + 7),
+    };
+
+    let fraction = |k: usize| {
+        let spec = &statics.specs[k].1;
+
+        BusFraction {
+            slots: spec
+                .slots()
+                .enumerate()
+                .filter_map(|(j, slot)| match slot {
+                    Slot::Column(c) => Some((c as u32, wide(seed + 1000 * k as u128 + j as u128))),
+                    _ => None,
+                })
+                .collect(),
+            constant: wide(seed + 30 + k as u128),
+            selector: spec.selector.map(|s| s as u32),
+            recv_selector: spec.recv_selector.map(|s| s as u32),
+        }
+    };
+
+    let mut buses = Vec::new();
+    let mut claimed_sums = Vec::new();
+    let mut first_wire = shape.mul_nodes as u32;
+
+    for (c, column) in bus_columns(statics.specs, shape.sumcheck_degree)
         .iter()
         .enumerate()
-        .map(|(k, (_, spec))| {
-            let sources = spec
-                .sources
-                .iter()
-                .enumerate()
-                .flat_map(|(j, (source, _))| match source {
-                    Source::Column(c) | Source::PhaseColumn(c) => vec![BusSource::Claim(*c as u32)],
-                    Source::Columns(cs) => cs.iter().map(|&c| BusSource::Claim(c as u32)).collect(),
-                    _ => vec![BusSource::Public(mix(seed + 1000 * k as u128 + j as u128))],
-                })
-                .collect();
+    {
+        let group = column.group(statics.specs);
+        let limb = |j: usize| (BUS_LIMBS * c + j) as u32;
 
-            BusRow {
-                h_pad: h_pad + k as u32,
-                h_masked: mix(seed + 10 + k as u128),
-                h_wire: (shape.mul_nodes + k) as u32,
-                sources,
-                selector: spec.selector.map(|s| s as u32),
-                recv_selector: spec.recv_selector.map(|s| s as u32),
-                eq_lookup: match spec.kind {
-                    BusKind::Permutation => one,
-                    BusKind::Lookup => mix(seed + 20 + k as u128),
-                },
-            }
-        })
-        .collect();
+        for j in 0..BUS_LIMBS {
+            claimed_sums.push((
+                group.clone(),
+                j,
+                sums_pad + limb(j),
+                mix(seed + 90 + limb(j) as u128),
+            ));
+        }
+
+        let second = column.second.map(fraction);
+
+        let wires = match &second {
+            None => KARATSUBA_WIRES,
+            Some(f) if f.selector_claimed() => 2 * KARATSUBA_WIRES + BUS_LIMBS as u32,
+            Some(_) => 2 * KARATSUBA_WIRES,
+        };
+
+        buses.push(BusColumnRow {
+            h_pads: core::array::from_fn(|j| h_pad + limb(j)),
+            h_masked: core::array::from_fn(|j| mix(seed + 10 + limb(j) as u128)),
+            first: fraction(column.first),
+            second,
+            eq_lookup: match column.kind {
+                BusKind::Permutation => BusValue::one(),
+                BusKind::Lookup => wide(seed + 20 + c as u128),
+            },
+            first_wire,
+        });
+
+        first_wire += wires;
+    }
+
+    assert_eq!(first_wire as usize, shape.mul_wires());
 
     let record = TableRecord {
         claims_masked: (0..2 * half as u128).map(|i| mix(seed + 500 + i)).collect(),
@@ -149,8 +186,7 @@ fn record(
             pad_first: base,
             eq_zc: mix(seed + 1),
             alpha: mix(seed + 2),
-            gamma: mix(seed + 3),
-            beta: mix(seed + 4),
+            tau: F::EXTENSION_TAU.to_hardware(),
             boundary: statics
                 .boundary
                 .iter()
@@ -166,7 +202,7 @@ fn record(
             telescope: (0..blind_units as u32)
                 .map(|k| (columns + k, half + columns + k))
                 .collect(),
-            buses: bus_rows,
+            buses,
             val_final_form: (0..3)
                 .map(|j| (Unknown::Pad(mask_pad + j), mix(seed + 70 + j as u128)))
                 .collect(),
@@ -181,12 +217,7 @@ fn record(
                 (base + col, col, mix(seed + 80 + col as u128))
             })
             .collect(),
-        claimed_sums: statics
-            .specs
-            .iter()
-            .enumerate()
-            .map(|(k, (bus_id, _))| (bus_id.clone(), sums_pad + k as u32, mix(seed + 90)))
-            .collect(),
+        claimed_sums,
         shape,
     };
 
@@ -242,9 +273,15 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
             Err(e) => panic!("{label}: snapshot rejected: {e}"),
         };
 
+        let shapes: Vec<TableShape> = defs
+            .iter()
+            .map(|def| TableShape::from_air(def, &def.statics()).unwrap())
+            .collect();
+
         let plans: Vec<RingSwitchPlan> = defs
             .iter()
-            .map(|def| table_plan(def, def.permutation_checks.len(), &config).unwrap())
+            .zip(&shapes)
+            .map(|(def, shape)| table_plan(def, shape, &config).unwrap())
             .collect();
 
         let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
@@ -253,12 +290,8 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
         let mut records = Vec::with_capacity(defs.len());
         let mut base = 0;
 
-        for (def, layout) in defs.iter().zip(&pool.tables) {
-            let shape = TableShape::from_air(def, &def.statics())
-                .unwrap()
-                .at(layout);
-            let (table, next) = record(def, shape, blind_units, base);
-
+        for ((def, shape), layout) in defs.iter().zip(&shapes).zip(&pool.tables) {
+            let (table, next) = record(def, shape.at(layout), blind_units, base);
             records.push(table);
 
             base = next;

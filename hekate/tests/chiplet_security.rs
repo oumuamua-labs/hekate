@@ -330,7 +330,7 @@ fn chiplet_logup_sum_mismatch() {
     // ATTACK:
     // Corrupt the chiplet's claimed_sum
     // so the bus no longer cancels.
-    proof.chiplet_logup_aux[0].claimed_sums[0].1 += F::ONE;
+    proof.chiplet_logup_aux[0].claimed_sums[0] += F::ONE;
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();

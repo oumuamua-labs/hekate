@@ -13,7 +13,7 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::PermutationCheckSpec;
+use hekate_program::permutation::{BUS_LIMBS, PermutationCheckSpec};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
@@ -237,9 +237,9 @@ fn ram_cpu_linking() {
     // + chiplet LogUp endpoints. Here we
     // just assert the expected layout:
     // one bus on main, one on the RAM chiplet.
-    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 1);
+    assert_eq!(proof.main_logup_aux.claimed_sums.len(), BUS_LIMBS);
     assert_eq!(proof.chiplet_logup_aux.len(), 1);
-    assert_eq!(proof.chiplet_logup_aux[0].claimed_sums.len(), 1);
+    assert_eq!(proof.chiplet_logup_aux[0].claimed_sums.len(), BUS_LIMBS);
 }
 
 // =================================================================

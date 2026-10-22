@@ -12,6 +12,7 @@ use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, RomColumns, gener
 use hekate_math::{Bit, Block32};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
+use hekate_program::permutation::BUS_LIMBS;
 use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
@@ -195,7 +196,7 @@ fn chiplets_integration() {
     // Both spec endpoints share a single bus_id
     // on the main trace; `verify()` rejects if
     // their LogUp sums do not cancel.
-    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2);
+    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2 * BUS_LIMBS);
     assert!(proof.chiplet_logup_aux.is_empty());
 
     println!("BUS SECURE: Chiplets are cryptographically linked.");

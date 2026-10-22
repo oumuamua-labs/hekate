@@ -13,7 +13,7 @@ use hekate::math::{Bit, Block32, Block128, Flat};
 use hekate_math::TowerField;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{PermutationCheckSpec, Source};
+use hekate_program::permutation::{BUS_LIMBS, PermutationCheckSpec, Source};
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
@@ -116,7 +116,7 @@ fn logup_bus_happy_path() {
     )
     .expect("Proving failed");
 
-    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2);
+    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2 * BUS_LIMBS);
 
     let mut verifier_transcript = Transcript::<H>::new(b"LogUp_Happy");
     let pinned_id = program_id(&air).unwrap();

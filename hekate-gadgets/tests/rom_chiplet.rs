@@ -11,6 +11,7 @@ use hekate_math::{Bit, Block32, Block128, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
+use hekate_program::permutation::BUS_LIMBS;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
@@ -206,7 +207,7 @@ fn rom_cpu_linking() {
     // Both spec endpoints sit on the main trace
     // under a sharedbus_id; `verify()` rejects
     // if their LogUp sums do not cancel.
-    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2);
+    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2 * BUS_LIMBS);
     assert!(proof.chiplet_logup_aux.is_empty());
 }
 
@@ -296,9 +297,14 @@ fn rom_padding_transparency() {
     // so `h·selector = 0` on every
     // row and both main-side
     // claimed_sums are zero.
-    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2);
-    assert_eq!(proof.main_logup_aux.claimed_sums[0].1, F::ZERO);
-    assert_eq!(proof.main_logup_aux.claimed_sums[1].1, F::ZERO);
+    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2 * BUS_LIMBS);
+    assert!(
+        proof
+            .main_logup_aux
+            .claimed_sums
+            .iter()
+            .all(|&s| s == F::ZERO)
+    );
 }
 
 #[test]

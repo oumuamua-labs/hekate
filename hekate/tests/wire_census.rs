@@ -371,16 +371,10 @@ fn every_scalar_of_bus_proof_is_accounted() {
     assert!(counted.opened_bytes > 0);
 
     let mut ghost_sum = proof.clone();
-    ghost_sum
-        .main_logup_aux
-        .claimed_sums
-        .push(("ghost".into(), F::ONE));
+    ghost_sum.main_logup_aux.claimed_sums.push(F::ONE);
 
     let mut ghost_eval = proof.clone();
-    ghost_eval
-        .main_logup_aux
-        .h_evals
-        .push(("ghost".into(), F::ONE));
+    ghost_eval.main_logup_aux.h_evals.push(F::ONE);
 
     assert_ne!(census(&ghost_sum).padded, budget);
     assert_ne!(census(&ghost_eval).padded, budget);
