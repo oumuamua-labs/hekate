@@ -52,11 +52,11 @@ use hekate_program::chiplet::ChipletDef;
 use hekate_program::expander::{PoolLayout, RingSwitchPlan};
 use hekate_program::outer::{
     EvalInputs, EvalRecord, OuterStatement, TableInputs, TablePads, TableRecord, TableShape,
-    TableStatics, eval_record, table_record,
+    TableStatics, check_draws, eval_record, table_record,
 };
 use hekate_program::permutation::{
-    self, BusKind, PermutationCheckSpec, RankClock, RankTable, TableHeight, bus_alpha_weights,
-    eval_row_idx_byte_mle, eval_row_idx_le_mle, rank_clocks,
+    self, BUS_LIMBS, BusElement, BusField, BusFraction, BusValue, PermutationCheckSpec, RankClock,
+    RankTable, TableHeight, bus_alpha_weights, bus_columns, rank_clocks,
 };
 use hekate_program::{
     Air, FixedColumn, Program, ProgramInstance, ShapeEvaluator, validate_fixed_columns,
@@ -117,10 +117,10 @@ struct CheckedTable<'a, 's, F: TowerField + HardwareField> {
 /// Phase-3 LogUp challenges that
 /// flow into every table's ZeroCheck.
 #[derive(Clone, Copy)]
-struct LogUpContext<'a, F: HardwareField> {
-    gamma: Flat<F>,
-    beta: Flat<F>,
-    lookup_bus_points: &'a BTreeMap<String, Vec<Flat<F>>>,
+struct LogUpContext<'a> {
+    gamma: BusElement,
+    beta: BusElement,
+    lookup_bus_points: &'a BTreeMap<String, Vec<BusElement>>,
 }
 
 /// The main Hekate Verifier for AIR circuits.
@@ -432,29 +432,32 @@ where
         // =========================================================
         // PHASE 3: DRAW GLOBAL γ, β, AND r_bus PER LOOKUP BUS
         // =========================================================
-        let bus_rows = main_perm.len() as u64 * num_rows as u64
-            + chiplet_tables
+        let draws = check_draws(
+            config,
+            &pool,
+            chiplet_tables
                 .iter()
-                .zip(&proof.chiplet_rows)
-                .map(|(t, &rows)| t.def.permutation_checks.len() as u64 * rows as u64)
-                .sum::<u64>();
-
-        let logup_bits = config.logup_gamma_bits(field_bits, bus_rows);
+                .map(|t| (t.def.statics(), t.shape))
+                .chain([(main_statics, main_shape)]),
+        )?;
 
         info!(
-            bits = metrics.security_bits.min(logup_bits),
+            bits = metrics.security_bits.min(draws.weakest()),
             ldt_query = metrics.ldt_bits,
             fold_gap = metrics.proximity_bits,
-            logup_gamma = logup_bits,
+            logup_bus = draws.bus,
+            zerocheck = draws.zerocheck,
+            sumcheck_round = draws.sumcheck,
+            eval_batch = draws.eval_batch,
+            eval_round = draws.eval_round,
+            outer = ?draws.outer,
             field_bits,
             code_distance = metrics.relative_distance,
             "pool security"
         );
 
-        config.check_logup_security(field_bits, bus_rows)?;
-
-        let gamma = transcript.challenge_field::<F>(b"bus_gamma")?.to_hardware();
-        let beta = transcript.challenge_field::<F>(b"bus_beta")?.to_hardware();
+        let gamma = transcript.challenge_field::<BusElement>(b"bus_gamma")?;
+        let beta = transcript.challenge_field::<BusElement>(b"bus_beta")?;
 
         let lookup_bus_points =
             Self::draw_lookup_bus_points(main_perm, num_rows, chiplet_defs, proof, transcript)?;
@@ -559,7 +562,7 @@ where
         };
 
         // =========================================================
-        // PHASE 7: CROSS-BUS MATCHING (Σ claimed_sum = 0 per bus_id)
+        // PHASE 7: CROSS-BUS MATCHING (Σ claimed_sum = 0 per group)
         // =========================================================
         if let Some(mut cursor) = pad_cursor {
             let shapes: Vec<TableShape> = checked.iter().map(|t| *t.view.shape).collect();
@@ -574,18 +577,19 @@ where
             );
         }
 
-        let mut endpoints: Vec<(String, F)> = Vec::new();
-        for (bus_id, claim) in &proof.main_logup_aux.claimed_sums {
-            endpoints.push((bus_id.clone(), *claim));
-        }
+        let mut columns = Vec::new();
+        for table in &checked {
+            let specs = table.view.statics.specs;
+            let sums = &table.logup_aux.claimed_sums;
+            let degree = table.view.shape.sumcheck_degree;
 
-        for aux in &proof.chiplet_logup_aux {
-            for (bus_id, claim) in &aux.claimed_sums {
-                endpoints.push((bus_id.clone(), *claim));
+            for (c, column) in bus_columns(specs, degree).iter().enumerate() {
+                let limbs = core::array::from_fn(|j| sums[BUS_LIMBS * c + j]);
+                columns.push((column.group(specs), limbs));
             }
         }
 
-        logup::check_bus_sum_matching(&endpoints)?;
+        logup::check_bus_sum_matching(&columns)?;
 
         Ok(true)
     }
@@ -628,7 +632,7 @@ where
         proof: &'a InnerProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
-        logup: &LogUpContext<'_, F>,
+        logup: &LogUpContext<'_>,
         mut cursor: Option<&mut PadCursor>,
     ) -> errors::Result<Vec<CheckedTable<'a, 's, F>>> {
         if proof.chiplet_zerocheck_proofs.len() != chiplet_tables.len() {
@@ -700,7 +704,7 @@ where
         half: usize,
         transcript: &mut Transcript<H>,
         config: &Config,
-        logup: &LogUpContext<'_, F>,
+        logup: &LogUpContext<'_>,
         mut cursor: Option<&mut PadCursor>,
     ) -> errors::Result<Option<CheckedTable<'a, 's, F>>> {
         let claims = Claims::new(&proof.point_evaluation.1);
@@ -787,7 +791,7 @@ where
     /// Each checked table's outer record.
     fn table_records<'s>(
         checked: &[CheckedTable<'_, 's, F>],
-        logup: &LogUpContext<'_, F>,
+        logup: &LogUpContext<'_>,
         config: &Config,
     ) -> errors::Result<Vec<TableRecord<'s, F>>> {
         let unpadded = || errors::Error::Protocol {
@@ -873,7 +877,7 @@ where
         config: &Config,
         trace_values: &[Flat<F>],
         trace_values_next: &[Flat<F>],
-        logup: &LogUpContext<'_, F>,
+        logup: &LogUpContext<'_>,
         mut cursor: Option<&mut PadCursor>,
     ) -> errors::Result<Option<ZerocheckOutcome<F>>> {
         let TableView {
@@ -900,9 +904,9 @@ where
 
         let num_rows = instance.num_rows();
         let num_vars = num_rows.trailing_zeros() as usize;
-        let num_buses = bus_specs.len();
+        let h_columns = shape.h_columns();
 
-        let claimed_sums_first = cursor.as_deref_mut().map(|c| c.take(num_buses));
+        let claimed_sums_first = cursor.as_deref_mut().map(|c| c.take(h_columns));
 
         // =========================================================
         // Constraint System Setup
@@ -911,39 +915,18 @@ where
         // Validate LogUp aux structure and bind claimed_sums
         // into the transcript before drawing alpha / r_zerocheck,
         // the ZeroCheck challenges depend on the bus-sum target.
-        if logup_aux.claimed_sums.len() != bus_specs.len() {
+        if logup_aux.claimed_sums.len() != h_columns {
             return Err(errors::Error::Protocol {
                 protocol: "verifier",
-                message: "logup_aux claimed_sums length mismatch with bus_specs",
+                message: "logup_aux claimed_sums length mismatch with the h limb columns",
             });
         }
 
-        if logup_aux.h_evals.len() != bus_specs.len() {
+        if logup_aux.h_evals.len() != h_columns {
             return Err(errors::Error::Protocol {
                 protocol: "verifier",
-                message: "logup_aux h_evals length mismatch with bus_specs",
+                message: "logup_aux h_evals length mismatch with the h limb columns",
             });
-        }
-
-        for (i, ((h_bus, _), (claim_bus, _))) in logup_aux
-            .h_evals
-            .iter()
-            .zip(logup_aux.claimed_sums.iter())
-            .enumerate()
-        {
-            if h_bus != claim_bus {
-                return Err(errors::Error::Protocol {
-                    protocol: "verifier",
-                    message: "logup_aux bus_id order diverges between h_evals and claimed_sums",
-                });
-            }
-
-            if h_bus.as_str() != bus_specs[i].0.as_str() {
-                return Err(errors::Error::Protocol {
-                    protocol: "verifier",
-                    message: "logup_aux bus_id does not match bus_specs ordering",
-                });
-            }
         }
 
         protocol::absorb_logup_claimed_sums(transcript, &logup_aux.claimed_sums);
@@ -973,7 +956,7 @@ where
         }
 
         let mut initial_claim = Flat::from_raw(F::ZERO);
-        for ((_, claim), w) in logup_aux
+        for (claim, w) in logup_aux
             .claimed_sums
             .iter()
             .zip(bus_alpha_weights(alpha_logup_start, alpha))
@@ -993,7 +976,7 @@ where
             transcript,
         )?;
 
-        let h_first = cursor.map(|c| c.take(num_buses));
+        let h_first = cursor.map(|c| c.take(h_columns));
 
         protocol::absorb_logup_h_evals(transcript, &logup_aux.h_evals);
 
@@ -1031,9 +1014,9 @@ where
 
         // Every reported h_eval is the base h claim
         // the eval argument binds to the committed h.
-        let h_claims = &trace_values[trace_values.len() - num_buses..];
+        let h_claims = &trace_values[trace_values.len() - h_columns..];
 
-        for ((_, h_eval), &claim) in logup_aux.h_evals.iter().zip(h_claims) {
+        for (h_eval, &claim) in logup_aux.h_evals.iter().zip(h_claims) {
             if h_eval.to_hardware() != claim {
                 warn!("Reported h_eval does not match the committed h claim");
                 return Ok(None);
@@ -1132,101 +1115,40 @@ where
 
         // E. LogUp consistency + bus-sum at r_final
         if !bus_specs.is_empty() {
-            let mut source_evals: Vec<Flat<F>> = Vec::new();
+            let field = BusField::<F>::new()?;
+            let challenges = [field.import(gamma), field.import(beta)];
 
-            let weights = bus_alpha_weights(alpha_pow, alpha);
-
-            for ((spec_idx, (bus_id, spec)), w) in bus_specs.iter().enumerate().zip(weights) {
-                let h_eval = logup_aux.h_evals[spec_idx].1.to_hardware();
-
-                let s_eval = match spec.selector {
-                    Some(idx) => current_row[idx],
-                    None => Flat::from_raw(F::ONE),
+            let mut weights = bus_alpha_weights(alpha_pow, alpha);
+            for (c, column) in bus_columns(bus_specs, sumcheck_degree).iter().enumerate() {
+                let fraction = |idx: usize| {
+                    BusFraction::new(
+                        &field,
+                        idx,
+                        &bus_specs[idx],
+                        trace_width,
+                        challenges,
+                        &r_final,
+                        clocks,
+                    )
                 };
 
-                let s_recv_eval = match spec.recv_selector {
-                    Some(idx) => current_row[idx],
-                    None => Flat::from_raw(F::ZERO),
+                let first = fraction(column.first)?;
+                let second = column.second.map(fraction).transpose()?;
+
+                let g = BusValue {
+                    lo: logup_aux.h_evals[BUS_LIMBS * c].to_hardware(),
+                    hi: logup_aux.h_evals[BUS_LIMBS * c + 1].to_hardware(),
                 };
 
-                // Source values flattened in spec order.
-                // Const folds in at its own β-position
-                // so the helper's stitching loop produces
-                // the same key as the prover.
-                source_evals.clear();
+                let weight =
+                    column
+                        .group(bus_specs)
+                        .row_weight(&field, lookup_bus_points, &r_final)?;
 
-                for (source, _) in &spec.sources {
-                    match source {
-                        permutation::Source::Column(col_idx)
-                        | permutation::Source::PhaseColumn(col_idx) => {
-                            source_evals.push(current_row[*col_idx]);
-                        }
-                        permutation::Source::Columns(indices) => {
-                            for &col_idx in indices {
-                                source_evals.push(current_row[col_idx]);
-                            }
-                        }
-                        permutation::Source::Const(val) => {
-                            source_evals.push(F::from(*val).to_hardware());
-                        }
-                        permutation::Source::RowIndexLeBytes(n) => {
-                            source_evals.push(eval_row_idx_le_mle::<F>(*n, &r_final));
-                        }
-                        permutation::Source::RowIndexByte(n) => {
-                            source_evals.push(eval_row_idx_byte_mle::<F>(*n, &r_final));
-                        }
-                        permutation::Source::EmitRank(_) => {
-                            let clock = RankClock::for_spec(clocks, spec_idx)?;
-                            source_evals.push(clock.evaluate(&r_final)?);
-                        }
-                    }
-                }
+                let terms =
+                    logup::ColumnTerms::at(&field, &first, second.as_ref(), g, weight, current_row);
 
-                let eq_lookup = match spec.kind {
-                    BusKind::Permutation => Flat::from_raw(F::ONE),
-                    BusKind::Lookup => {
-                        let r_bus =
-                            lookup_bus_points
-                                .get(bus_id)
-                                .ok_or(errors::Error::Protocol {
-                                    protocol: "verifier",
-                                    message: "lookup bus spec missing r_bus point",
-                                })?;
-
-                        if r_bus.len() < num_vars {
-                            return Err(errors::Error::Protocol {
-                                protocol: "verifier",
-                                message: "r_bus shorter than table num_vars",
-                            });
-                        }
-
-                        let r_lo = &r_bus[0..num_vars];
-                        let r_hi = &r_bus[num_vars..];
-                        let eq_r_lo_at_r_final = TensorProduct::evaluate_eq_slice(r_lo, &r_final);
-
-                        let one = Flat::from_raw(F::ONE);
-
-                        let mut eq_r_hi_at_0 = one;
-                        for r_j in r_hi {
-                            eq_r_hi_at_0 *= one - *r_j;
-                        }
-
-                        eq_r_hi_at_0 * eq_r_lo_at_r_final
-                    }
-                };
-
-                let bus_eval = logup::BusSpecEvaluation {
-                    h_eval,
-                    s_eval,
-                    s_recv_eval,
-                    source_evals: &source_evals,
-                    alpha_cons: w.consistency,
-                    alpha_bus: w.bus_sum,
-                    eq_lookup,
-                };
-
-                expected_val +=
-                    logup::expected_bus_contribution(&bus_eval, gamma, beta, eq_zc_eval);
+                expected_val += terms.weighted(&mut weights, eq_zc_eval)?;
             }
         }
 
@@ -1254,7 +1176,7 @@ where
         chiplet_defs: &[ChipletDef<F>],
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
-    ) -> errors::Result<BTreeMap<String, Vec<Flat<F>>>> {
+    ) -> errors::Result<BTreeMap<String, Vec<BusElement>>> {
         let mut heights: BTreeMap<String, u64> = BTreeMap::new();
         permutation::accumulate_lookup_heights(main_specs, main_rows as u64, &mut heights);
 
@@ -1267,13 +1189,8 @@ where
         }
 
         let entries: Vec<(String, u64)> = heights.into_iter().collect();
-        let tower: BTreeMap<String, Vec<F>> =
-            protocol::draw_lookup_bus_points(transcript, &entries)?;
 
-        Ok(tower
-            .into_iter()
-            .map(|(id, v)| (id, v.into_iter().map(|x| x.to_hardware()).collect()))
-            .collect())
+        protocol::draw_lookup_bus_points(transcript, &entries)
     }
 }
 

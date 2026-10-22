@@ -3,55 +3,94 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use hekate_core::errors::{self, Error};
 use hekate_math::{Flat, HardwareField, TowerField};
+use hekate_program::permutation::{
+    BUS_LIMBS, BusField, BusFraction, BusGroup, BusValue, BusWeights,
+};
 
-pub struct BusSpecEvaluation<'a, F: HardwareField> {
-    pub h_eval: Flat<F>,
-    pub s_eval: Flat<F>,
-    pub s_recv_eval: Flat<F>,
-    pub source_evals: &'a [Flat<F>],
-    pub alpha_cons: Flat<F>,
-    pub alpha_bus: Flat<F>,
-    pub eq_lookup: Flat<F>,
+/// An `h` column's LogUp terms at the claims: its consistency,
+/// `g·D + s` or for a pair `(g·D₁ + s₁)·D₂ + s₂·D₁`, and its
+/// bus-sum `weight · g`, read out only through [`Self::weighted`].
+pub struct ColumnTerms<F: HardwareField> {
+    consistency: BusValue<F>,
+    bus_sum: BusValue<F>,
 }
 
-pub fn expected_bus_contribution<F: HardwareField>(
-    spec: &BusSpecEvaluation<'_, F>,
-    gamma: Flat<F>,
-    beta: Flat<F>,
-    eq_zc: Flat<F>,
-) -> Flat<F> {
-    let mut key = Flat::from_raw(F::ZERO);
-    let mut beta_pow = Flat::from_raw(F::ONE);
+impl<F: TowerField + HardwareField> ColumnTerms<F> {
+    pub fn at(
+        field: &BusField<F>,
+        first: &BusFraction<F>,
+        second: Option<&BusFraction<F>>,
+        g: BusValue<F>,
+        weight: BusValue<F>,
+        claims: &[Flat<F>],
+    ) -> Self {
+        let d1 = first.denominator(claims);
+        let s1 = BusValue::from_base(first.selector_value(claims));
 
-    for src in spec.source_evals {
-        key += *src * beta_pow;
-        beta_pow *= beta;
-    }
+        let consistency = match second {
+            None => field.mul(g, d1) + s1,
+            Some(second) => {
+                let d2 = second.denominator(claims);
+                let s2 = BusValue::from_base(second.selector_value(claims));
 
-    let s_eff = spec.s_eval + spec.s_recv_eval;
-    let consistency = spec.alpha_cons * (gamma * spec.h_eval + spec.h_eval * key + s_eff) * eq_zc;
-    let bus_sum = spec.alpha_bus * spec.h_eval * spec.eq_lookup;
+                field.mul(field.mul(g, d1) + s1, d2) + field.mul(s2, d1)
+            }
+        };
 
-    consistency + bus_sum
-}
-
-pub fn check_bus_sum_matching<F: TowerField>(endpoints: &[(String, F)]) -> errors::Result<()> {
-    let mut by_bus: BTreeMap<&str, F> = BTreeMap::new();
-    for (bus_id, claim) in endpoints {
-        let acc = by_bus.entry(bus_id.as_str()).or_insert(F::ZERO);
-        *acc += *claim;
-    }
-
-    for (_bus_id, total) in by_bus {
-        if total != F::ZERO {
-            return Err(Error::Protocol {
-                protocol: "LogUp",
-                message: "bus endpoint sums do not cancel to zero",
-            });
+        Self {
+            consistency,
+            bus_sum: field.mul(weight, g),
         }
+    }
+
+    /// Sums limb `k` of the consistency times `w_k.consistency · eq_zc`
+    /// and of the bus-sum times `w_k.bus_sum`, `w_k` the next weight
+    /// of the table's `bus_alpha_weights`; errors when they run out.
+    pub fn weighted(
+        &self,
+        weights: &mut impl Iterator<Item = BusWeights<F>>,
+        eq_zc: Flat<F>,
+    ) -> errors::Result<Flat<F>> {
+        let mut acc = Flat::from_raw(F::ZERO);
+        for (c, s) in self
+            .consistency
+            .limbs()
+            .into_iter()
+            .zip(self.bus_sum.limbs())
+        {
+            let w = weights.next().ok_or(Error::Protocol {
+                protocol: "LogUp",
+                message: "bus weights end before the column's limbs",
+            })?;
+
+            acc += w.consistency * c * eq_zc + w.bus_sum * s;
+        }
+
+        Ok(acc)
+    }
+}
+
+/// Rejects unless every group's claimed sums cancel limb
+/// by limb, one `(group, limbs)` entry per `h` column.
+pub fn check_bus_sum_matching<F: TowerField>(
+    columns: &[(BusGroup, [F; BUS_LIMBS])],
+) -> errors::Result<()> {
+    let mut by_group: BTreeMap<&BusGroup, [F; BUS_LIMBS]> = BTreeMap::new();
+    for (group, limbs) in columns {
+        let acc = by_group.entry(group).or_insert([F::ZERO; BUS_LIMBS]);
+
+        for (total, &limb) in acc.iter_mut().zip(limbs) {
+            *total += limb;
+        }
+    }
+
+    if by_group.values().flatten().any(|&total| total != F::ZERO) {
+        return Err(Error::Protocol {
+            protocol: "LogUp",
+            message: "bus endpoint sums do not cancel to zero",
+        });
     }
 
     Ok(())
@@ -63,159 +102,199 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
-    use hekate_math::{Block128, HardwareField};
+    use hekate_math::{Block128, Block256};
+    use hekate_program::permutation::bus_alpha_weights;
 
     type F = Block128;
 
-    fn f(v: u128) -> F {
-        F::from(v)
+    fn field() -> BusField<F> {
+        BusField::new().unwrap()
     }
 
-    fn honest_h_and_sum(
-        gamma: F,
-        beta: F,
-        sources_per_row: &[Vec<F>],
-        s_per_row: &[F],
-    ) -> (Vec<F>, F) {
-        let mut h = Vec::with_capacity(sources_per_row.len());
-        let mut sum = F::ZERO;
-
-        for (srcs, s) in sources_per_row.iter().zip(s_per_row) {
-            let mut key = F::ZERO;
-            let mut bp = F::ONE;
-
-            for src in srcs {
-                key += *src * bp;
-                bp *= beta;
-            }
-
-            let denom = gamma + key;
-            let inv = denom.to_hardware().to_tower().invert();
-            let h_i = *s * inv;
-
-            h.push(h_i);
-
-            sum += h_i;
-        }
-
-        (h, sum)
+    fn value(lo: u128, hi: u128) -> BusValue<F> {
+        field().import(Block256::new(Block128(lo), Block128(hi)))
     }
 
-    #[test]
-    fn consistency_identity_holds_on_hypercube() {
-        let gamma = f(0x1234);
-        let beta = f(0x5678);
-        let sources = vec![vec![f(11), f(22)], vec![f(33), f(44)], vec![f(55), f(66)]];
-        let s = vec![f(7), f(13), f(19)];
+    fn invert(x: BusValue<F>) -> BusValue<F> {
+        field().import(Block256::new(x.lo.to_tower(), x.hi.to_tower()).invert())
+    }
 
-        let (h, _) = honest_h_and_sum(gamma, beta, &sources, &s);
-
-        for ((srcs, s_i), h_i) in sources.iter().zip(&s).zip(&h) {
-            let mut key = F::ZERO;
-            let mut bp = F::ONE;
-
-            for src in srcs {
-                key += *src * bp;
-                bp *= beta;
-            }
-
-            let lhs = *h_i * (gamma + key) + *s_i;
-            assert_eq!(lhs, F::ZERO, "char-2 identity h·(γ+key) + s must be 0");
+    fn fraction(seed: u128, selector: Option<u32>) -> BusFraction<F> {
+        BusFraction {
+            slots: vec![(0, value(seed, seed + 1)), (1, value(seed + 2, seed + 3))],
+            constant: value(seed + 4, seed + 5),
+            selector,
+            recv_selector: None,
         }
+    }
+
+    fn claims() -> Vec<Flat<F>> {
+        [0x11u128, 0x22, 0x33]
+            .map(|v| F::from(v).to_hardware())
+            .to_vec()
+    }
+
+    fn quotient(fraction: &BusFraction<F>, claims: &[Flat<F>]) -> BusValue<F> {
+        let s = BusValue::from_base(fraction.selector_value(claims));
+
+        field().mul(s, invert(fraction.denominator(claims)))
     }
 
     #[test]
-    fn expected_contribution_matches_formula() {
-        let gamma = f(0xAA).to_hardware();
-        let beta = f(0xBB).to_hardware();
-        let eq_zc = f(0xCC).to_hardware();
+    fn honest_h_zeroes_consistency_of_one_fraction() {
+        let claims = claims();
+        let first = fraction(100, Some(2));
+        let g = quotient(&first, &claims);
 
-        let alpha_cons = f(0xDD).to_hardware();
-        let alpha_bus = f(0xEE).to_hardware();
+        let terms = ColumnTerms::at(&field(), &first, None, g, BusValue::one(), &claims);
 
-        let h_eval = f(0x11).to_hardware();
-        let s_eval = f(0x22).to_hardware();
+        assert!(terms.consistency.is_zero());
+    }
 
-        let source_evals = vec![
-            f(0x33).to_hardware(),
-            f(0x44).to_hardware(),
-            f(0x55).to_hardware(),
-        ];
+    #[test]
+    fn honest_h_zeroes_consistency_of_packed_pair() {
+        let claims = claims();
+        let first = fraction(100, Some(2));
+        let second = fraction(200, None);
+        let g = quotient(&first, &claims) + quotient(&second, &claims);
 
-        let spec = BusSpecEvaluation {
-            h_eval,
-            s_eval,
-            s_recv_eval: Flat::from_raw(F::ZERO),
-            source_evals: &source_evals,
-            alpha_cons,
-            alpha_bus,
-            eq_lookup: Flat::from_raw(F::ONE),
-        };
+        let terms = ColumnTerms::at(&field(), &first, Some(&second), g, BusValue::one(), &claims);
 
-        let got = expected_bus_contribution(&spec, gamma, beta, eq_zc);
+        assert!(terms.consistency.is_zero());
+    }
 
-        let mut key = Flat::from_raw(F::ZERO);
-        let mut bp = Flat::from_raw(F::ONE);
+    #[test]
+    fn shifted_h_breaks_consistency() {
+        let claims = claims();
+        let first = fraction(100, Some(2));
+        let second = fraction(200, Some(2));
 
-        for src in &source_evals {
-            key += *src * bp;
-            bp *= beta;
+        for pair in [None, Some(&second)] {
+            let honest = match pair {
+                None => quotient(&first, &claims),
+                Some(second) => quotient(&first, &claims) + quotient(second, &claims),
+            };
+
+            for shift in [value(1, 0), value(0, 1)] {
+                let terms = ColumnTerms::at(
+                    &field(),
+                    &first,
+                    pair,
+                    honest + shift,
+                    BusValue::one(),
+                    &claims,
+                );
+
+                assert!(!terms.consistency.is_zero());
+            }
         }
+    }
 
-        let expected =
-            alpha_cons * (gamma * h_eval + h_eval * key + s_eval) * eq_zc + alpha_bus * h_eval;
+    #[test]
+    fn bus_sum_is_row_weight_times_h() {
+        let field = field();
+        let claims = claims();
+        let first = fraction(100, Some(2));
+        let g = value(7, 8);
+        let weight = value(9, 10);
 
-        assert_eq!(got, expected);
+        let terms = ColumnTerms::at(&field, &first, None, g, weight, &claims);
+
+        assert_eq!(terms.bus_sum, field.mul(weight, g));
     }
 
     #[test]
     fn bus_matching_zero_sum_honest_pair() {
-        let bus = "ram_link".to_string();
-        let claim = f(0x9999);
-
-        let endpoints = vec![(bus.clone(), claim), (bus, claim)];
-
-        check_bus_sum_matching(&endpoints).unwrap();
-    }
-
-    #[test]
-    fn bus_matching_rejects_mismatched_endpoints() {
-        let bus = "ram_link".to_string();
-        let endpoints = vec![(bus.clone(), f(0x9999)), (bus, f(0xAAAA))];
-
-        let res = check_bus_sum_matching(&endpoints);
-        assert!(res.is_err(), "mismatched endpoint sums must fail");
-    }
-
-    #[test]
-    fn bus_matching_rejects_unpaired_endpoint() {
-        let endpoints = vec![("ram_link".to_string(), f(0x9999))];
-
-        let res = check_bus_sum_matching(&endpoints);
-        assert!(res.is_err(), "unpaired endpoint must fail");
-    }
-
-    #[test]
-    fn bus_matching_multiple_bus_ids_independent() {
-        let endpoints = vec![
-            ("ram_link".to_string(), f(0x1)),
-            ("ram_link".to_string(), f(0x1)),
-            ("rom_link".to_string(), f(0x2)),
-            ("rom_link".to_string(), f(0x2)),
+        let limbs = [F::from(0x9999u128), F::from(0x7777u128)];
+        let columns = vec![
+            (BusGroup::Lookup("rom_link".to_string()), limbs),
+            (BusGroup::Lookup("rom_link".to_string()), limbs),
         ];
 
-        check_bus_sum_matching(&endpoints).unwrap();
+        check_bus_sum_matching(&columns).unwrap();
     }
 
     #[test]
-    fn bus_matching_one_bus_fails_independently() {
-        let endpoints = vec![
-            ("ram_link".to_string(), f(0x1)),
-            ("ram_link".to_string(), f(0x1)),
-            ("rom_link".to_string(), f(0x2)),
-            ("rom_link".to_string(), f(0x3)),
+    fn bus_matching_rejects_mismatch_in_either_limb() {
+        let base = [F::from(0x9999u128), F::from(0x7777u128)];
+        for limb in 0..BUS_LIMBS {
+            let mut other = base;
+            other[limb] += F::ONE;
+
+            let columns = vec![
+                (BusGroup::Lookup("rom_link".to_string()), base),
+                (BusGroup::Lookup("rom_link".to_string()), other),
+            ];
+
+            assert!(check_bus_sum_matching(&columns).is_err());
+        }
+    }
+
+    #[test]
+    fn bus_matching_rejects_unpaired_column() {
+        let columns = vec![(BusGroup::Permutation, [F::from(0x9999u128), F::ZERO])];
+
+        assert!(check_bus_sum_matching(&columns).is_err());
+    }
+
+    #[test]
+    fn permutation_columns_cancel_as_one_group() {
+        let a = [F::from(0x1u128), F::from(0x2u128)];
+        let b = [F::from(0x4u128), F::from(0x8u128)];
+        let sum = [a[0] + b[0], a[1] + b[1]];
+
+        let columns = vec![
+            (BusGroup::Permutation, a),
+            (BusGroup::Permutation, b),
+            (BusGroup::Permutation, sum),
         ];
 
-        assert!(check_bus_sum_matching(&endpoints).is_err());
+        check_bus_sum_matching(&columns).unwrap();
+    }
+
+    #[test]
+    fn lookup_buses_cancel_apart() {
+        let a = [F::from(0x1u128), F::ZERO];
+        let b = [F::from(0x2u128), F::ZERO];
+
+        let balanced = vec![
+            (BusGroup::Lookup("ram".to_string()), a),
+            (BusGroup::Lookup("ram".to_string()), a),
+            (BusGroup::Lookup("rom".to_string()), b),
+            (BusGroup::Lookup("rom".to_string()), b),
+        ];
+
+        let crossed = vec![
+            (BusGroup::Lookup("ram".to_string()), a),
+            (BusGroup::Lookup("rom".to_string()), a),
+            (BusGroup::Lookup("ram".to_string()), b),
+            (BusGroup::Lookup("rom".to_string()), b),
+        ];
+
+        check_bus_sum_matching(&balanced).unwrap();
+
+        assert!(check_bus_sum_matching(&crossed).is_err());
+    }
+
+    #[test]
+    fn weighted_takes_one_weight_per_limb() {
+        let claims = claims();
+        let first = fraction(100, Some(2));
+        let terms = ColumnTerms::at(&field(), &first, None, value(7, 8), value(9, 10), &claims);
+
+        let start = F::from(3u128).to_hardware();
+        let alpha = F::from(5u128).to_hardware();
+        let eq_zc = F::from(11u128).to_hardware();
+
+        let mut weights = bus_alpha_weights(start, alpha);
+        let next = bus_alpha_weights(start, alpha).nth(BUS_LIMBS).unwrap();
+
+        terms.weighted(&mut weights, eq_zc).unwrap();
+
+        assert_eq!(weights.next().unwrap().consistency, next.consistency);
+
+        let mut short = bus_alpha_weights(start, alpha).take(BUS_LIMBS - 1);
+
+        assert!(terms.weighted(&mut short, eq_zc).is_err());
     }
 }

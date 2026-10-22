@@ -42,15 +42,17 @@ impl<F: TowerField> PreparedProgram<F> {
             validate_fixed_selectors(&def.permutation_checks, def.pins())?;
         }
 
-        let main_plan = table_plan(&main, main.permutation_checks.len(), config)?;
         let main_shape = TableShape::from_air(&main, &main.statics())?;
+        let main_plan = table_plan(&main, &main_shape, config)?;
 
         let mut chiplet_plans = Vec::with_capacity(chiplets.len());
         let mut chiplet_shapes = Vec::with_capacity(chiplets.len());
 
         for def in &chiplets {
-            chiplet_plans.push(table_plan(def, def.permutation_checks.len(), config)?);
-            chiplet_shapes.push(TableShape::from_air(def, &def.statics())?);
+            let shape = TableShape::from_air(def, &def.statics())?;
+
+            chiplet_plans.push(table_plan(def, &shape, config)?);
+            chiplet_shapes.push(shape);
         }
 
         let program_id = digest::program_id_from_parts(

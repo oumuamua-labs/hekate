@@ -17,7 +17,7 @@ use hekate_crypto::transcript::Transcript;
 use hekate_math::{
     BinaryFieldExtras, Block128, CantorBasis, Flat, HardwareField, PackableField, TowerField,
 };
-use hekate_program::expander::{PoolLayout, eq_tensor_b, ring_target};
+use hekate_program::expander::{EVAL_SUMCHECK_DEGREE, PoolLayout, eq_tensor_b, ring_target};
 use tracing::{debug, instrument, trace_span, warn};
 
 #[cfg(feature = "parallel")]
@@ -189,7 +189,13 @@ where
         let target_flat = F::from(target.0).to_hardware();
         let num_vars = pool.num_vars();
 
-        let sc_res = verify(num_vars, 2, target_flat, &proof.sumcheck_proof, transcript)?;
+        let sc_res = verify(
+            num_vars,
+            EVAL_SUMCHECK_DEGREE,
+            target_flat,
+            &proof.sumcheck_proof,
+            transcript,
+        )?;
 
         let (r, sumcheck_final_eval) = match sc_res {
             Some(res) => res,
