@@ -587,6 +587,7 @@ pub fn bus_alpha_weights<F: HardwareField>(
 mod tests {
     use super::*;
     use crate::FixedShape;
+    use alloc::vec;
     use hekate_math::Block128;
 
     fn test_service() -> Service {
