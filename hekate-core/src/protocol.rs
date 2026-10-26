@@ -34,15 +34,14 @@ pub fn absorb_chiplet_header<H: Hasher>(
 /// transcript before `alpha` / `r_zerocheck`
 /// are drawn, so the ZeroCheck challenges
 /// depend on the bus-sum target.
-pub fn absorb_logup_claimed_sums<F, H>(transcript: &mut Transcript<H>, claimed_sums: &[(String, F)])
+pub fn absorb_logup_claimed_sums<F, H>(transcript: &mut Transcript<H>, claimed_sums: &[F])
 where
     F: TowerField,
     H: Hasher,
 {
     transcript.append_u64(b"logup_claim_count", claimed_sums.len() as u64);
 
-    for (bus_id, claim) in claimed_sums {
-        transcript.append_message(b"logup_claim_bus_id", bus_id.as_bytes());
+    for claim in claimed_sums {
         transcript.append_field(b"logup_claim_sum", *claim);
     }
 }
@@ -51,15 +50,14 @@ where
 /// transcript after ZeroCheck completes;
 /// downstream challenges (eta, rho, LDT queries)
 /// must depend on these values.
-pub fn absorb_logup_h_evals<F, H>(transcript: &mut Transcript<H>, h_evals: &[(String, F)])
+pub fn absorb_logup_h_evals<F, H>(transcript: &mut Transcript<H>, h_evals: &[F])
 where
     F: TowerField,
     H: Hasher,
 {
     transcript.append_u64(b"logup_h_count", h_evals.len() as u64);
 
-    for (bus_id, h_eval) in h_evals {
-        transcript.append_message(b"logup_h_bus_id", bus_id.as_bytes());
+    for h_eval in h_evals {
         transcript.append_field(b"logup_h_eval", *h_eval);
     }
 }

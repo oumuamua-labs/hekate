@@ -133,22 +133,24 @@ fn shipped_tables_fit_outer_statement() {
         }
     }
 
+    let shapes: Vec<TableShape> = defs
+        .iter()
+        .map(|def| TableShape::from_air(def, &def.statics()).unwrap())
+        .collect();
+
     let plans: Vec<RingSwitchPlan> = defs
         .iter()
-        .map(|def| table_plan(def, def.permutation_checks.len(), &config).unwrap())
+        .zip(&shapes)
+        .map(|(def, shape)| table_plan(def, shape, &config).unwrap())
         .collect();
 
     let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
     let pool = PoolLayout::new(&heights, field_bits, &config);
 
-    let shapes: Vec<TableShape> = defs
-        .iter()
+    let shapes: Vec<TableShape> = shapes
+        .into_iter()
         .zip(&pool.tables)
-        .map(|(def, layout)| {
-            TableShape::from_air(def, &def.statics())
-                .unwrap()
-                .at(layout)
-        })
+        .map(|(shape, layout)| shape.at(layout))
         .collect();
 
     let statement = OuterStatement::new(&shapes, pool.num_vars());

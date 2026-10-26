@@ -11,9 +11,8 @@ use zeroize::Zeroize;
 #[cfg(feature = "secure-memory")]
 use zeroize::ZeroizeOnDrop;
 
-/// Interleaved, then a low/high pair per
-/// product-code test: zero-sum linear,
-/// zero-vector quadratic (Ligero 2017 Fig 8-11).
+/// Interleaved, then a low/high pair per product-code test:
+/// zero-sum linear, zero-vector quadratic (Ligero 2017 Fig 8-11).
 pub const OUTER_MASK_ROWS: usize = 5;
 
 /// Wires `x`, `y`, `z` of one Hadamard row.
@@ -230,6 +229,7 @@ impl Config {
 
         if estimated_bits < self.min_security_bits {
             return Err(Error::SecurityTooLow {
+                round: "outer",
                 estimated_bits,
                 min_bits: self.min_security_bits,
             }

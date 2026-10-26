@@ -16,7 +16,7 @@ use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use hekate_program::digest::program_id;
 use hekate_program::expander::PoolLayout;
-use hekate_program::outer::table_plan;
+use hekate_program::outer::{TableParts, TableShape, table_plan};
 use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
@@ -154,7 +154,9 @@ fn noise_entropy_inspection() {
     // Calculate grid_rows based on the
     // asymmetric grid formula used in Prover.
     let grid_rows = {
-        let plan = table_plan(&air, air.permutation_checks().len(), &config).unwrap();
+        let parts = TableParts::of(&air);
+        let shape = TableShape::from_air(&air, &parts.statics()).unwrap();
+        let plan = table_plan(&air, &shape, &config).unwrap();
 
         PoolLayout::new(&[(&plan, num_vars)], F::BITS, &config).grid_rows()
     };

@@ -86,14 +86,14 @@ impl<F: TowerField> Default for Form<F> {
 }
 
 impl<F: HardwareField> Form<F> {
-    fn extend(&mut self, other: &Self) {
+    pub(crate) fn extend(&mut self, other: &Self) {
         self.unknowns.extend_from_slice(&other.unknowns);
         self.claims.extend_from_slice(&other.claims);
 
         self.constant += other.constant;
     }
 
-    fn scaled(&self, coeff: Flat<F>) -> Self {
+    pub(crate) fn scaled(&self, coeff: Flat<F>) -> Self {
         Self {
             unknowns: self.unknowns.iter().map(|&(v, c)| (v, c * coeff)).collect(),
             claims: self.claims.iter().map(|&(v, c)| (v, c * coeff)).collect(),

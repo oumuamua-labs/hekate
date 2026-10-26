@@ -7,16 +7,13 @@ use core::fmt;
 use crate::errors;
 use crate::utils::support_floor_vars;
 
-/// Production soundness floor.
+/// Production soundness floor, per Fiat-Shamir round: a proof
+/// is as strong as its weakest round (round-by-round soundness).
 pub const MIN_PRODUCTION_BITS: usize = 100;
 
 /// Most row variables one table may carry. The verifier
 /// rejects a proof that claims a taller table.
 pub const MAX_TABLE_VARS: usize = 32;
-
-/// Smallest grid the fractional mode keeps at every
-/// code rate; the derived query count clears it.
-const FRACTIONAL_FLOOR_GRID: usize = 1 << 11;
 
 /// Outer row-code rate `1/2^OUTER_RATE_LOG2`.
 /// Below 2 the quadratic test has no soundness.
@@ -30,11 +27,16 @@ pub const OUTER_ROWS: usize = 32;
 /// `num_queries · 2⁻³²`, under one bit.
 pub(crate) const LOG2_FRAC_BITS: u32 = 32;
 
+/// Smallest grid the fractional mode keeps at every
+/// code rate; the derived query count clears it.
+const FRACTIONAL_FLOOR_GRID: usize = 1 << 11;
+
 /// Failures of the `Config` checks and the `CodeRate` decode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    /// Estimated security fell below `min_security_bits`.
+    /// Estimated security of `round` fell below `min_security_bits`.
     SecurityTooLow {
+        round: &'static str,
         estimated_bits: usize,
         min_bits: usize,
     },
@@ -71,11 +73,13 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SecurityTooLow {
+                round,
                 estimated_bits,
                 min_bits,
             } => write!(
                 f,
-                "Security too low: estimated {estimated_bits} bits, but {min_bits} required",
+                "Security too low ({round}): estimated {estimated_bits} bits, \
+                 but {min_bits} required",
             ),
             Self::InsufficientSupport {
                 ldt_support_size,
@@ -307,8 +311,8 @@ impl Config {
             .saturating_sub(fold_terms.next_power_of_two().ilog2() as usize)
     }
 
-    /// Per-table terms at `shape`; the LogUp `γ` term is
-    /// charged separately by [`Config::logup_gamma_bits`].
+    /// Per-table terms at `shape`; the other draws
+    /// are charged by [`Config::draw_bits`].
     pub fn security_metrics(&self, field_bits: usize, shape: FoldShape) -> SecurityMetrics {
         let g = self.table_geom(shape.grid_cols);
 
@@ -341,6 +345,7 @@ impl Config {
         let est_bits = self.estimated_security_bits(field_bits, shape);
         if est_bits < self.min_security_bits {
             return Err(Error::SecurityTooLow {
+                round: "pool",
                 estimated_bits: est_bits,
                 min_bits: self.min_security_bits,
             }
@@ -350,17 +355,23 @@ impl Config {
         Ok(())
     }
 
-    /// Rejects a proof whose total bus height drops
-    /// the `γ` term below `min_security_bits`.
-    pub fn check_logup_security(&self, field_bits: usize, bus_rows: u64) -> errors::Result<()> {
+    /// Rejects a draw whose [`Config::draw_bits`]
+    /// fall below `min_security_bits`; 0 waives it.
+    pub fn check_draw(
+        &self,
+        round: &'static str,
+        field_bits: usize,
+        events: u128,
+    ) -> errors::Result<()> {
         if self.min_security_bits == 0 {
             return Ok(());
         }
 
-        let bits = self.logup_gamma_bits(field_bits, bus_rows);
+        let bits = self.draw_bits(field_bits, events);
 
         if bits < self.min_security_bits {
             return Err(Error::SecurityTooLow {
+                round,
                 estimated_bits: bits,
                 min_bits: self.min_security_bits,
             }
@@ -380,13 +391,15 @@ impl Config {
         g.encoded_width.saturating_sub(g.support_size + grid_cols) as f64 / g.encoded_width as f64
     }
 
-    /// Schwartz-Zippel over the global LogUp `γ`, in bits:
-    /// the bus argument collapses if `γ` roots any one of the
-    /// `γ + key[i]` denominators, over every bus row in the proof.
-    pub fn logup_gamma_bits(&self, field_bits: usize, bus_rows: u64) -> usize {
-        let rows = bus_rows.max(1).next_power_of_two().ilog2() as usize;
+    /// One Fiat-Shamir draw from a `2^field_bits` field that at most
+    /// `events` values defeat, in bits: `field_bits − ⌈log₂ events⌉`.
+    pub fn draw_bits(&self, field_bits: usize, events: u128) -> usize {
+        let log_events = events
+            .max(1)
+            .checked_next_power_of_two()
+            .map_or(u128::BITS, u128::ilog2) as usize;
 
-        field_bits.saturating_sub(rows)
+        field_bits.saturating_sub(log_events)
     }
 }
 
@@ -597,32 +610,49 @@ mod tests {
     }
 
     #[test]
-    fn logup_gamma_sits_on_production_floor_edge() {
+    fn draw_sits_on_production_floor_edge() {
         let prod = Config::prod();
-        let edge = 1u64 << (128 - MIN_PRODUCTION_BITS);
+        let edge = 1u128 << (128 - MIN_PRODUCTION_BITS);
 
-        assert_eq!(prod.logup_gamma_bits(128, edge), MIN_PRODUCTION_BITS);
-        assert_eq!(
-            prod.logup_gamma_bits(128, edge + 1),
-            MIN_PRODUCTION_BITS - 1
-        );
+        assert_eq!(prod.draw_bits(128, edge), MIN_PRODUCTION_BITS);
+        assert_eq!(prod.draw_bits(128, edge + 1), MIN_PRODUCTION_BITS - 1);
 
-        assert!(prod.check_logup_security(128, edge).is_ok());
-        assert!(prod.check_logup_security(128, edge + 1).is_err());
+        assert!(prod.check_draw("bus draw", 128, edge).is_ok());
+        assert!(matches!(
+            prod.check_draw("bus draw", 128, edge + 1),
+            Err(errors::Error::Config(Error::SecurityTooLow {
+                round: "bus draw",
+                ..
+            }))
+        ));
     }
 
     #[test]
-    fn logup_gamma_clears_for_busless_and_dev_proofs() {
+    fn draw_clears_for_one_event_and_dev_configs() {
         let prod = Config::prod();
 
-        assert_eq!(prod.logup_gamma_bits(128, 0), 128);
-        assert_eq!(prod.logup_gamma_bits(128, 1), 128);
-        assert!(prod.check_logup_security(128, 0).is_ok());
+        assert_eq!(prod.draw_bits(128, 0), 128);
+        assert_eq!(prod.draw_bits(128, 1), 128);
+        assert!(prod.check_draw("bus draw", 128, 0).is_ok());
 
         let dev = Config::dev();
 
         assert_eq!(dev.min_security_bits, 0);
-        assert!(dev.check_logup_security(128, 1 << 60).is_ok());
+        assert!(dev.check_draw("bus draw", 128, 1 << 60).is_ok());
+    }
+
+    #[test]
+    fn draw_saturates_past_u128_events() {
+        assert_eq!(Config::prod().draw_bits(256, u128::MAX), 128);
+    }
+
+    #[test]
+    fn bus_weight_past_128_bit_floor_clears_at_256_bits() {
+        let prod = Config::prod();
+        let weight = 1u128 << 30;
+
+        assert!(prod.check_draw("bus draw", 128, weight).is_err());
+        assert!(prod.check_draw("bus draw", 256, weight).is_ok());
     }
 
     #[test]

@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::wire_err;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::Result;
@@ -16,7 +15,7 @@ use hekate_math::TowerField;
 
 use crate::generated::proof as fb;
 
-const WIRE_PROOF_VERSION: u32 = 8;
+const WIRE_PROOF_VERSION: u32 = 9;
 
 pub fn serialize_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -500,41 +499,17 @@ fn serialize_logup_aux<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     aux: &LogUpAux<F>,
 ) -> flatbuffers::WIPOffset<fb::LogUpAux<'a>> {
-    let h_offsets: Vec<_> = aux
-        .h_evals
-        .iter()
-        .map(|(bus_id, val)| {
-            let id = fbb.create_string(bus_id);
-            let block = block128_from_field(val);
+    let hv: Vec<fb::Block128> = aux.h_evals.iter().map(|f| block128_from_field(f)).collect();
 
-            fb::LogUpEntry::create(
-                fbb,
-                &fb::LogUpEntryArgs {
-                    bus_id: Some(id),
-                    value: Some(&block),
-                },
-            )
-        })
-        .collect();
-    let h_evals = fbb.create_vector(&h_offsets);
+    let h_evals = fbb.create_vector(&hv);
 
-    let cs_offsets: Vec<_> = aux
+    let cv: Vec<fb::Block128> = aux
         .claimed_sums
         .iter()
-        .map(|(bus_id, val)| {
-            let id = fbb.create_string(bus_id);
-            let block = block128_from_field(val);
-
-            fb::LogUpEntry::create(
-                fbb,
-                &fb::LogUpEntryArgs {
-                    bus_id: Some(id),
-                    value: Some(&block),
-                },
-            )
-        })
+        .map(|f| block128_from_field(f))
         .collect();
-    let claimed_sums = fbb.create_vector(&cs_offsets);
+
+    let claimed_sums = fbb.create_vector(&cv);
 
     fb::LogUpAux::create(
         fbb,
@@ -648,6 +623,7 @@ fn deserialize_brakedown_proof<F: TowerField>(
             while offset + 4 <= bytes.len() {
                 let len =
                     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+
                 offset += 4;
 
                 if len > bytes.len() - offset {
@@ -655,6 +631,7 @@ fn deserialize_brakedown_proof<F: TowerField>(
                 }
 
                 cols.push(bytes[offset..offset + len].to_vec());
+
                 offset += len;
             }
 
@@ -670,49 +647,9 @@ fn deserialize_brakedown_proof<F: TowerField>(
 }
 
 fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux<F>> {
-    let h_evals = match fb.h_evals() {
-        Some(v) => {
-            let mut entries = Vec::with_capacity(v.len());
-            for i in 0..v.len() {
-                let entry = v.get(i);
-                let bus_id = entry.bus_id().unwrap_or("").to_string();
-
-                let val = match entry.value() {
-                    Some(b) => field_from_block128::<F>(*b)?,
-                    None => F::ZERO,
-                };
-
-                entries.push((bus_id, val));
-            }
-
-            entries
-        }
-        None => Vec::new(),
-    };
-
-    let claimed_sums = match fb.claimed_sums() {
-        Some(v) => {
-            let mut entries = Vec::with_capacity(v.len());
-            for i in 0..v.len() {
-                let entry = v.get(i);
-                let bus_id = entry.bus_id().unwrap_or("").to_string();
-
-                let val = match entry.value() {
-                    Some(b) => field_from_block128::<F>(*b)?,
-                    None => F::ZERO,
-                };
-
-                entries.push((bus_id, val));
-            }
-
-            entries
-        }
-        None => Vec::new(),
-    };
-
     Ok(LogUpAux {
-        h_evals,
-        claimed_sums,
+        h_evals: deserialize_field_vec(fb.h_evals())?,
+        claimed_sums: deserialize_field_vec(fb.claimed_sums())?,
     })
 }
 

@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::poly::univariate::UnivariatePoly;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use hekate_crypto::merkle::Multiproof;
@@ -207,17 +206,19 @@ impl<F: TowerField> EvalBatchProof<F> {
 // LOGUP AUXILIARY
 // ===================================
 
-/// Per-table LogUp auxiliary payload keyed by `bus_id`.
-/// `claimed_sums[i]` is absorbed pre-`α`/`r_zerocheck`;
-/// `h_evals[i]` post-sumcheck.
+/// Per-table LogUp auxiliary payload
+/// in the table's limb-column order.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogUpAux<F: TowerField> {
-    pub h_evals: Vec<(String, F)>,
-    pub claimed_sums: Vec<(String, F)>,
+    /// Absorbed after the ZeroCheck sumcheck.
+    pub h_evals: Vec<F>,
+
+    /// Absorbed before `α` and `r_zerocheck`.
+    pub claimed_sums: Vec<F>,
 }
 
 impl<F: TowerField> LogUpAux<F> {
-    pub fn new(h_evals: Vec<(String, F)>, claimed_sums: Vec<(String, F)>) -> Self {
+    pub fn new(h_evals: Vec<F>, claimed_sums: Vec<F>) -> Self {
         Self {
             h_evals,
             claimed_sums,

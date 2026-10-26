@@ -195,21 +195,18 @@ where
         println!("    Point Evaluations:    {:>8} bytes", chip_pt_sz);
     }
 
-    let main_bus_count = proof.main_logup_aux.h_evals.len();
-    let chip_bus_count: usize = proof
+    let main_h_limbs = proof.main_logup_aux.h_evals.len();
+    let chip_h_limbs: usize = proof
         .chiplet_logup_aux
         .iter()
         .map(|a| a.h_evals.len())
         .sum();
 
-    if main_bus_count + chip_bus_count > 0 {
+    if main_h_limbs + chip_h_limbs > 0 {
         let main_logup_sz = enc_size(&proof.main_logup_aux, bin_cfg);
         let chip_logup_sz = enc_size(&proof.chiplet_logup_aux, bin_cfg);
 
-        println!(
-            "  LogUp Bus Aux ({} specs):",
-            main_bus_count + chip_bus_count
-        );
+        println!("  LogUp Bus Aux ({} h limbs):", main_h_limbs + chip_h_limbs);
         println!("    Main:                 {:>8} bytes", main_logup_sz);
         println!("    Chiplets:             {:>8} bytes", chip_logup_sz);
     }

@@ -17,7 +17,7 @@ use hekate_math::{Block128, Flat, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::permutation::{
-    BusKind, PermutationCheckSpec, RankClock, RankTable, Source, TableHeight, rank_clocks,
+    BusKind, PermutationCheckSpec, RankClock, RankTable, Source, TableHeight, bus_tag, rank_clocks,
 };
 use hekate_program::{
     Air, FixedColumn, Program, ProgramInstance, ProgramWitness, validate_fixed_columns,
@@ -767,6 +767,7 @@ fn resolve_source<F: TraceCompatibleField, T: Trace>(
 /// `BusKind::Lookup` specs (empty otherwise).
 /// `s_eff = s_send + s_recv` in char-2 when paired.
 fn compute_endpoint_product<F, A, T>(
+    bus_id: &str,
     spec: &PermutationCheckSpec,
     clock: Option<&RankClock>,
     air: &A,
@@ -784,6 +785,16 @@ where
 
     let zero = Flat::from_raw(F::ZERO);
     let one = Flat::from_raw(F::ONE);
+
+    let constant = match spec.kind {
+        BusKind::Permutation => {
+            let (tag, _) = bus_tag(bus_id).split();
+            let top = spec.slots().fold(one, |power, _| power * beta);
+
+            gamma + F::from(tag.0).to_hardware() * top
+        }
+        BusKind::Lookup => gamma,
+    };
 
     let has_rank = spec
         .sources
@@ -845,7 +856,7 @@ where
                 &columns,
                 &clock_column,
                 rows,
-                gamma,
+                constant,
                 beta,
                 &mut scratch,
                 h_out,
@@ -870,7 +881,7 @@ where
                     &columns,
                     &clock_column,
                     rows,
-                    gamma,
+                    constant,
                     beta,
                     scratch,
                     Some(h_out),
@@ -888,7 +899,7 @@ where
                     &columns,
                     &clock_column,
                     rows,
-                    gamma,
+                    constant,
                     beta,
                     scratch,
                     None,
@@ -956,7 +967,8 @@ where
         .enumerate()
         .map(|(i, (bus_id, spec))| {
             let clock = clocks[0][i].as_ref();
-            let stats = compute_endpoint_product(spec, clock, main, &witness.trace, gamma, beta)?;
+            let stats =
+                compute_endpoint_product(bus_id, spec, clock, main, &witness.trace, gamma, beta)?;
 
             Ok((
                 bus_id.clone(),
@@ -980,7 +992,8 @@ where
         .enumerate()
         .map(|(i, (bus_id, spec))| {
             let clock = clocks[0][i].as_ref();
-            let stats = compute_endpoint_product(spec, clock, main, &witness.trace, gamma, beta)?;
+            let stats =
+                compute_endpoint_product(bus_id, spec, clock, main, &witness.trace, gamma, beta)?;
 
             Ok((
                 bus_id.clone(),
@@ -1009,7 +1022,8 @@ where
                 .enumerate()
                 .map(move |(i, (bus_id, spec))| {
                     let clock = clocks[1 + c_idx][i].as_ref();
-                    let stats = compute_endpoint_product(spec, clock, def, trace, gamma, beta)?;
+                    let stats =
+                        compute_endpoint_product(bus_id, spec, clock, def, trace, gamma, beta)?;
 
                     Ok((
                         bus_id.clone(),
@@ -1039,7 +1053,8 @@ where
                 .enumerate()
                 .map(move |(i, (bus_id, spec))| {
                     let clock = clocks[1 + c_idx][i].as_ref();
-                    let stats = compute_endpoint_product(spec, clock, def, trace, gamma, beta)?;
+                    let stats =
+                        compute_endpoint_product(bus_id, spec, clock, def, trace, gamma, beta)?;
 
                     Ok((
                         bus_id.clone(),
@@ -1378,7 +1393,7 @@ fn endpoint_chunk<F, T>(
     columns: &BusColumns<'_, F, T>,
     clock_column: &[Flat<F>],
     rows: Range<usize>,
-    gamma: Flat<F>,
+    constant: Flat<F>,
     beta: Flat<F>,
     scratch: &mut ChunkScratch<F>,
     mut h_out: Option<&mut [Flat<F>]>,
@@ -1401,7 +1416,7 @@ where
             continue;
         }
 
-        let mut key = gamma;
+        let mut key = constant;
         let mut current_beta = one;
 
         let rank = clock_column.get(row_idx).copied().unwrap_or(zero);

@@ -19,6 +19,7 @@ use hekate_math::{
 use crate::linearized::{BITS, LinearMap};
 
 pub const RING_BLIND_BITS: usize = 128;
+pub const EVAL_SUMCHECK_DEGREE: usize = 2;
 
 /// Claim count from which [`ring_target`] switches
 /// to byte tables indexed by the claims: variable-time.

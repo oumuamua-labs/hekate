@@ -53,14 +53,9 @@ table EvalBatchProof {
 
 // ===== LogUp Auxiliary =====
 
-table LogUpEntry {
-  bus_id: string;
-  value: Block128;
-}
-
 table LogUpAux {
-  h_evals: [LogUpEntry];
-  claimed_sums: [LogUpEntry];
+  h_evals: [Block128];
+  claimed_sums: [Block128];
 }
 
 // ===== Outer Argument =====

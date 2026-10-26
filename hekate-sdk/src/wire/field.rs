@@ -8,23 +8,12 @@ use hekate_math::TowerField;
 use super::wire_err;
 
 pub(crate) fn field_to_lo_hi<F: TowerField>(f: &F) -> (u64, u64) {
+    const { assert!(F::BITS <= 128, "wire scalar holds at most GF(2^128)") };
+
     let bytes = f.to_bytes();
-    let len = bytes.len().min(16);
 
     let mut buf = [0u8; 16];
-    buf[..len].copy_from_slice(&bytes[..len]);
-
-    (
-        u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-        u64::from_le_bytes(buf[8..16].try_into().unwrap()),
-    )
-}
-
-pub(crate) fn bytes_to_lo_hi(bytes: &[u8]) -> (u64, u64) {
-    let len = bytes.len().min(16);
-
-    let mut buf = [0u8; 16];
-    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[..bytes.len()].copy_from_slice(&bytes);
 
     (
         u64::from_le_bytes(buf[0..8].try_into().unwrap()),

@@ -18,6 +18,7 @@ use hekate_gadgets::{CpuMemColumns, MemoryEvent, RamChiplet, generate_ram_trace}
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
+use hekate_program::permutation::BUS_LIMBS;
 use hekate_program::{FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
@@ -202,10 +203,10 @@ fn bump(value: &mut F) {
     *value += F::ONE;
 }
 
-fn first_h_claim(evaluation: &mut (Vec<F>, Vec<F>), num_buses: usize) -> &mut F {
+fn h_claim(evaluation: &mut (Vec<F>, Vec<F>), h_limbs: usize, limb: usize) -> &mut F {
     let half = evaluation.1.len() / 2;
 
-    &mut evaluation.1[half - num_buses]
+    &mut evaluation.1[half - h_limbs + limb]
 }
 
 #[test]
@@ -262,48 +263,51 @@ fn absorbed_sumcheck_stream_is_transcript_bound() {
 fn absorbed_bus_values_are_transcript_bound() {
     let (air, instance, proof) = ram_case();
 
-    let mut mutant = proof.clone();
-    bump(&mut mutant.main_logup_aux.claimed_sums[0].1);
+    for limb in 0..BUS_LIMBS {
+        let mut mutant = proof.clone();
+        bump(&mut mutant.main_logup_aux.claimed_sums[limb]);
 
-    assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-        "main claimed_sum"
-    );
+        assert!(
+            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+            "main claimed_sum limb {limb}"
+        );
 
-    let mut mutant = proof.clone();
-    bump(&mut mutant.chiplet_logup_aux[0].claimed_sums[0].1);
+        let mut mutant = proof.clone();
+        bump(&mut mutant.chiplet_logup_aux[0].claimed_sums[limb]);
 
-    assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-        "chiplet claimed_sum"
-    );
+        assert!(
+            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+            "chiplet claimed_sum limb {limb}"
+        );
 
-    // Moving the h_eval and its base h claim together
-    // keeps the pin row, and the h opening rejects.
-    let mut mutant = proof.clone();
-    let num_buses = mutant.main_logup_aux.h_evals.len();
+        // Moving the h_eval and its base h claim together
+        // keeps the pin row, and the h opening rejects.
+        let mut mutant = proof.clone();
+        let h_limbs = mutant.main_logup_aux.h_evals.len();
 
-    bump(&mut mutant.main_logup_aux.h_evals[0].1);
-    bump(first_h_claim(&mut mutant.main_point_evaluation, num_buses));
+        bump(&mut mutant.main_logup_aux.h_evals[limb]);
+        bump(h_claim(&mut mutant.main_point_evaluation, h_limbs, limb));
 
-    assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-        "main h_eval"
-    );
+        assert!(
+            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+            "main h_eval limb {limb}"
+        );
 
-    let mut mutant = proof.clone();
-    let num_buses = mutant.chiplet_logup_aux[0].h_evals.len();
+        let mut mutant = proof.clone();
+        let h_limbs = mutant.chiplet_logup_aux[0].h_evals.len();
 
-    bump(&mut mutant.chiplet_logup_aux[0].h_evals[0].1);
-    bump(first_h_claim(
-        &mut mutant.chiplet_point_evaluations[0],
-        num_buses,
-    ));
+        bump(&mut mutant.chiplet_logup_aux[0].h_evals[limb]);
+        bump(h_claim(
+            &mut mutant.chiplet_point_evaluations[0],
+            h_limbs,
+            limb,
+        ));
 
-    assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-        "chiplet h_eval"
-    );
+        assert!(
+            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+            "chiplet h_eval limb {limb}"
+        );
+    }
 
     let mut mutant = proof.clone();
     bump(&mut mutant.chiplet_point_evaluations[0].1[0]);

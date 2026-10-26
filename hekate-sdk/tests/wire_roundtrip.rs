@@ -1612,8 +1612,8 @@ fn proof_masters_round_trip() {
 #[test]
 fn proof_logup_h_binding_round_trips() {
     let main_aux = LogUpAux {
-        h_evals: vec![("bus".to_string(), wide(42))],
-        claimed_sums: vec![("bus".to_string(), F::ZERO)],
+        h_evals: vec![wide(42), wide(43)],
+        claimed_sums: vec![F::ZERO, wide(44)],
     };
 
     let multiproof = Multiproof {
@@ -1643,6 +1643,12 @@ fn proof_logup_h_binding_round_trips() {
 
     assert_eq!(restored.trace_root, [3u8; 32]);
     assert_eq!(restored.h_root, Some([7u8; 32]));
+
+    assert_eq!(restored.main_logup_aux.h_evals, vec![wide(42), wide(43)]);
+    assert_eq!(
+        restored.main_logup_aux.claimed_sums,
+        vec![F::ZERO, wide(44)]
+    );
 
     let opening = restored
         .eval_proof
