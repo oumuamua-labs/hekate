@@ -197,11 +197,12 @@ table ColumnTrace {
 
 table Config {
   num_queries: uint32;
-  ldt_support_size: uint32;
   min_security_bits: uint32;
   outer_queries: uint32;
   zero_knowledge: bool;
   log_inv_rate: uint32;
+  fold_arity_log: uint32;
+  early_stop_vars: uint32;
 }
 
 // ===== Top-Level Bundle =====

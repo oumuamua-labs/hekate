@@ -4265,11 +4265,12 @@ pub mod hekate {
 
         impl<'a> Config<'a> {
             pub const VT_NUM_QUERIES: ::flatbuffers::VOffsetT = 4;
-            pub const VT_LDT_SUPPORT_SIZE: ::flatbuffers::VOffsetT = 6;
-            pub const VT_MIN_SECURITY_BITS: ::flatbuffers::VOffsetT = 8;
-            pub const VT_OUTER_QUERIES: ::flatbuffers::VOffsetT = 10;
-            pub const VT_ZERO_KNOWLEDGE: ::flatbuffers::VOffsetT = 12;
-            pub const VT_LOG_INV_RATE: ::flatbuffers::VOffsetT = 14;
+            pub const VT_MIN_SECURITY_BITS: ::flatbuffers::VOffsetT = 6;
+            pub const VT_OUTER_QUERIES: ::flatbuffers::VOffsetT = 8;
+            pub const VT_ZERO_KNOWLEDGE: ::flatbuffers::VOffsetT = 10;
+            pub const VT_LOG_INV_RATE: ::flatbuffers::VOffsetT = 12;
+            pub const VT_FOLD_ARITY_LOG: ::flatbuffers::VOffsetT = 14;
+            pub const VT_EARLY_STOP_VARS: ::flatbuffers::VOffsetT = 16;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4286,10 +4287,11 @@ pub mod hekate {
                 args: &'args ConfigArgs,
             ) -> ::flatbuffers::WIPOffset<Config<'bldr>> {
                 let mut builder = ConfigBuilder::new(_fbb);
+                builder.add_early_stop_vars(args.early_stop_vars);
+                builder.add_fold_arity_log(args.fold_arity_log);
                 builder.add_log_inv_rate(args.log_inv_rate);
                 builder.add_outer_queries(args.outer_queries);
                 builder.add_min_security_bits(args.min_security_bits);
-                builder.add_ldt_support_size(args.ldt_support_size);
                 builder.add_num_queries(args.num_queries);
                 builder.add_zero_knowledge(args.zero_knowledge);
                 builder.finish()
@@ -4303,17 +4305,6 @@ pub mod hekate {
                 unsafe {
                     self._tab
                         .get::<u32>(Config::VT_NUM_QUERIES, Some(0))
-                        .unwrap()
-                }
-            }
-            #[inline]
-            pub fn ldt_support_size(&self) -> u32 {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<u32>(Config::VT_LDT_SUPPORT_SIZE, Some(0))
                         .unwrap()
                 }
             }
@@ -4361,6 +4352,28 @@ pub mod hekate {
                         .unwrap()
                 }
             }
+            #[inline]
+            pub fn fold_arity_log(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(Config::VT_FOLD_ARITY_LOG, Some(0))
+                        .unwrap()
+                }
+            }
+            #[inline]
+            pub fn early_stop_vars(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(Config::VT_EARLY_STOP_VARS, Some(0))
+                        .unwrap()
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for Config<'_> {
@@ -4371,33 +4384,36 @@ pub mod hekate {
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
                     .visit_field::<u32>("num_queries", Self::VT_NUM_QUERIES, false)?
-                    .visit_field::<u32>("ldt_support_size", Self::VT_LDT_SUPPORT_SIZE, false)?
                     .visit_field::<u32>("min_security_bits", Self::VT_MIN_SECURITY_BITS, false)?
                     .visit_field::<u32>("outer_queries", Self::VT_OUTER_QUERIES, false)?
                     .visit_field::<bool>("zero_knowledge", Self::VT_ZERO_KNOWLEDGE, false)?
                     .visit_field::<u32>("log_inv_rate", Self::VT_LOG_INV_RATE, false)?
+                    .visit_field::<u32>("fold_arity_log", Self::VT_FOLD_ARITY_LOG, false)?
+                    .visit_field::<u32>("early_stop_vars", Self::VT_EARLY_STOP_VARS, false)?
                     .finish();
                 Ok(())
             }
         }
         pub struct ConfigArgs {
             pub num_queries: u32,
-            pub ldt_support_size: u32,
             pub min_security_bits: u32,
             pub outer_queries: u32,
             pub zero_knowledge: bool,
             pub log_inv_rate: u32,
+            pub fold_arity_log: u32,
+            pub early_stop_vars: u32,
         }
         impl<'a> Default for ConfigArgs {
             #[inline]
             fn default() -> Self {
                 ConfigArgs {
                     num_queries: 0,
-                    ldt_support_size: 0,
                     min_security_bits: 0,
                     outer_queries: 0,
                     zero_knowledge: false,
                     log_inv_rate: 0,
+                    fold_arity_log: 0,
+                    early_stop_vars: 0,
                 }
             }
         }
@@ -4411,11 +4427,6 @@ pub mod hekate {
             pub fn add_num_queries(&mut self, num_queries: u32) {
                 self.fbb_
                     .push_slot::<u32>(Config::VT_NUM_QUERIES, num_queries, 0);
-            }
-            #[inline]
-            pub fn add_ldt_support_size(&mut self, ldt_support_size: u32) {
-                self.fbb_
-                    .push_slot::<u32>(Config::VT_LDT_SUPPORT_SIZE, ldt_support_size, 0);
             }
             #[inline]
             pub fn add_min_security_bits(&mut self, min_security_bits: u32) {
@@ -4438,6 +4449,16 @@ pub mod hekate {
                     .push_slot::<u32>(Config::VT_LOG_INV_RATE, log_inv_rate, 0);
             }
             #[inline]
+            pub fn add_fold_arity_log(&mut self, fold_arity_log: u32) {
+                self.fbb_
+                    .push_slot::<u32>(Config::VT_FOLD_ARITY_LOG, fold_arity_log, 0);
+            }
+            #[inline]
+            pub fn add_early_stop_vars(&mut self, early_stop_vars: u32) {
+                self.fbb_
+                    .push_slot::<u32>(Config::VT_EARLY_STOP_VARS, early_stop_vars, 0);
+            }
+            #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             ) -> ConfigBuilder<'a, 'b, A> {
@@ -4458,11 +4479,12 @@ pub mod hekate {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 let mut ds = f.debug_struct("Config");
                 ds.field("num_queries", &self.num_queries());
-                ds.field("ldt_support_size", &self.ldt_support_size());
                 ds.field("min_security_bits", &self.min_security_bits());
                 ds.field("outer_queries", &self.outer_queries());
                 ds.field("zero_knowledge", &self.zero_knowledge());
                 ds.field("log_inv_rate", &self.log_inv_rate());
+                ds.field("fold_arity_log", &self.fold_arity_log());
+                ds.field("early_stop_vars", &self.early_stop_vars());
                 ds.finish()
             }
         }
