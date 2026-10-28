@@ -44,6 +44,14 @@ pub trait Hasher: Clone + Debug + Send + Sync + 'static {
         hasher.finalize()
     }
 
+    /// Hashes each `len`-byte message of `data`
+    /// into `out`, matching `digest` on every one.
+    fn digest_many(data: &[u8], len: usize, out: &mut [[u8; 32]]) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = Self::digest(&data[i * len..(i + 1) * len]);
+        }
+    }
+
     /// `update` with each element's canonical
     /// bytes, batched through a stack buffer.
     fn update_fields<F: TowerField>(&mut self, elements: impl IntoIterator<Item = F>) {
@@ -161,6 +169,31 @@ mod tests {
         );
     }
 
+    fn check_many<H: Hasher>() {
+        let data: Vec<u8> = (0..65 * 1025u32)
+            .map(|i| (i.wrapping_mul(0x9E37_79B9) >> 13) as u8)
+            .collect();
+
+        for len in [
+            0, 1, 31, 32, 48, 63, 64, 65, 127, 128, 129, 135, 136, 137, 256, 257, 1024, 1025,
+        ] {
+            for count in [0, 1, 2, 3, 63, 64, 65] {
+                let msgs = &data[..count * len];
+
+                let mut out = alloc::vec![[0u8; 32]; count];
+                H::digest_many(msgs, len, &mut out);
+
+                for (i, digest) in out.iter().enumerate() {
+                    assert_eq!(
+                        *digest,
+                        H::digest(&msgs[i * len..(i + 1) * len]),
+                        "len {len}, count {count}, message {i}"
+                    );
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "blake3")]
     #[test]
     fn blake3_one_shot_and_buffered_fields_match_incremental() {
@@ -177,5 +210,23 @@ mod tests {
     #[test]
     fn sha3_one_shot_and_buffered_fields_match_incremental() {
         check::<sha3::Sha3_256Hasher>();
+    }
+
+    #[cfg(feature = "blake3")]
+    #[test]
+    fn blake3_digest_many_matches_digest() {
+        check_many::<blake3::Blake3Hasher>();
+    }
+
+    #[cfg(feature = "sha2")]
+    #[test]
+    fn sha256_digest_many_matches_digest() {
+        check_many::<sha256::Sha256Hasher>();
+    }
+
+    #[cfg(feature = "sha3")]
+    #[test]
+    fn sha3_digest_many_matches_digest() {
+        check_many::<sha3::Sha3_256Hasher>();
     }
 }
