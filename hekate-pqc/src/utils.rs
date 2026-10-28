@@ -4,7 +4,6 @@
 
 //! Shared witness helpers for PQC chiplets.
 
-use hekate_core::config::Config;
 use hekate_core::errors::{Error, Result};
 use hekate_core::trace::{ColumnType, TraceBuilder};
 use hekate_gadgets::atoms::int_arith::NafDigit;
@@ -241,11 +240,6 @@ pub(crate) fn gcd(a: usize, b: usize) -> usize {
         0 => a,
         _ => gcd(b, a % b),
     }
-}
-
-pub(crate) fn height(rows: usize) -> usize {
-    rows.next_power_of_two()
-        .max(Config::prod().min_table_rows())
 }
 
 pub(crate) fn le_words(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {

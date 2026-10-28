@@ -94,7 +94,11 @@ impl Case {
             .collect::<Result<_, _>>()
             .unwrap();
 
-        let rows = height(macs.iter().map(BaseCaseMac::rows).sum());
+        let rows = macs
+            .iter()
+            .map(BaseCaseMac::rows)
+            .sum::<usize>()
+            .next_power_of_two();
 
         Self {
             steps,
@@ -176,7 +180,7 @@ impl Case {
 
     fn proof(&self, trace: ColumnTrace, values: &PolyValues) -> Proof {
         let tokens = self.tokens();
-        let rows = height(tokens.len() * N);
+        let rows = (tokens.len() * N).next_power_of_two();
 
         Proof {
             program: self.host_program(&tokens, rows),
@@ -376,11 +380,6 @@ fn multiply_ntts(f: &[u32; N], g: &[u32; N]) -> [u32; N] {
 
 fn pow(base: u64, exp: u64) -> u32 {
     (0..exp).fold(1u64, |acc, _| acc * base % Q as u64) as u32
-}
-
-fn height(rows: usize) -> usize {
-    rows.next_power_of_two()
-        .max(Config::prod().min_table_rows())
 }
 
 fn next(seed: &mut u64) -> u32 {

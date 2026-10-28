@@ -24,7 +24,7 @@ use crate::kem_select::{CipherPart, KemSelectChiplet, KemSelectStep};
 use crate::ntt::{NttChiplet, NttParams, NttSchedule, NttStep, Transform};
 use crate::poly_arith::{BaseCaseMac, PolyArithChiplet};
 use crate::sampler::{SamplerChiplet, SamplerStep};
-use crate::utils::{height, le_lanes, le_words};
+use crate::utils::{le_lanes, le_words};
 use crate::wiring::{LaneValues, N, Poly, PolyLabels, PolyValues, Stream, WordValues};
 
 /// Bus of [`service`]. Pass it as `external` to
@@ -1051,35 +1051,35 @@ where
         } = steps;
 
         let codec_rows = codec.iter().map(CodecStep::rows).sum::<usize>();
-        let codec = CodecChiplet::new(codec, height(codec_rows))?;
+        let codec = CodecChiplet::new(codec, codec_rows.next_power_of_two())?;
 
         let sampler_rows = sampler.iter().map(SamplerStep::rows).sum::<usize>();
         let sampler_blocks = sampler.iter().map(SamplerStep::blocks).sum::<usize>();
-        let sampler = SamplerChiplet::new(sampler, height(sampler_rows))?;
+        let sampler = SamplerChiplet::new(sampler, sampler_rows.next_power_of_two())?;
 
         let schedule = forward.into_iter().chain(adds).chain(inverse).collect();
         let schedule = NttSchedule::new(NttParams::ML_KEM, schedule, &mut labels)?;
-        let ntt_rows = height(schedule.rows());
+        let ntt_rows = schedule.rows().next_power_of_two();
         let ntt = NttChiplet::new(schedule, ntt_rows)?;
 
         let product_rows = products.iter().map(BaseCaseMac::rows).sum::<usize>();
-        let poly_arith = PolyArithChiplet::new(products, height(product_rows))?;
+        let poly_arith = PolyArithChiplet::new(products, product_rows.next_power_of_two())?;
 
         let kem_select = match selects.is_empty() {
             true => None,
             false => {
                 let rows = selects.iter().map(KemSelectStep::rows).sum::<usize>();
 
-                Some(KemSelectChiplet::new(selects, height(rows))?)
+                Some(KemSelectChiplet::new(selects, rows.next_power_of_two())?)
             }
         };
 
         let rows = asm.into_rows();
-        let ctrl_rows = height(rows.len());
+        let ctrl_rows = rows.len().next_power_of_two();
         let ctrl = CtrlChiplet::new("MlKemCtrl", &service(), rows, ctrl_rows)?;
 
         let blocks = ctrl.blocks() + sampler_blocks;
-        let keccak_rows = height(blocks * KeccakChiplet::BLOCK_ROWS);
+        let keccak_rows = (blocks * KeccakChiplet::BLOCK_ROWS).next_power_of_two();
         let keccak = KeccakChiplet::new(keccak_rows, blocks);
 
         Ok(Self {

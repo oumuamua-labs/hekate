@@ -745,10 +745,7 @@ mod tests {
         }
 
         let rows = asm.into_rows();
-        let height = rows
-            .len()
-            .next_power_of_two()
-            .max(Config::prod().min_table_rows());
+        let height = rows.len().next_power_of_two();
 
         Sha3Program {
             ctrl: CtrlChiplet::new("Sha3Ctrl", &service(), rows, height).unwrap(),
@@ -842,13 +839,9 @@ mod tests {
         seed: Stream,
         lanes: &[u64],
     ) -> Proof {
-        let floor = Config::prod().min_table_rows();
-        let rows = hosted.len().max(lanes.len()).next_power_of_two().max(floor);
-
+        let rows = hosted.len().max(lanes.len()).next_power_of_two();
         let blocks = trace.keccak.len();
-        let keccak_rows = (blocks * KeccakChiplet::BLOCK_ROWS)
-            .next_power_of_two()
-            .max(floor);
+        let keccak_rows = (blocks * KeccakChiplet::BLOCK_ROWS).next_power_of_two();
 
         let mut cx = Circuit::<F>::new("CtrlHost", rows).unwrap();
 
