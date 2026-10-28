@@ -69,9 +69,9 @@ pub fn init_tracing() {
 
 /// Proves `witness` through the linked cdylib.
 ///
-/// `seed` must be 32 CSPRNG bytes drawn fresh for
-/// every call; reusing it across two proofs of
-/// different witnesses discloses the witness.
+/// The cdylib hashes `seed` with 32 fresh OS bytes on
+/// every call and fails without them; a fresh CSPRNG
+/// `seed` still guards the noise if that source is weak.
 pub fn prove<P: Program<Block128>>(
     transcript_label: &[u8],
     program: &P,

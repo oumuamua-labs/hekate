@@ -27,7 +27,6 @@ cargo add hekate-keccak hekate-core hekate-math hekate-program zeroize
 The Keccak-f[1600] calls of one SHA3-256 hash, with the chiplet mounted in the host table:
 
 ```rust
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_keccak::{KeccakCall, KeccakChiplet, sha3_256};
 use hekate_math::Block128;
@@ -49,9 +48,7 @@ fn sha3(message: &[u8]) -> errors::Result<(CircuitProgram<F>, Zeroizing<Vec<Kecc
     let (_, calls) = sha3_256(message);
 
     let blocks = calls.len();
-    let rows = (blocks * KeccakChiplet::BLOCK_ROWS)
-        .next_power_of_two()
-        .max(Config::default().min_table_rows());
+    let rows = (blocks * KeccakChiplet::BLOCK_ROWS).next_power_of_two();
 
     let mut cx = Circuit::<F>::new("Host", rows)?;
 

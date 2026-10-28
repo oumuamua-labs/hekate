@@ -5,9 +5,8 @@
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-Zero-knowledge proof system over binary tower fields. Streaming architecture. Bounded memory. Edge-native.
-Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory.
-100 proven bits of soundness.
+Hekate is a general-purpose zero-knowledge proof system for proving on the user's own device. You write the statement in
+Rust, and Hekate takes care of the field, the commitment and zero knowledge.
 
 Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
 
@@ -44,6 +43,37 @@ USE AT YOUR OWN RISK!
 
 ---
 
+## Getting Started
+
+The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in reading order:
+
+- [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), the crates, the signed prover binary,
+  supported targets
+- [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), a private payment
+  proved end-to-end
+- [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture), binary tower fields, Sumcheck,
+  the fold commitment, what the verifier trusts
+- [Prover Engine](https://oumuamua.dev/hekate/docs/basics/prover-engine), commit every table, prove the constraints
+  with Sumcheck, open the commitments
+- [AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints), constraints over two rows, boundaries,
+  gadgets, degree
+- [Execution Trace](https://oumuamua.dev/hekate/docs/basics/execution-trace), column types, padding rows, wiping
+  secrets
+- [Verifier Logic](https://oumuamua.dev/hekate/docs/basics/verifier-logic), pinning the program id, one proof, a
+  prepared program, a batch
+- [LogUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses), a multiset check as a sum of fractions, a bus of
+  your own
+- [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), the chiplet set, calling a
+  chiplet, a chiplet of your own
+- [PIOP Protocol](https://oumuamua.dev/hekate/docs/advanced/piop-protocol), multilinear columns, Sumcheck down to one
+  point, the commitment
+- [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge), how a proof hides the witness, and the
+  [ring-switching paper](https://oumuamua.dev/blog/zk-ring-switching) behind packed bit columns
+- [Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial
+  test suite, Fiat-Shamir binding
+
+---
+
 ## The Hekate Ecosystem
 
 Hekate is not one crate. The prover is the engine; the math core, hardware chiplets, mobile toolchain,
@@ -67,30 +97,6 @@ The workspace also holds `hekate-core`, `hekate-crypto`, `hekate-program`, `heka
 draws all of them as one stack, and each chiplet has a page at
 [oumuamua.dev/primitives](https://oumuamua.dev/primitives) stating what it proves, which values a program can
 publish and what stays outside the proof.
-
----
-
-## What It Does
-
-**Binary tower field arithmetic**, GF(2^8) through GF(2^128), recursive tower extension, hardware-accelerated via
-PMULL on aarch64. Constant-time by default.
-
-**Chiplet architecture**, Independent AIR tables (Keccak, AES, RAM, NTT, ML-KEM, ML-DSA) with own traces. No column
-waste, no forced padding. Tables linked by LogUp bus.
-
-**Virtual packing**, Keccak stores 1600 bits in 25 physical B64 columns instead of 1600 bit columns. Bits expand JIT in
-registers. 16x memory savings.
-
-**Linear-code commitments**, Brakedown PCS: O(N) prover, O(N) memory. MDS Reed-Solomon row code via additive
-binary-field FFT, exact distance δ = 1 − rate. Merkle tree over encoded columns only.
-
-**Zero knowledge**, on by default. A one-time pad covers every round, claim and bus sum a proof sends, the commitment's
-opened columns and leaves look random, and a zk-Ligero argument proves the checks the verifier cannot run on padded
-values. [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge) specifies all three.
-
-**Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) key generation,
-encapsulation and decapsulation, AES-128/256. AES and Keccak are native to binary fields; lattice arithmetic
-mod q runs on bit-decomposed carry chains.
 
 ### Hardware Support
 
@@ -134,37 +140,6 @@ binary you can run with `cargo run --release --example <name>`.
   matched against a ROM table via `RomChiplet`)
 - [Three chiplets on one CPU](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/many_chiplets.rs)
   (ROM, integer arithmetic and RAM, each on its own bus)
-
----
-
-## Getting Started
-
-The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in reading order:
-
-- [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), the crates, the signed prover binary,
-  supported targets
-- [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), a private payment
-  proved end-to-end
-- [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture), binary tower fields, Sumcheck,
-  Brakedown, what the verifier trusts
-- [Prover Engine](https://oumuamua.dev/hekate/docs/basics/prover-engine), commit every table, prove the constraints
-  with Sumcheck, open the commitments
-- [AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints), constraints over two rows, boundaries,
-  gadgets, degree
-- [Execution Trace](https://oumuamua.dev/hekate/docs/basics/execution-trace), column types, padding rows, wiping
-  secrets
-- [Verifier Logic](https://oumuamua.dev/hekate/docs/basics/verifier-logic), pinning the program id, one proof, a
-  prepared program, a batch
-- [LogUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses), a multiset check as a sum of fractions, a bus of
-  your own
-- [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), the chiplet set, calling a
-  chiplet, a chiplet of your own
-- [PIOP Protocol](https://oumuamua.dev/hekate/docs/advanced/piop-protocol), multilinear columns, Sumcheck down to one
-  point, the commitment
-- [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge), how a proof hides the witness, and the
-  [ring-switching paper](https://oumuamua.dev/blog/zk-ring-switching) behind packed bit columns
-- [Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial
-  test suite, Fiat-Shamir binding
 
 ---
 
