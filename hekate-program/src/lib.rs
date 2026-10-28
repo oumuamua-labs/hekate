@@ -43,6 +43,7 @@ pub mod circuit;
 pub mod constraint;
 pub mod digest;
 pub mod expander;
+pub mod fold_pool;
 pub mod linearized;
 pub mod outer;
 pub mod permutation;
@@ -81,8 +82,7 @@ pub trait Air<F: TowerField>: Sized + Clone + Sync {
 
     /// Returns the physical layout of the columns in the trace.
     ///
-    /// This describes the storage type
-    /// (Bit, B8, B32, etc.) of each column.
+    /// [`ColumnType`] states what the commitment binds.
     fn column_layout(&self) -> &[ColumnType];
 
     /// Returns the virtual layout of the columns
