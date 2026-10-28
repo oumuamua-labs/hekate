@@ -22,6 +22,7 @@ extern crate alloc;
 
 pub mod config;
 pub mod errors;
+pub mod fold;
 pub mod ligero;
 pub mod outer;
 pub mod poly;
