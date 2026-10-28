@@ -161,12 +161,23 @@ where
     let main_pt_sz = enc_size(&proof.main_point_evaluation, bin_cfg);
 
     // Eval batch argument breakdown
-    let eval_sc_sz = enc_size(&proof.eval_proof.sumcheck_proof, bin_cfg);
-    let eval_tensor_sz = enc_size(&proof.eval_proof.tensor_vec, bin_cfg);
-    let eval_master_sz = enc_size(&proof.eval_proof.masters, bin_cfg);
-    let ldt_batch_sz = enc_size(&proof.eval_proof.ldt_proof.multiproof, bin_cfg);
-    let ldt_opened_sz = enc_size(&proof.eval_proof.ldt_proof.opened_columns, bin_cfg);
-    let eval_h_sz = enc_size(&proof.eval_proof.h_ldt_proof, bin_cfg);
+    let eval = &proof.eval_proof;
+    let eval_sc_sz = enc_size(&eval.sumcheck_proof, bin_cfg);
+    let eval_master_sz = enc_size(&eval.masters, bin_cfg);
+    let mask_master_sz = enc_size(&eval.mask_masters, bin_cfg);
+    let fold_rounds_sz = enc_size(&eval.fold_rounds, bin_cfg);
+    let round_roots_sz = enc_size(&eval.round_roots, bin_cfg);
+    let final_layer_sz = enc_size(&eval.final_layer, bin_cfg);
+    let paths_sz: usize = eval
+        .openings
+        .iter()
+        .map(|opening| enc_size(&opening.multiproof, bin_cfg))
+        .sum();
+    let leaves_sz: usize = eval
+        .openings
+        .iter()
+        .map(|opening| enc_size(&opening.leaves, bin_cfg))
+        .sum();
 
     println!("--------------------------------------------------");
     println!("  PROOF COMPONENT BREAKDOWN (bincode)");
@@ -177,11 +188,13 @@ where
     println!("  Main Point Evaluation:  {:>8} bytes", main_pt_sz);
     println!("  Eval Batch Argument:");
     println!("    Eval Sumcheck:        {:>8} bytes", eval_sc_sz);
-    println!("    Tensor Vector (q):    {:>8} bytes", eval_tensor_sz);
     println!("    Masters:              {:>8} bytes", eval_master_sz);
-    println!("    LDT Batch Path:       {:>8} bytes", ldt_batch_sz);
-    println!("    LDT Opened Columns:   {:>8} bytes", ldt_opened_sz);
-    println!("    H Opening:            {:>8} bytes", eval_h_sz);
+    println!("    Mask Masters:         {:>8} bytes", mask_master_sz);
+    println!("    Fold Rounds:          {:>8} bytes", fold_rounds_sz);
+    println!("    Round Roots:          {:>8} bytes", round_roots_sz);
+    println!("    Final Layer:          {:>8} bytes", final_layer_sz);
+    println!("    Opening Paths:        {:>8} bytes", paths_sz);
+    println!("    Opened Leaves:        {:>8} bytes", leaves_sz);
 
     if !proof.chiplet_rows.is_empty() {
         let n = proof.chiplet_rows.len();
