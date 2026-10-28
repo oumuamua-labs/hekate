@@ -25,7 +25,7 @@ use rand::{TryRngCore, rngs::OsRng};
 pub type F = Block128;
 pub type H = DefaultHasher;
 
-pub const CPU_ROWS: usize = 4;
+pub const CPU_ROWS: usize = 16;
 pub const AES_ROWS: usize = 16;
 pub const SBOX_ROM_ROWS: usize = 256;
 
@@ -335,6 +335,9 @@ pub fn prove_and_verify<P: Program<F>>(
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };

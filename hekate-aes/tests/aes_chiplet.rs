@@ -56,7 +56,7 @@ fn fips128_call() -> Aes128Call {
 // AES-128 Test Program
 // =================================================================
 
-const CPU128_ROWS: usize = 4;
+const CPU128_ROWS: usize = 16;
 
 #[derive(Clone)]
 struct Aes128TestProgram {
@@ -161,6 +161,9 @@ fn prove_and_verify_128(
     }
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };
@@ -228,6 +231,9 @@ where
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };
@@ -783,7 +789,7 @@ const FIPS256_CIPHER: [u8; 16] = [
     0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89,
 ];
 
-const CPU256_ROWS: usize = 4;
+const CPU256_ROWS: usize = 16;
 
 fn fips256_call() -> Aes256Call {
     Aes256Call {
@@ -889,6 +895,9 @@ fn prove_and_verify_256(
     }
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };
@@ -960,6 +969,9 @@ where
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };

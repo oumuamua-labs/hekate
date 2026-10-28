@@ -201,10 +201,11 @@ fn ram_cpu_linking() {
     let instance = ProgramInstance::new(num_rows, vec![]);
 
     let config = Config {
-        num_queries: 4,
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -373,7 +374,6 @@ fn exploit_ram_consistency_bypass() {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false, // No ZK to simplify debugging
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -550,7 +550,6 @@ fn exploit_ram_uninitialised_read_via_q_last_chain() {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -641,7 +640,6 @@ fn exploit_ram_clock_out_of_order() {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
         ..Config::default()
     };
 

@@ -126,6 +126,9 @@ fn verdicts(digest_of: [usize; CALLS], block_order: [usize; CALLS]) -> [bool; 2]
 
     [false, true].map(|zero_knowledge| {
         let config = Config {
+            num_queries: 2,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge,
             ..Config::dev()
         };

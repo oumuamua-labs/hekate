@@ -21,7 +21,7 @@ use hekate_verifier::HekateVerifier;
 type F = Block128;
 type H = DefaultHasher;
 
-const CPU_ROWS: usize = 2;
+const CPU_ROWS: usize = 16;
 const CPU_N: usize = 0;
 const CPU_S: usize = LIMBS32;
 const CPU_R: usize = 2 * LIMBS32;

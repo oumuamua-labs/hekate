@@ -50,9 +50,20 @@ fn cpu_layout() -> Vec<ColumnType> {
     layout
 }
 
+fn test_config(zero_knowledge: bool) -> Config {
+    Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
+        zero_knowledge,
+        ..Config::dev()
+    }
+}
+
 fn build(msg: &[u8], rounds_per_row: usize) -> Statement {
     let blocks = pad_message(msg);
     let num_blocks = blocks.len();
+
     let cpu_rows = num_blocks.next_power_of_two().max(2);
     let chiplet_rows = (num_blocks * (ROUNDS / rounds_per_row)).next_power_of_two();
 
@@ -197,11 +208,7 @@ fn verdict_without_preflight(
     witness: ProgramWitness<F, ColumnTrace>,
 ) -> Result<(bool, usize, f64), String> {
     let instance = instance(st);
-
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::dev()
-    };
+    let config = test_config(true);
 
     let mut blinding_seed = [0u8; 32];
     rand::rng().fill_bytes(&mut blinding_seed);
@@ -322,13 +329,9 @@ fn value_pin_trace(rows: usize, substitute: Option<(usize, u32)>) -> ColumnTrace
 }
 
 fn value_pin_verdict(program: &CircuitProgram<F>, trace: ColumnTrace) -> Result<bool, String> {
-    let instance = ProgramInstance::new(8, vec![]);
+    let instance = ProgramInstance::new(1 << trace.num_vars, vec![]);
     let witness = ProgramWitness::new(trace);
-
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::dev()
-    };
+    let config = test_config(true);
 
     let mut seed = [0u8; 32];
     rand::rng().fill_bytes(&mut seed);
@@ -362,8 +365,9 @@ fn two_call_verdicts(
     });
 
     let sha = Sha256Chiplet::<F>::new(16, 2, 8).unwrap();
+    let cpu_rows = 2;
 
-    let mut cx = Circuit::<F>::new("Sha256TwoCalls", 2).unwrap();
+    let mut cx = Circuit::<F>::new("Sha256TwoCalls", cpu_rows).unwrap();
 
     let block = CpuSha256Block::declare(&mut cx, 0);
 
@@ -387,7 +391,7 @@ fn two_call_verdicts(
     let mut layout = CpuSha256Block::layout().to_vec();
     layout.push(ColumnType::Bit);
 
-    let mut tb = TraceBuilder::new(&layout, 1).unwrap();
+    let mut tb = TraceBuilder::new(&layout, cpu_rows.trailing_zeros() as usize).unwrap();
 
     for (row, &k) in requested.iter().enumerate() {
         let call = &calls[k];
@@ -412,15 +416,12 @@ fn two_call_verdicts(
         tb.set_bit(CpuSha256Block::COLUMNS, row, Bit::ONE).unwrap();
     }
 
-    let instance = ProgramInstance::new(2, vec![]);
+    let instance = ProgramInstance::new(cpu_rows, vec![]);
     let witness = ProgramWitness::new(tb.build())
         .with_chiplets(vec![sha.trace(&block_order.map(|k| calls[k])).unwrap()]);
 
     [false, true].map(|zero_knowledge| {
-        let config = Config {
-            zero_knowledge,
-            ..Config::dev()
-        };
+        let config = test_config(zero_knowledge);
 
         let proof = prove(
             b"SHA256_TRADE",
@@ -626,10 +627,11 @@ fn rounds_per_row_sweep() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn value_pin_accepts_the_honest_column() {
-    let program = value_pin_program(8);
+    let rows = 8;
+    let program = value_pin_program(rows);
 
     assert_eq!(
-        value_pin_verdict(&program, value_pin_trace(8, None)),
+        value_pin_verdict(&program, value_pin_trace(rows, None)),
         Ok(true)
     );
 }
@@ -637,12 +639,13 @@ fn value_pin_accepts_the_honest_column() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn value_pin_rejects_substituted_constant() {
-    let program = value_pin_program(8);
-    let forged = value_pin_trace(8, Some((5, hekate_sha2::K[1] ^ (1 << 7))));
+    let rows = 8;
+    let program = value_pin_program(rows);
+    let forged = value_pin_trace(rows, Some((5, hekate_sha2::K[1] ^ (1 << 7))));
 
     let report = preflight(
         &program,
-        &ProgramInstance::new(8, vec![]),
+        &ProgramInstance::new(rows, vec![]),
         &ProgramWitness::new(forged.clone()),
     )
     .unwrap();
