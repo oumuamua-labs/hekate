@@ -11,7 +11,8 @@ use hekate_keccak::KeccakChiplet;
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::expander::{PoolLayout, RingSwitchPlan};
+use hekate_program::expander::RingSwitchPlan;
+use hekate_program::fold_pool::FoldPool;
 use hekate_program::outer::{OuterStatement, TableShape, table_plan};
 use hekate_program::{Air, FixedColumn};
 use hekate_sha2::Sha256Chiplet;
@@ -145,15 +146,15 @@ fn shipped_tables_fit_outer_statement() {
         .collect();
 
     let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
-    let pool = PoolLayout::new(&heights, field_bits, &config);
+    let pool = FoldPool::new(&heights, &config).unwrap();
 
     let shapes: Vec<TableShape> = shapes
         .into_iter()
-        .zip(&pool.tables)
+        .zip(pool.tables())
         .map(|(shape, layout)| shape.at(layout))
         .collect();
 
-    let statement = OuterStatement::new(&shapes, pool.num_vars());
+    let statement = OuterStatement::new(&shapes, pool.layout().num_vars());
 
     let per_table: Vec<String> = labels
         .iter()

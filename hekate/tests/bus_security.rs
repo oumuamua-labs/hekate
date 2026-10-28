@@ -143,7 +143,8 @@ fn run(program: &GhostProgram, cpu: &[(Block32, Bit)], table: &[(Block32, Bit)])
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     };
 
@@ -362,6 +363,8 @@ fn lookup_bus_two_tables_mismatched_content_rejected() {
     let config = Config {
         num_queries: 4,
         min_security_bits: 0,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: false,
         ..Config::default()
     };
@@ -394,6 +397,7 @@ fn lookup_bus_two_tables_mismatched_content_rejected() {
 const MULTI_BUS_0: &str = "audit_bus_0";
 const MULTI_BUS_1: &str = "audit_bus_1";
 const MULTI_BUS_2: &str = "audit_bus_2";
+const MULTI_BUS_VARS: usize = 5;
 
 #[derive(Clone)]
 struct MultiBusChiplet {
@@ -467,8 +471,12 @@ impl Air<F> for MultiBusProgram {
 impl Program<F> for MultiBusProgram {
     fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
         Ok(vec![
-            ChipletDef::from_air(&MultiBusChiplet { num_rows: 16 })?,
-            ChipletDef::from_air(&MultiBusChiplet { num_rows: 16 })?,
+            ChipletDef::from_air(&MultiBusChiplet {
+                num_rows: 1 << MULTI_BUS_VARS,
+            })?,
+            ChipletDef::from_air(&MultiBusChiplet {
+                num_rows: 1 << MULTI_BUS_VARS,
+            })?,
         ])
     }
 }
@@ -514,7 +522,8 @@ fn cfg() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
@@ -536,7 +545,7 @@ fn multibus_proof(
     Config,
     hekate_core::proofs::InnerProof<F>,
 ) {
-    let num_vars = 4;
+    let num_vars = MULTI_BUS_VARS;
     let num_rows = 1 << num_vars;
 
     let air = MultiBusProgram;
@@ -572,7 +581,7 @@ fn bus_free_proof() -> (
     Config,
     hekate_core::proofs::InnerProof<F>,
 ) {
-    let num_vars = 4;
+    let num_vars = 5;
 
     let air = BusFreeProgram;
     let trace = TraceBuilder::new(&[ColumnType::Bit], num_vars)
@@ -581,7 +590,11 @@ fn bus_free_proof() -> (
 
     let instance = ProgramInstance::new(1 << num_vars, vec![]);
     let witness = ProgramWitness::new(trace);
-    let config = cfg();
+
+    let config = Config {
+        zero_knowledge: false,
+        ..cfg()
+    };
 
     let proof = prove(
         b"AuditP0", &air, &instance, &witness, &config, [0x5A; 32], None,
@@ -664,10 +677,9 @@ fn h_opening_omitted_on_bused_table_rejected() {
     let (air, instance, config, mut proof) = multibus_proof(cfg());
 
     assert!(proof.h_root.is_some());
-    assert!(proof.eval_proof.h_ldt_proof.is_some());
 
     // Keep h_root, the transcript stays synced
-    proof.eval_proof.h_ldt_proof = None;
+    proof.eval_proof.openings.remove(1);
 
     let result = verify_result(&air, &instance, &config, &proof);
 
@@ -675,8 +687,8 @@ fn h_opening_omitted_on_bused_table_rejected() {
         matches!(
             result,
             Err(Error::Protocol {
-                protocol: "evaluator_verifier",
-                message: "h opening present iff the plan carries h columns",
+                protocol: "fold",
+                message: "fold proof does not match its layout",
             })
         ),
         "{result:?}"
@@ -698,7 +710,7 @@ fn h_root_omitted_on_bused_proof_rejected() {
             result,
             Err(Error::Protocol {
                 protocol: "verifier",
-                message: "h_root presence must match bus presence",
+                message: "h_root presence must match the helper tree",
             })
         ),
         "{result:?}"
@@ -807,7 +819,7 @@ fn n9_chiplet_trace(num_vars: usize, key: u32) -> ColumnTrace {
 
 #[test]
 fn proof_under_other_bus_ids_rejected() {
-    let num_vars = 4;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let mode_honest = Arc::new(AtomicBool::new(false));
@@ -910,7 +922,6 @@ fn h_binding_on_bus_free_proof_rejected() {
     let (_, _, _, bused) = multibus_proof(cfg());
 
     assert!(proof.h_root.is_none());
-    assert!(proof.eval_proof.h_ldt_proof.is_none());
 
     let mut with_root = proof.clone();
     with_root.h_root = bused.h_root;
@@ -922,14 +933,17 @@ fn h_binding_on_bus_free_proof_rejected() {
             result,
             Err(Error::Protocol {
                 protocol: "verifier",
-                message: "h_root presence must match bus presence",
+                message: "h_root presence must match the helper tree",
             })
         ),
         "{result:?}"
     );
 
     let mut with_opening = proof;
-    with_opening.eval_proof.h_ldt_proof = bused.eval_proof.h_ldt_proof;
+    with_opening
+        .eval_proof
+        .openings
+        .insert(1, bused.eval_proof.openings[1].clone());
 
     let result = verify_result(&air, &instance, &config, &with_opening);
 
@@ -937,8 +951,8 @@ fn h_binding_on_bus_free_proof_rejected() {
         matches!(
             result,
             Err(Error::Protocol {
-                protocol: "evaluator_verifier",
-                message: "h opening present iff the plan carries h columns",
+                protocol: "fold",
+                message: "fold proof does not match its layout",
             })
         ),
         "{result:?}"
@@ -953,11 +967,7 @@ fn h_binding_on_bus_free_proof_rejected() {
 fn h_opening_sibling_tamper_rejected() {
     let (air, instance, config, mut proof) = multibus_proof(cfg());
 
-    let opening = proof
-        .eval_proof
-        .h_ldt_proof
-        .as_mut()
-        .expect("bused proof carries an h opening");
+    let opening = &mut proof.eval_proof.openings[1];
 
     assert!(!opening.multiproof.siblings.is_empty());
 
@@ -970,7 +980,7 @@ fn h_opening_sibling_tamper_rejected() {
 fn trace_opening_sibling_tamper_rejected() {
     let (air, instance, config, mut proof) = multibus_proof(cfg());
 
-    let opening = &mut proof.eval_proof.ldt_proof;
+    let opening = &mut proof.eval_proof.openings[0];
 
     assert!(!opening.multiproof.siblings.is_empty());
 
@@ -984,16 +994,10 @@ fn opened_column_off_part_layout_rejected() {
     let (air, instance, config, proof) = multibus_proof(cfg());
 
     let mut long_h = proof.clone();
-    long_h
-        .eval_proof
-        .h_ldt_proof
-        .as_mut()
-        .expect("bused proof carries an h opening")
-        .opened_columns[0]
-        .extend([0u8; 16]);
+    long_h.eval_proof.openings[1].leaves.extend([0u8; 16]);
 
     let mut short_trace = proof;
-    short_trace.eval_proof.ldt_proof.opened_columns[0].pop();
+    short_trace.eval_proof.openings[0].leaves.pop();
 
     for forged in [long_h, short_trace] {
         let result = verify_result(&air, &instance, &config, &forged);
@@ -1002,8 +1006,8 @@ fn opened_column_off_part_layout_rejected() {
             matches!(
                 result,
                 Err(Error::Protocol {
-                    protocol: "brakedown",
-                    message: "opened column length does not match the tables' parts",
+                    protocol: "fold",
+                    message: "opened leaves do not match the tree's leaf width",
                 })
             ),
             "{result:?}"
@@ -1018,10 +1022,16 @@ fn master_count_mismatch_rejected() {
     let mut short = proof.clone();
     short.eval_proof.masters.pop();
 
-    let mut long = proof;
+    let mut long = proof.clone();
     long.eval_proof.masters.push(F::ONE);
 
-    for forged in [short, long] {
+    let mut short_mask = proof.clone();
+    short_mask.eval_proof.mask_masters.pop();
+
+    let mut long_mask = proof;
+    long_mask.eval_proof.mask_masters.push(F::ONE);
+
+    for forged in [short, long, short_mask, long_mask] {
         let result = verify_result(&air, &instance, &config, &forged);
 
         assert!(
@@ -1029,7 +1039,7 @@ fn master_count_mismatch_rejected() {
                 result,
                 Err(Error::Protocol {
                     protocol: "evaluator_verifier",
-                    message: "one master evaluation per pooled master is required",
+                    message: "one master evaluation per committed polynomial is required",
                 })
             ),
             "{result:?}"
@@ -1050,17 +1060,37 @@ fn master_or_fold_vector_tamper_rejected() {
         assert!(matches!(result, Ok(false)), "master {k}: {result:?}");
     }
 
-    let mut bumped = proof.clone();
-    bumped.eval_proof.tensor_vec[0] += F::ONE;
+    for k in 0..proof.eval_proof.mask_masters.len() {
+        let mut forged = proof.clone();
+        forged.eval_proof.mask_masters[k] += F::ONE;
 
-    let mut truncated = proof;
-    truncated.eval_proof.tensor_vec.pop();
-
-    for forged in [bumped, truncated] {
         let result = verify_result(&air, &instance, &config, &forged);
 
-        assert!(matches!(result, Ok(false)), "{result:?}");
+        assert!(matches!(result, Ok(false)), "mask master {k}: {result:?}");
     }
+
+    let mut bumped = proof.clone();
+    bumped.eval_proof.fold_rounds[0] += F::ONE;
+
+    let result = verify_result(&air, &instance, &config, &bumped);
+
+    assert!(matches!(result, Ok(false)), "{result:?}");
+
+    let mut truncated = proof;
+    truncated.eval_proof.fold_rounds.pop();
+
+    let result = verify_result(&air, &instance, &config, &truncated);
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::Protocol {
+                protocol: "fold",
+                message: "fold proof does not match its layout",
+            })
+        ),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -1068,20 +1098,18 @@ fn unreached_layer_node_tamper_rejected() {
     let (air, instance, config, proof) = multibus_proof(layer_gap_cfg());
 
     let mut trace = proof.clone();
-    let unreached = &mut trace.eval_proof.ldt_proof.multiproof.unreached;
+    let unreached = &mut trace.eval_proof.openings[0].multiproof.unreached;
 
     assert!(!unreached.is_empty());
 
     unreached[0][0] ^= 1;
 
     let mut h = proof;
-    let opening = h
-        .eval_proof
-        .h_ldt_proof
-        .as_mut()
-        .expect("bused proof carries an h opening");
+    let unreached = &mut h.eval_proof.openings[1].multiproof.unreached;
 
-    opening.multiproof.unreached[0][0] ^= 1;
+    assert!(!unreached.is_empty());
+
+    unreached[0][0] ^= 1;
 
     for forged in [trace, h] {
         assert!(verify_rejects(&air, &instance, &config, &forged));
@@ -1092,18 +1120,16 @@ fn unreached_layer_node_tamper_rejected() {
 fn unreached_section_off_derived_count_rejected() {
     let (air, instance, config, proof) = multibus_proof(layer_gap_cfg());
 
-    assert!(!proof.eval_proof.ldt_proof.multiproof.unreached.is_empty());
+    assert!(!proof.eval_proof.openings[0].multiproof.unreached.is_empty());
 
     let mut extra = proof.clone();
-    extra
-        .eval_proof
-        .ldt_proof
+    extra.eval_proof.openings[0]
         .multiproof
         .unreached
         .push([0u8; 32]);
 
     let mut short = proof;
-    short.eval_proof.ldt_proof.multiproof.unreached.pop();
+    short.eval_proof.openings[0].multiproof.unreached.pop();
 
     for forged in [extra, short] {
         assert!(verify_rejects(&air, &instance, &config, &forged));
@@ -1116,7 +1142,7 @@ fn unreached_section_off_derived_count_rejected() {
 
 const TAG_BUS_A: &str = "tag_bus_a";
 const TAG_BUS_B: &str = "tag_bus_b";
-const TAG_VARS: usize = 4;
+const TAG_VARS: usize = 5;
 
 const TAG_WAIVER: &str =
     "see hekate/tests/bus_security.rs: keys are distinct row values by construction";

@@ -146,7 +146,7 @@ fn transcript_binding_security_trace_root_changes_challenges() {
     // Security test: if the trace commitment root changes,
     // the prover/verifier transcript challenges MUST change.
 
-    let num_vars = 4;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
     let seed = [0xAAu8; 32];
 
@@ -160,7 +160,8 @@ fn transcript_binding_security_trace_root_changes_challenges() {
     let config_a = Config {
         num_queries: 8,
         min_security_bits: 0,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::default()
     };
@@ -168,7 +169,8 @@ fn transcript_binding_security_trace_root_changes_challenges() {
     let config_b = Config {
         num_queries: 8,
         min_security_bits: 0,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: false,
         ..Config::default()
     };
@@ -433,8 +435,9 @@ proptest! {
 
         let config = Config {
             zero_knowledge,
-            ldt_support_size: 6,
-            num_queries: 4,
+            num_queries: 2,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             min_security_bits: 0,
             ..Config::default()
         };
@@ -477,7 +480,7 @@ fn quarter_rate_proof_verifies_at_derived_count() {
 
     let quarter = Config::prod_at(CodeRate::Quarter);
 
-    assert_eq!(quarter.num_queries, 153);
+    assert_eq!(quarter.num_queries, 148);
 
     let proof = prove(
         b"FibAir_Quarter",

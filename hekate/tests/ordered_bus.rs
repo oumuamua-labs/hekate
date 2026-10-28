@@ -425,6 +425,9 @@ fn verdicts<P: Program<F> + Sync>(
 ) -> [bool; 2] {
     [false, true].map(|zero_knowledge| {
         let config = Config {
+            num_queries: 2,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge,
             ..Config::dev()
         };
@@ -547,6 +550,9 @@ fn verify_twin(defect: Defect) -> [errors::Result<bool>; 2] {
 
     [false, true].map(|zero_knowledge| {
         let config = Config {
+            num_queries: 2,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge,
             ..Config::dev()
         };
@@ -674,7 +680,10 @@ fn tiled_responder_honest_calls_verify() {
     let [x0, x1, _] = inputs();
 
     assert_eq!(
-        tiled_verdicts(&[(x0, f(x0)), (x1, f(x1))], &[x0, x1]),
+        tiled_verdicts(
+            &[(x0, f(x0)), (x1, f(x1)), (x0, f(x0)), (x1, f(x1))],
+            &[x0, x1, x0, x1]
+        ),
         [true, true]
     );
 }
@@ -684,7 +693,10 @@ fn tiled_responder_traded_responses_rejected() {
     let [x0, x1, _] = inputs();
 
     assert_eq!(
-        tiled_verdicts(&[(x0, f(x1)), (x1, f(x0))], &[x0, x1]),
+        tiled_verdicts(
+            &[(x0, f(x1)), (x1, f(x0)), (x0, f(x1)), (x1, f(x0))],
+            &[x0, x1, x0, x1]
+        ),
         [false, false]
     );
 }

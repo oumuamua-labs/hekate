@@ -29,9 +29,10 @@ const TEST_NUM_VARS: usize = 6;
 fn test_config() -> Config {
     Config {
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
         ..Config::default()
     }
 }

@@ -119,7 +119,8 @@ fn build_test_system(
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     };
 
@@ -516,8 +517,8 @@ fn chiplet_rows_zero_rejected() {
 // EXPLOIT: Tamper one table's part of a pool leaf
 //
 // A pool leaf hashes every table's part. One flipped
-// byte in the ROM or the CPU part, of the trace tree
-// or the `h` tree, must fail the Merkle check.
+// byte in the first or the last member's part, of the
+// trace tree or the `h` tree, must fail the Merkle check.
 // ==========================================================
 
 #[test]
@@ -533,18 +534,13 @@ fn tampered_leaf_part_rejected_at_merkle_check() {
         for chiplet_part in [true, false] {
             let mut forged = proof.clone();
 
-            let opening = match h_tree {
-                true => forged.eval_proof.h_ldt_proof.as_mut().unwrap(),
-                false => &mut forged.eval_proof.ldt_proof,
-            };
-
-            let column = &mut opening.opened_columns[0];
+            let leaves = &mut forged.eval_proof.openings[usize::from(h_tree)].leaves;
             let byte = match chiplet_part {
                 true => 0,
-                false => column.len() - 1,
+                false => leaves.len() - 1,
             };
 
-            column[byte] ^= 1;
+            leaves[byte] ^= 1;
 
             let mut vt = Transcript::<H>::new(b"ChipletSecurity");
             let result = HekateVerifier::<F, H>::verify(
@@ -555,8 +551,8 @@ fn tampered_leaf_part_rejected_at_merkle_check() {
                 matches!(
                     result,
                     Err(Error::Protocol {
-                        protocol: "brakedown",
-                        message: "batch merkle proof verification failed",
+                        protocol: "fold",
+                        message: "fold tree multiproof rejected",
                     })
                 ),
                 "h_tree {h_tree}, chiplet_part {chiplet_part}: {result:?}"
@@ -619,13 +615,13 @@ fn main_rows_above_height_bound_rejected() {
 }
 
 #[test]
-fn height_spread_rejected_before_pool_layout() {
+fn height_spread_rejected_at_chiplet_zerocheck() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
 
     assert!(ok, "Baseline proof must verify");
 
-    proof.chiplet_rows[0] = 1 << 20;
+    proof.chiplet_rows[0] = 1 << 10;
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -638,7 +634,7 @@ fn height_spread_rejected_before_pool_layout() {
             result,
             Err(Error::Protocol {
                 protocol: "verifier",
-                message: "claimed evaluation count does not match the pool layout",
+                message: "chiplet ZeroCheck failed",
             })
         ),
         "{result:?}"

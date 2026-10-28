@@ -15,7 +15,7 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
 use hekate_program::digest::program_id;
-use hekate_program::expander::PoolLayout;
+use hekate_program::fold_pool::FoldPool;
 use hekate_program::outer::{TableParts, TableShape, table_plan};
 use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
@@ -85,6 +85,14 @@ fn generate_fib_trace(num_vars: usize) -> ColumnTrace {
     trace
 }
 
+fn fold_pool(air: &CircuitProgram<F>, num_vars: usize, config: &Config) -> FoldPool {
+    let parts = TableParts::of(air);
+    let shape = TableShape::from_air(air, &parts.statics()).unwrap();
+    let plan = table_plan(air, &shape, config).unwrap();
+
+    FoldPool::new(&[(&plan, num_vars)], config).unwrap()
+}
+
 fn column_mle_pair(trace: &ColumnTrace, col: usize, weights: &[Flat<F>]) -> (Flat<F>, Flat<F>) {
     let num_rows = trace.num_rows().unwrap();
 
@@ -120,7 +128,6 @@ fn noise_entropy_inspection() {
 
     let config = Config {
         zero_knowledge: true,
-        ldt_support_size: 2,
         num_queries: 8,
         min_security_bits: 0,
         ..Config::default()
@@ -140,84 +147,53 @@ fn noise_entropy_inspection() {
     )
     .unwrap();
 
-    // In Tensor PCS, we open full columns
-    let columns = &proof.eval_proof.ldt_proof.opened_columns;
-    assert!(!columns.is_empty(), "Must have opened columns");
+    let leaves = &proof.eval_proof.openings[0].leaves;
+    let leaf_bytes = fold_pool(&air, num_vars, &config).layout().trees()[0].leaf_bytes;
 
-    let rs_field_bytes = 4;
-    let data_bytes_per_row = air.column_layout().len() * rs_field_bytes;
+    assert!(!leaves.is_empty(), "Must open trace leaves");
+    assert_eq!(
+        leaves.len() % leaf_bytes,
+        0,
+        "Opened trace leaves must be whole leaves"
+    );
 
-    // ZK Sumcheck noise is always Block128 (16 bytes).
-    let noise_bytes_per_row = config.blind_units() * 16;
-    let bytes_per_row = data_bytes_per_row + noise_bytes_per_row;
-
-    // Calculate grid_rows based on the
-    // asymmetric grid formula used in Prover.
-    let grid_rows = {
-        let parts = TableParts::of(&air);
-        let shape = TableShape::from_air(&air, &parts.statics()).unwrap();
-        let plan = table_plan(&air, &shape, &config).unwrap();
-
-        PoolLayout::new(&[(&plan, num_vars)], F::BITS, &config).grid_rows()
-    };
-
-    for col_data in columns {
-        assert_eq!(
-            col_data.len(),
-            grid_rows * bytes_per_row,
-            "Opened column must include virtual blinding bytes for all grid rows"
-        );
-
-        // DYNAMIC ENTROPY ANALYSIS:
-        // Extract noise from ALL grid
-        // rows, not just the first one.
-        let mut all_noise_bytes = Vec::with_capacity(grid_rows * noise_bytes_per_row);
-        for row_idx in 0..grid_rows {
-            let start = row_idx * bytes_per_row + data_bytes_per_row;
-            let end = start + noise_bytes_per_row;
-
-            all_noise_bytes.extend_from_slice(&col_data[start..end]);
-        }
-
-        // Calculate Shannon Entropy:
-        // H = - sum(p_i * log2(p_i))
-        let mut counts = [0usize; 256];
-        for &b in &all_noise_bytes {
-            counts[b as usize] += 1;
-        }
-
-        let mut entropy = 0.0f64;
-        let total = all_noise_bytes.len() as f64;
-
-        for &count in &counts {
-            if count > 0 {
-                let p = count as f64 / total;
-                entropy -= p * p.log2();
-            }
-        }
-
-        // BIRTHDAY PARADOX MATH:
-        // The prover aggressively folds the matrix,
-        // which may result in small sample sizes (e.g., 256 bytes).
-        // Due to natural collisions, 256 random bytes
-        // will mathematically never reach 8.0 bits.
-        // Expected unique values = 256 * (1 - (255/256)^N)
-        let expected_unique = 256.0 * (1.0 - (255.0 / 256.0_f64).powf(total));
-        let theoretical_expected_entropy = expected_unique.log2();
-
-        // Demand that the AES PRNG hits at least 95%
-        // of the mathematically expected entropy for
-        // this exact sample size.
-        let expected_threshold = theoretical_expected_entropy * 0.95;
-
-        assert!(
-            entropy > expected_threshold,
-            "Noise entropy is fatally low ({} bits vs {} expected on {} bytes). The PRNG is compromised.",
-            entropy,
-            theoretical_expected_entropy,
-            total
-        );
+    // Calculate Shannon Entropy:
+    // H = - sum(p_i * log2(p_i))
+    let mut counts = [0usize; 256];
+    for &b in leaves {
+        counts[usize::from(b)] += 1;
     }
+
+    let mut entropy = 0.0f64;
+    let total = leaves.len() as f64;
+
+    for &count in &counts {
+        if count > 0 {
+            let p = count as f64 / total;
+            entropy -= p * p.log2();
+        }
+    }
+
+    // BIRTHDAY PARADOX MATH:
+    // The openings may be small samples (e.g., 256 bytes).
+    // Due to natural collisions, 256 random bytes
+    // will mathematically never reach 8.0 bits.
+    // Expected unique values = 256 * (1 - (255/256)^N)
+    let expected_unique = 256.0 * (1.0 - (255.0 / 256.0_f64).powf(total));
+    let theoretical_expected_entropy = expected_unique.log2();
+
+    // Demand that the AES PRNG hits at least 95%
+    // of the mathematically expected entropy for
+    // this exact sample size.
+    let expected_threshold = theoretical_expected_entropy * 0.95;
+
+    assert!(
+        entropy > expected_threshold,
+        "Noise entropy is fatally low ({} bits vs {} expected on {} bytes). The PRNG is compromised.",
+        entropy,
+        theoretical_expected_entropy,
+        total
+    );
 }
 
 #[test]
@@ -238,8 +214,9 @@ fn seed_nondeterminism() {
     let config_a = Config {
         zero_knowledge: true,
         num_queries: 8,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -249,8 +226,9 @@ fn seed_nondeterminism() {
     let config_b = Config {
         zero_knowledge: true,
         num_queries: 8,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -283,10 +261,10 @@ fn seed_nondeterminism() {
         "Sumcheck rounds must differ when blinding seed changes"
     );
 
-    let col_a = &proof_a.eval_proof.ldt_proof.opened_columns[0];
-    let col_b = &proof_b.eval_proof.ldt_proof.opened_columns[0];
+    let leaves_a = &proof_a.eval_proof.openings[0].leaves;
+    let leaves_b = &proof_b.eval_proof.openings[0].leaves;
 
-    assert_ne!(col_a, col_b, "Opened noise bytes must differ");
+    assert_ne!(leaves_a, leaves_b, "Opened leaves must differ");
 
     let mut vt_a = Transcript::<H>::new(b"ZK_Seed");
     let ok_a = HekateVerifier::<F, H>::verify(
@@ -333,8 +311,9 @@ fn noise_integrity_check() {
 
     let config = Config {
         zero_knowledge: true,
-        ldt_support_size: 1,
         num_queries: 8,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
@@ -353,18 +332,12 @@ fn noise_integrity_check() {
     )
     .unwrap();
 
-    let col_data = &mut proof.eval_proof.ldt_proof.opened_columns[0];
-
-    // Architecture:
-    // FibAir [B32, B32, Bit], each cell committed at
-    // its rs_field width (Bit -> B32): 4 + 4 + 4 = 12.
-    let data_bytes_per_row = (4 + 4 + 4) * 2;
-    let bytes_per_row = data_bytes_per_row + (config.blind_units() * 16 * 2);
+    let leaf_bytes = fold_pool(&air, num_vars, &config).layout().trees()[0].leaf_bytes;
 
     // ATTACK:
-    // maliciously corrupt the noise suffix
-    // in the first grid row of the column.
-    for b in &mut col_data[data_bytes_per_row..bytes_per_row] {
+    // maliciously zero the first
+    // opened leaf of the trace tree.
+    for b in &mut proof.eval_proof.openings[0].leaves[..leaf_bytes] {
         *b = 0;
     }
 
@@ -441,7 +414,7 @@ impl Program<F> for MaliciousAir {
 
 #[test]
 fn trust_me_bro_knowledge() {
-    let num_vars = 4;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     // 1. Create a FAKE trace (all zeros).
@@ -475,9 +448,10 @@ fn trust_me_bro_knowledge() {
     // ==========================================
     let config_zk = Config {
         num_queries: 8,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 2,
         ..Config::default()
     };
 
@@ -521,7 +495,6 @@ fn trust_me_bro_knowledge() {
         num_queries: 8,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 1,
         ..Config::default()
     };
 
@@ -573,16 +546,18 @@ fn algebraic_and_evaluation_perfect_hiding() {
 
     let config_no_zk = Config {
         zero_knowledge: false,
-        ldt_support_size: 4,
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
 
     let config_zk = Config {
         zero_knowledge: true,
-        ldt_support_size: 4,
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
@@ -711,90 +686,44 @@ fn algebraic_and_evaluation_perfect_hiding() {
     assert_ne!(eval_no_zk, eval_zk_a, "ZK failed to hide trace evaluations");
     assert_ne!(eval_zk_a, eval_zk_b, "ZK failed to hide trace evaluations");
 
-    // K = 0, ldt_support_size > 0 ablation pair.
-    // Isolates whether ldt_support_size alone
-    // produces seed-dependent round polys and
-    // evaluations without any sumcheck masks.
-    let config_only_ldt = Config {
-        zero_knowledge: false,
-        ldt_support_size: 8,
-        num_queries: 4,
-        min_security_bits: 0,
-        ..Config::default()
-    };
-
-    let p_only_ldt_a = prove(
+    // Raw-mode control: the proof draws no randomness without zero knowledge
+    let p_raw_a = prove(
         b"ZK_Hiding",
         &air,
         &instance,
         &witness,
-        &config_only_ldt,
+        &config_no_zk,
         seed_a,
         None,
     )
     .unwrap();
 
-    let p_only_ldt_b = prove(
+    let p_raw_b = prove(
         b"ZK_Hiding",
         &air,
         &instance,
         &witness,
-        &config_only_ldt,
+        &config_no_zk,
         seed_b,
         None,
     )
     .unwrap();
 
-    let mut vt4 = Transcript::<H>::new(b"ZK_Hiding");
-    assert!(
-        HekateVerifier::<F, H>::verify(
-            &program_id(&air).unwrap(),
-            &air,
-            &instance,
-            &p_only_ldt_a,
-            &mut vt4,
-            &config_only_ldt,
-        )
-        .unwrap(),
-        "K=0/ldt>0 proof A must verify"
+    assert_eq!(
+        poly_no_zk, &p_raw_a.zerocheck_proof.round_polys[0].evals,
+        "raw round polys must not depend on the seed"
     );
-
-    let mut vt5 = Transcript::<H>::new(b"ZK_Hiding");
-    assert!(
-        HekateVerifier::<F, H>::verify(
-            &program_id(&air).unwrap(),
-            &air,
-            &instance,
-            &p_only_ldt_b,
-            &mut vt5,
-            &config_only_ldt,
-        )
-        .unwrap(),
-        "K=0/ldt>0 proof B must verify"
+    assert_eq!(
+        poly_no_zk, &p_raw_b.zerocheck_proof.round_polys[0].evals,
+        "raw round polys must not depend on the seed"
     );
-
-    let poly_only_ldt_a = &p_only_ldt_a.zerocheck_proof.round_polys[0].evals;
-    let poly_only_ldt_b = &p_only_ldt_b.zerocheck_proof.round_polys[0].evals;
-
-    assert_ne!(
-        poly_no_zk, poly_only_ldt_a,
-        "K=0 round polys must differ when seed/ldt differ"
+    assert_eq!(
+        eval_no_zk, &p_raw_a.main_point_evaluation.1,
+        "raw evaluations must not depend on the seed"
     );
-    assert_ne!(
-        poly_only_ldt_a, poly_only_ldt_b,
-        "K=0/ldt>0: round polys must diverge across seeds"
-    );
-
-    let eval_only_ldt_a = &p_only_ldt_a.main_point_evaluation.1;
-    let eval_only_ldt_b = &p_only_ldt_b.main_point_evaluation.1;
-
-    assert_ne!(
-        eval_no_zk, eval_only_ldt_a,
-        "K=0 evaluations must differ when seed/ldt differ"
-    );
-    assert_ne!(
-        eval_only_ldt_a, eval_only_ldt_b,
-        "K=0/ldt>0: trace evaluations must diverge across seeds"
+    assert_eq!(
+        eval_no_zk, &p_raw_b.main_point_evaluation.1,
+        "raw evaluations must not depend on the seed"
     );
 }
 
@@ -811,8 +740,9 @@ fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<[(F, F); 2]> {
 
     let config = Config {
         zero_knowledge,
-        ldt_support_size: 4,
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
@@ -885,13 +815,13 @@ fn true_zk_memory_isolation() {
     //   STAGE A (production blinding):
     //   inject a magic value at a single row,
     //   generate a proof, the magic hardware-basis
-    //   bytes must NOT appear in main LDT openings.
+    //   bytes must NOT appear in any fold opening.
     //
     //   STAGE B (positive control):
-    //   a needle planted in an opened column
+    //   a needle planted in an opened leaf
     //   must be found by the same scan.
 
-    let num_vars = 4;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let magic_val = 0xDEADBEEF_u32;
@@ -919,13 +849,11 @@ fn true_zk_memory_isolation() {
         .to_le_bytes();
 
     let scan_main_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
-        for col_data in &proof.eval_proof.ldt_proof.opened_columns {
-            if col_data.windows(needle.len()).any(|w| w == needle) {
-                return true;
-            }
-        }
-
-        false
+        proof
+            .eval_proof
+            .openings
+            .iter()
+            .any(|opening| opening.leaves.windows(needle.len()).any(|w| w == needle))
     };
 
     // STAGE A
@@ -933,8 +861,9 @@ fn true_zk_memory_isolation() {
     // Magic bytes MUST be hidden.
     let config_zk = Config {
         zero_knowledge: true,
-        ldt_support_size: 2,
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
@@ -946,21 +875,21 @@ fn true_zk_memory_isolation() {
 
     assert!(
         !scan_main_openings(&proof_zk),
-        "STAGE A FAILURE: magic hardware bytes appeared in main LDT openings"
+        "STAGE A FAILURE: magic hardware bytes appeared in fold openings"
     );
 
     // STAGE B
-    // The non-systematic row code emits no verbatim
-    // column, no real leak exists to detect.
+    // The non-systematic code emits no verbatim
+    // cell, no real leak exists to detect.
     let mut planted = proof_zk.clone();
 
     let target = planted
         .eval_proof
-        .ldt_proof
-        .opened_columns
+        .openings
         .iter_mut()
-        .find(|col| col.len() >= needle.len())
-        .expect("a main opening wide enough to hold the needle");
+        .map(|opening| &mut opening.leaves)
+        .find(|leaves| leaves.len() >= needle.len())
+        .expect("an opening wide enough to hold the needle");
 
     target[..needle.len()].copy_from_slice(&needle);
 
@@ -968,43 +897,13 @@ fn true_zk_memory_isolation() {
         scan_main_openings(&planted),
         "positive control: a planted needle must be detected by the scan",
     );
-
-    // STAGE C
-    // K = 0, ldt_support_size = 200.
-    // Isolates whether ldt_support_size alone
-    // hides raw bytes without sumcheck masks.
-    let config_only_ldt = Config {
-        zero_knowledge: false,
-        ldt_support_size: 200,
-        num_queries: 4,
-        min_security_bits: 0,
-        ..Config::default()
-    };
-
-    let proof_only_ldt = prove(
-        b"TrueZK",
-        &air,
-        &instance,
-        &witness,
-        &config_only_ldt,
-        [7u8; 32],
-        None,
-    )
-    .unwrap();
-
-    assert!(
-        !scan_main_openings(&proof_only_ldt),
-        "STAGE C FAILURE: magic hardware bytes appeared with K=0, ldt_support_size=200"
-    );
 }
 
 #[test]
 fn truncation_overflow_injection() {
     // OBJECTIVE:
-    // Ensure that the Verifier strictly rejects
-    // out-of-bounds bytes for truncated types (like `Bit`)
-    // in the opened LDT leaves. If an attacker injects
-    // `0xFE` into a `Bit` column, the protocol must fail cleanly.
+    // Ensure that the Verifier strictly rejects an opened
+    // code symbol whose top byte an attacker set to `0xFE`.
 
     let num_vars = 5;
     let num_rows = 1usize << num_vars;
@@ -1016,8 +915,9 @@ fn truncation_overflow_injection() {
 
     let config = Config {
         zero_knowledge: true,
-        ldt_support_size: 1,
         num_queries: 8,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
@@ -1037,39 +937,16 @@ fn truncation_overflow_injection() {
     )
     .unwrap();
 
-    let col_data = &mut proof.eval_proof.ldt_proof.opened_columns[0];
+    let target_offset = fold_pool(&air, num_vars, &config).layout().polys()[0]
+        .field
+        .bytes()
+        - 1;
 
-    // DYNAMIC ATTACK VECTOR:
-    // Automatically calculate the byte
-    // offset for the first `Bit` column
-    // based on the AIR layout, accounting
-    // for base+shift interleaving.
-    let mut target_offset = 0;
-    for col_type in air.column_layout() {
-        if matches!(col_type, ColumnType::Bit) {
-            break;
-        }
-
-        let col_size = match col_type {
-            ColumnType::Bit => 1,
-            ColumnType::B8 => 1,
-            ColumnType::B16 => 2,
-            ColumnType::B32 => 4,
-            ColumnType::B64 => 8,
-            ColumnType::B128 => 16,
-        };
-
-        // Architecture interleaves
-        // Base and Shift physical bytes.
-        target_offset += col_size * 2;
-    }
+    let leaves = &mut proof.eval_proof.openings[0].leaves;
 
     // ATTACK:
-    // Inject an invalid byte (0xFE)
-    // into the dynamic offset.
-    // A `Bit` must strictly be
-    // evaluated as 0x00 or 0x01.
-    col_data[target_offset] = match col_data[target_offset] {
+    // Inject 0xFE into the top byte of the first opened symbol.
+    leaves[target_offset] = match leaves[target_offset] {
         0xFE => 0xFD,
         _ => 0xFE,
     };
@@ -1087,7 +964,7 @@ fn truncation_overflow_injection() {
 
     // 3. Guarantee rejection
     match result {
-        Ok(true) => panic!("Verifier accepted a Truncation Overflow (0xFE) for a Bit column"),
+        Ok(true) => panic!("Verifier accepted an opened symbol with a forged top byte"),
         Ok(false) => {
             // Rejected due to evaluation mismatch (Good)
         }
@@ -1103,8 +980,8 @@ fn noise_shift_sign_forgery() {
     // Ensure that the Verifier detects if the Prover
     // swaps or modifies the base/shifted noise values
     // (B(r) vs B(x_next)). Even if the AIR check passes
-    // logically, the TensorPCS binding must fail because
-    // the claimed values won't match the committed LDT data.
+    // logically, the PCS binding must fail because
+    // the claimed values won't match the committed data.
 
     let num_vars = 5;
     let num_rows = 1usize << num_vars;
@@ -1116,8 +993,9 @@ fn noise_shift_sign_forgery() {
 
     let config = Config {
         zero_knowledge: true,
-        ldt_support_size: 1,
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
@@ -1168,10 +1046,10 @@ fn noise_shift_sign_forgery() {
     // 3. Guarantee rejection
     match result {
         Ok(true) => panic!(
-            "Verifier accepted swapped noise values! TensorPCS failed to bind trace_values to Merkle root"
+            "Verifier accepted swapped noise values! The PCS failed to bind trace_values to the root"
         ),
         Ok(false) => {
-            // Success: Rejected by Batch Evaluation (TensorPCS)
+            // Success: Rejected by the pool eval
         }
         Err(_) => {
             // Success: Protocol/Merkle mismatch detected
@@ -1183,7 +1061,7 @@ fn noise_shift_sign_forgery() {
 fn ghost_protocol_indistinguishability() {
     // OBJECTIVE:
     // Prove that ZK noise makes the padding zone (Ghost Protocol)
-    // indistinguishable from real data rows in the LDT openings.
+    // indistinguishable from real data rows in the fold openings.
     // A verifier/observer should not be able to guess the program's
     // effective length by looking at the proof's noise distribution.
 
@@ -1193,8 +1071,9 @@ fn ghost_protocol_indistinguishability() {
 
     let config = Config {
         zero_knowledge: true,
-        ldt_support_size: 2,
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         ..Config::default()
     };
@@ -1259,42 +1138,26 @@ fn ghost_protocol_indistinguishability() {
     )
     .unwrap();
 
-    // Check the LDT openings in the zone where
-    // Trace A is padding but Trace B is data.
-    // In True ZK, all opened bytes must look
-    // like high-entropy noise.
-    let col_short = &proof_short.eval_proof.ldt_proof.opened_columns[0];
-    let col_long = &proof_long.eval_proof.ldt_proof.opened_columns[0];
+    // Every opened symbol mixes all rows with the noise block:
+    // in True ZK, all opened bytes must look like high-entropy noise.
+    let leaves_short = &proof_short.eval_proof.openings[0].leaves;
+    let leaves_long = &proof_long.eval_proof.openings[0].leaves;
 
     // Guarantee:
-    // Both columns must be
-    // fully populated with noise.
+    // Both openings must be fully populated with noise.
     assert!(
-        !col_short.iter().all(|&x| x == 0),
-        "Short trace LDT is not blinded"
+        !leaves_short.iter().all(|&x| x == 0),
+        "Short trace openings are not blinded"
     );
     assert!(
-        !col_long.iter().all(|&x| x == 0),
-        "Long trace LDT is not blinded"
+        !leaves_long.iter().all(|&x| x == 0),
+        "Long trace openings are not blinded"
     );
-
-    // Guarantee:
-    // The "fingerprint" (distribution) should
-    // not reveal the halt point. We check that
-    // the padding zone in Trace A is not just
-    // "zeros" but actual ZK noise.
-    let data_bytes_per_row = (4 + 4 + 1) * 2;
-    let noise_start = data_bytes_per_row;
-    let noise_end = data_bytes_per_row + (config.blind_units() * 16 * 2);
-
-    let padding_noise_short = &col_short[noise_start..noise_end];
-    let padding_noise_long = &col_long[noise_start..noise_end];
 
     // Statistical check:
-    // the noise must be present
-    // and non-trivial in both cases.
-    assert!(padding_noise_short.iter().filter(|&&x| x != 0).count() > 10);
-    assert!(padding_noise_long.iter().filter(|&&x| x != 0).count() > 10);
+    // the noise must be present and non-trivial in both cases.
+    assert!(leaves_short.iter().filter(|&&x| x != 0).count() > 10);
+    assert!(leaves_long.iter().filter(|&&x| x != 0).count() > 10);
 }
 
 // =================================================================
@@ -1418,25 +1281,25 @@ fn make_minimal_bus_trace(num_vars: usize, magic: u32) -> ColumnTrace {
 fn chiplet_pipeline_witness_isolation() {
     // OBJECTIVE
     //
-    // The chiplet Brakedown LDT openings must
-    // not contain raw witness bytes in cleartext.
+    // The fold openings must not contain raw
+    // chiplet witness bytes in cleartext.
     // This test runs as a paired positive/negative
     // control:
     //
     //   STAGE A (production blinding):
     //   inject a magic byte sequence into the
     //   chiplet trace, generate a proof, scan
-    //   ALL chiplet LDT opened bytes, the
+    //   ALL opened fold bytes, the
     //   magic sequence must NOT appear.
     //
     //   STAGE B (positive control):
-    //   a needle planted in an opened column
+    //   a needle planted in an opened leaf
     //   must be found by the same scan.
     //
     // What this catches end-to-end:
     // - any code change that lets
     //   raw chiplet bytes reach:
-    //   `eval_proof.ldt_proof.opened_columns`
+    //   `eval_proof.openings`
 
     const MAGIC: u32 = 0xDEAD_BEEF;
 
@@ -1446,7 +1309,7 @@ fn chiplet_pipeline_witness_isolation() {
         .0
         .to_le_bytes();
 
-    let num_vars = 4;
+    let num_vars = 5;
     let num_rows = 1usize << num_vars;
 
     // Two copies share bus_ids by design,
@@ -1477,10 +1340,9 @@ fn chiplet_pipeline_witness_isolation() {
     let scan_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
         proof
             .eval_proof
-            .ldt_proof
-            .opened_columns
+            .openings
             .iter()
-            .any(|col| col.windows(needle.len()).any(|w| w == needle))
+            .any(|opening| opening.leaves.windows(needle.len()).any(|w| w == needle))
     };
 
     // STAGE A
@@ -1488,9 +1350,10 @@ fn chiplet_pipeline_witness_isolation() {
     // Magic bytes MUST be hidden.
     let config_zk = Config {
         num_queries: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -1522,20 +1385,20 @@ fn chiplet_pipeline_witness_isolation() {
     let leaked_zk = scan_openings(&proof_zk);
     assert!(
         !leaked_zk,
-        "STAGE A FAILURE: magic witness bytes 0x{MAGIC:08X} appeared in chiplet LDT openings",
+        "STAGE A FAILURE: magic witness bytes 0x{MAGIC:08X} appeared in fold openings",
     );
 
     // STAGE B
-    // The non-systematic row code emits no verbatim
-    // column, no real leak exists to detect.
+    // The non-systematic code emits no verbatim
+    // cell, no real leak exists to detect.
     let mut planted = proof_zk.clone();
 
     let target = planted
         .eval_proof
-        .ldt_proof
-        .opened_columns
+        .openings
         .iter_mut()
-        .find(|col| col.len() >= needle.len())
+        .map(|opening| &mut opening.leaves)
+        .find(|leaves| leaves.len() >= needle.len())
         .expect("opening wide enough to hold the needle");
 
     target[..needle.len()].copy_from_slice(&needle);

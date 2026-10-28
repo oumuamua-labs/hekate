@@ -279,6 +279,9 @@ fn assert_unproven<P: Program<F>>(
     witness: &ProgramWitness<F>,
 ) {
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };

@@ -69,10 +69,11 @@ fn ram_air(num_rows: usize, num_events: usize) -> CircuitProgram<F> {
 
 fn config() -> Config {
     Config {
-        num_queries: 4,
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
         ..Config::default()
     }
 }
