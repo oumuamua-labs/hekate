@@ -20,10 +20,6 @@ use crate::linearized::{BITS, LinearMap};
 pub const RING_BLIND_BITS: usize = 128;
 pub const EVAL_SUMCHECK_DEGREE: usize = 2;
 
-/// Claim count from which [`ring_target`] switches
-/// to byte tables indexed by the claims: variable-time.
-const RING_TABLE_MIN_CLAIMS: usize = 300;
-
 /// Serializable expansion step descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpansionEntry {
@@ -878,6 +874,62 @@ impl RingSwitchPlan {
     }
 }
 
+/// `φ_K` per subfield `K` that [`ring_target`] reads,
+/// tabulated on first use and indexed by the claims'
+/// raw bits: variable-time, for public claims only.
+pub struct RingMaps<'a, F> {
+    r_mix: &'a [Block128],
+    fields: Vec<(ColumnType, LinearMap<F, Block128>)>,
+    basis: Vec<Flat<Block128>>,
+}
+
+impl<'a, F> RingMaps<'a, F>
+where
+    F: HardwareField + Into<Block128>,
+{
+    pub fn new(r_mix: &'a [Block128]) -> Self {
+        Self {
+            r_mix,
+            fields: Vec::new(),
+            basis: (0..BITS)
+                .map(|v| Block128(1u128 << v).to_hardware())
+                .collect(),
+        }
+    }
+
+    fn tabulate(&mut self, plan: &RingSwitchPlan) {
+        let zero = Flat::from_raw(Block128::ZERO);
+
+        for unit in &plan.units {
+            if unit.field == ColumnType::B128
+                || self.fields.iter().any(|(field, _)| *field == unit.field)
+            {
+                continue;
+            }
+
+            let coeffs: Vec<Flat<Block128>> = field_coeffs(unit.field, self.r_mix)
+                .iter()
+                .map(|m| m.to_hardware())
+                .collect();
+
+            let map = LinearMap::new(|x: Flat<F>| {
+                let tower: Block128 = x.to_tower().into();
+
+                let mut acc = zero;
+                for (u, &m) in coeffs.iter().enumerate() {
+                    if (tower.0 >> u) & 1 == 1 {
+                        acc += m;
+                    }
+                }
+
+                acc
+            });
+
+            self.fields.push((unit.field, map));
+        }
+    }
+}
+
 struct UnitBuilder {
     units: Vec<Unit>,
     homes: Vec<Home>,
@@ -1132,23 +1184,6 @@ pub fn field_coeffs(field: ColumnType, r_mix: &[Block128]) -> Vec<Block128> {
         .collect()
 }
 
-/// `Σ_m π_{m·w}·φ_K(c_m)` for one unit over `field`.
-pub fn unit_batch(field: ColumnType, claims: &[Block128], r_mix: &[Block128]) -> Block128 {
-    let width = field_bits(field);
-
-    let mut acc = Block128::ZERO;
-    for (j, &m) in eq_tensor_b(&r_mix[..mix_vars(field)]).iter().enumerate() {
-        let mut shat = 0u128;
-        for (k, c) in claims.iter().enumerate() {
-            shat |= chunk(c.0, j, width) << (k * width);
-        }
-
-        acc += m * Block128(shat);
-    }
-
-    acc
-}
-
 /// Reconstructs the sumcheck's initial claim from the claimed
 /// virtual evals, in the tower basis: under its layout weight
 /// `a` a unit over `K` adds `a·Σ_m π_{m·w}·φ_K(c_m)`.
@@ -1156,16 +1191,54 @@ pub fn ring_target<F>(
     plan: &RingSwitchPlan,
     weights: &UnitWeights<Block128>,
     claims: &[Flat<F>],
-    r_mix: &[Block128],
+    maps: &mut RingMaps<'_, F>,
     shifted_claims: bool,
 ) -> Block128
 where
     F: HardwareField + Into<Block128>,
 {
-    match claims.len() < RING_TABLE_MIN_CLAIMS {
-        true => ring_target_transposed(plan, weights, claims, r_mix, shifted_claims),
-        false => ring_target_tabulated(plan, weights, claims, r_mix, shifted_claims),
+    maps.tabulate(plan);
+
+    let zero = Flat::from_raw(Block128::ZERO);
+    let one = Flat::from_raw(Block128::ONE);
+
+    let half = plan.total_claims();
+
+    let base = [(0usize, one)];
+    let base_and_shift = [(0usize, one), (half, weights.shift)];
+
+    let offsets: &[(usize, Flat<Block128>)] = if shifted_claims {
+        &base_and_shift
+    } else {
+        &base
+    };
+
+    let mut target = zero;
+    for &(offset, shift_mul) in offsets {
+        for (unit, &unit_weight) in plan.units.iter().zip(&weights.units) {
+            let width = field_bits(unit.field);
+            let map = maps
+                .fields
+                .iter()
+                .find(|(field, _)| *field == unit.field)
+                .map(|(_, map)| map);
+
+            let mut value = zero;
+            for (m, &c) in unit.claims.iter().enumerate() {
+                let claim = claims[offset + c];
+                let image = match map {
+                    Some(map) => map.apply(claim),
+                    None => Into::<Block128>::into(claim.to_tower()).to_hardware(),
+                };
+
+                value += maps.basis[m * width] * image;
+            }
+
+            target += unit_weight * shift_mul * value;
+        }
     }
+
+    target.to_tower()
 }
 
 /// Per-claim `(field, a_c)` with `ring_target = Σ_c a_c·φ_K(c_c)`,
@@ -1207,132 +1280,6 @@ pub fn field_bits(field: ColumnType) -> usize {
         ColumnType::B64 => 64,
         ColumnType::B128 => BITS,
     }
-}
-
-/// [`ring_target`] in the tower basis, each unit's
-/// claim chunks transposed by [`unit_batch`].
-fn ring_target_transposed<F>(
-    plan: &RingSwitchPlan,
-    weights: &UnitWeights<Block128>,
-    claims: &[Flat<F>],
-    r_mix: &[Block128],
-    shifted_claims: bool,
-) -> Block128
-where
-    F: HardwareField + Into<Block128>,
-{
-    let half = plan.total_claims();
-
-    let base = [(0usize, Block128::ONE)];
-    let base_and_shift = [(0usize, Block128::ONE), (half, weights.shift.to_tower())];
-
-    let offsets: &[(usize, Block128)] = if shifted_claims {
-        &base_and_shift
-    } else {
-        &base
-    };
-
-    let mut values: Vec<Block128> = Vec::with_capacity(BITS);
-    let mut target = Block128::ZERO;
-
-    for &(offset, shift_mul) in offsets {
-        for (unit, unit_weight) in plan.units.iter().zip(&weights.units) {
-            values.clear();
-            values.extend(
-                unit.claims
-                    .iter()
-                    .map(|&c| -> Block128 { claims[offset + c].to_tower().into() }),
-            );
-
-            target += unit_weight.to_tower() * shift_mul * unit_batch(unit.field, &values, r_mix);
-        }
-    }
-
-    target
-}
-
-/// [`ring_target`] in the flat basis, each `φ_K`
-/// read from byte tables on the claims' raw bits.
-fn ring_target_tabulated<F>(
-    plan: &RingSwitchPlan,
-    weights: &UnitWeights<Block128>,
-    claims: &[Flat<F>],
-    r_mix: &[Block128],
-    shifted_claims: bool,
-) -> Block128
-where
-    F: HardwareField + Into<Block128>,
-{
-    let zero = Flat::from_raw(Block128::ZERO);
-    let one = Flat::from_raw(Block128::ONE);
-
-    let mut maps: Vec<(ColumnType, LinearMap<F, Block128>)> = Vec::new();
-    for unit in &plan.units {
-        if unit.field == ColumnType::B128 || maps.iter().any(|(field, _)| *field == unit.field) {
-            continue;
-        }
-
-        let coeffs: Vec<Flat<Block128>> = field_coeffs(unit.field, r_mix)
-            .iter()
-            .map(|m| m.to_hardware())
-            .collect();
-
-        let map = LinearMap::new(|x: Flat<F>| {
-            let tower: Block128 = x.to_tower().into();
-
-            let mut acc = zero;
-            for (u, &m) in coeffs.iter().enumerate() {
-                if (tower.0 >> u) & 1 == 1 {
-                    acc += m;
-                }
-            }
-
-            acc
-        });
-
-        maps.push((unit.field, map));
-    }
-
-    let basis: Vec<Flat<Block128>> = (0..BITS)
-        .map(|v| Block128(1u128 << v).to_hardware())
-        .collect();
-
-    let half = plan.total_claims();
-
-    let base = [(0usize, one)];
-    let base_and_shift = [(0usize, one), (half, weights.shift)];
-
-    let offsets: &[(usize, Flat<Block128>)] = if shifted_claims {
-        &base_and_shift
-    } else {
-        &base
-    };
-
-    let mut target = zero;
-    for &(offset, shift_mul) in offsets {
-        for (unit, &unit_weight) in plan.units.iter().zip(&weights.units) {
-            let width = field_bits(unit.field);
-            let map = maps
-                .iter()
-                .find(|(field, _)| *field == unit.field)
-                .map(|(_, map)| map);
-
-            let mut value = zero;
-            for (m, &c) in unit.claims.iter().enumerate() {
-                let claim = claims[offset + c];
-                let image = match map {
-                    Some(map) => map.apply(claim),
-                    None => Into::<Block128>::into(claim.to_tower()).to_hardware(),
-                };
-
-                value += basis[m * width] * image;
-            }
-
-            target += unit_weight * shift_mul * value;
-        }
-    }
-
-    target.to_tower()
 }
 
 fn unit_ops(
@@ -1425,13 +1372,6 @@ fn mix_vars(field: ColumnType) -> usize {
     (BITS / field_bits(field)).trailing_zeros() as usize
 }
 
-fn chunk(x: u128, j: usize, width: usize) -> u128 {
-    match width {
-        BITS => x,
-        _ => (x >> (j * width)) & ((1u128 << width) - 1),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,6 +1403,73 @@ mod tests {
             state ^= state << 17;
 
             Block128(state)
+        }
+    }
+
+    /// `Σ_m π_{m·w}·φ_K(c_m)` for one unit over `field`.
+    fn unit_batch(field: ColumnType, claims: &[Block128], r_mix: &[Block128]) -> Block128 {
+        let width = field_bits(field);
+
+        let mut acc = Block128::ZERO;
+        for (j, &m) in eq_tensor_b(&r_mix[..mix_vars(field)]).iter().enumerate() {
+            let mut shat = 0u128;
+            for (k, c) in claims.iter().enumerate() {
+                shat |= chunk(c.0, j, width) << (k * width);
+            }
+
+            acc += m * Block128(shat);
+        }
+
+        acc
+    }
+
+    /// [`ring_target`] in the tower basis, each unit's
+    /// claim chunks transposed by [`unit_batch`].
+    fn ring_target_transposed<F>(
+        plan: &RingSwitchPlan,
+        weights: &UnitWeights<Block128>,
+        claims: &[Flat<F>],
+        r_mix: &[Block128],
+        shifted_claims: bool,
+    ) -> Block128
+    where
+        F: HardwareField + Into<Block128>,
+    {
+        let half = plan.total_claims();
+
+        let base = [(0usize, Block128::ONE)];
+        let base_and_shift = [(0usize, Block128::ONE), (half, weights.shift.to_tower())];
+
+        let offsets: &[(usize, Block128)] = if shifted_claims {
+            &base_and_shift
+        } else {
+            &base
+        };
+
+        let mut values: Vec<Block128> = Vec::with_capacity(BITS);
+        let mut target = Block128::ZERO;
+
+        for &(offset, shift_mul) in offsets {
+            for (unit, unit_weight) in plan.units.iter().zip(&weights.units) {
+                values.clear();
+                values.extend(
+                    unit.claims
+                        .iter()
+                        .map(|&c| -> Block128 { claims[offset + c].to_tower().into() }),
+                );
+
+                target +=
+                    unit_weight.to_tower() * shift_mul * unit_batch(unit.field, &values, r_mix);
+            }
+        }
+
+        target
+    }
+
+    fn chunk(x: u128, j: usize, width: usize) -> u128 {
+        match width {
+            BITS => x,
+            _ => (x >> (j * width)) & ((1u128 << width) - 1),
         }
     }
 
@@ -1821,7 +1828,7 @@ mod tests {
 
             let r_mix: Vec<Block128> = (0..7).map(|_| next()).collect();
             let flat: Vec<Flat<Block128>> = claims.iter().map(|c| c.to_hardware()).collect();
-            let target = ring_target(&plan, &weights, &flat, &r_mix, true);
+            let target = ring_target(&plan, &weights, &flat, &mut RingMaps::new(&r_mix), true);
 
             let mut sum = Block128::ZERO;
             for ((field, weight), claim) in claim_weights(&plan, &weights, true)
@@ -1885,7 +1892,13 @@ mod tests {
                 let r_mix: Vec<Block128> = (0..7).map(|_| next()).collect();
 
                 assert_eq!(
-                    ring_target_tabulated(&plan, &weights, &claims, &r_mix, shifted),
+                    ring_target(
+                        &plan,
+                        &weights,
+                        &claims,
+                        &mut RingMaps::new(&r_mix),
+                        shifted
+                    ),
                     ring_target_transposed(&plan, &weights, &claims, &r_mix, shifted)
                 );
             }
@@ -2031,6 +2044,44 @@ mod tests {
                     })
                 ),
                 "{declared:?} under {entries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ring_maps_shared_across_plans_match_fresh() {
+        let whole = RingSwitchPlan::new(&[ColumnType::B64, ColumnType::B16], None, 0, 0).unwrap();
+
+        let expander = VirtualExpander::new()
+            .expand_bits(1, ColumnType::B32)
+            .build()
+            .unwrap();
+
+        let planes = RingSwitchPlan::new(
+            &[ColumnType::B32],
+            Some(&expander.expansion_entries()),
+            0,
+            0,
+        )
+        .unwrap();
+
+        let mut next = xorshift(0x5eed_0f0f_1234_5678_9abc_def0_2468_ace0);
+        let r_mix: Vec<Block128> = (0..7).map(|_| next()).collect();
+
+        let mut shared = RingMaps::new(&r_mix);
+        for plan in [&whole, &planes, &whole] {
+            let claims: Vec<Flat<Block128>> = (0..2 * plan.total_claims())
+                .map(|_| next().to_hardware())
+                .collect();
+
+            let weights = UnitWeights {
+                units: (0..plan.num_units).map(|_| next().to_hardware()).collect(),
+                shift: next().to_hardware(),
+            };
+
+            assert_eq!(
+                ring_target(plan, &weights, &claims, &mut shared, true),
+                ring_target(plan, &weights, &claims, &mut RingMaps::new(&r_mix), true)
             );
         }
     }

@@ -6,7 +6,7 @@ use hekate_core::config::Config;
 use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
 use hekate_program::expander::{
-    RingSwitchPlan, VirtualExpander, claim_weights, field_bits, field_coeffs, ring_target,
+    RingMaps, RingSwitchPlan, VirtualExpander, claim_weights, field_bits, field_coeffs, ring_target,
 };
 use hekate_program::fold_pool::{FoldPool, UnitWeights};
 use hekate_program::linearized::{self, RingGadget, linearized_coeffs};
@@ -105,8 +105,22 @@ fn pad_contribution_to_ring_target_is_horner_delta() {
 
         let to_flat = |v: &[K]| -> Vec<Flat<K>> { v.iter().map(|x| x.to_hardware()).collect() };
 
-        let t_masked = ring_target(&plan, &unit_weights, &to_flat(&masked), &r_mix, true);
-        let t_plain = ring_target(&plan, &unit_weights, &to_flat(&claims), &r_mix, true);
+        let mut ring_maps = RingMaps::new(&r_mix);
+
+        let t_masked = ring_target(
+            &plan,
+            &unit_weights,
+            &to_flat(&masked),
+            &mut ring_maps,
+            true,
+        );
+        let t_plain = ring_target(
+            &plan,
+            &unit_weights,
+            &to_flat(&claims),
+            &mut ring_maps,
+            true,
+        );
 
         let expected = (t_masked - t_plain).to_hardware();
 
@@ -207,8 +221,16 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
 
     let unit_weights = pool.unit_weights(0, eta, &rho).unwrap();
 
-    let target =
-        |claims: &[Flat<K>]| ring_target(plan, &unit_weights, claims, &r_mix, true).to_hardware();
+    let target = |claims: &[Flat<K>]| {
+        ring_target(
+            plan,
+            &unit_weights,
+            claims,
+            &mut RingMaps::new(&r_mix),
+            true,
+        )
+        .to_hardware()
+    };
 
     let swapped: Vec<Flat<K>> = masked.iter().zip(&truth).map(|(&m, &c)| m + c).collect();
 

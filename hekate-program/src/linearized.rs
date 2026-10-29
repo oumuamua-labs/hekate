@@ -365,7 +365,7 @@ fn frobenius<F: HardwareField>(x: Flat<F>, k: usize) -> Flat<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expander::{field_coeffs, unit_batch};
+    use crate::expander::field_coeffs;
     use hekate_core::trace::ColumnType;
     use hekate_math::BinaryFieldExtras;
 
@@ -390,6 +390,17 @@ mod tests {
             .iter()
             .map(|&(field, width)| (field_coeffs(field, r_mix), width))
             .collect()
+    }
+
+    fn phi(field: ColumnType, x: Block128, r_mix: &[Block128]) -> Block128 {
+        let mut acc = Block128::ZERO;
+        for (u, &m) in field_coeffs(field, r_mix).iter().enumerate() {
+            if (x.0 >> u) & 1 == 1 {
+                acc += m;
+            }
+        }
+
+        acc
     }
 
     /// Every chain row on the given values: wire terms
@@ -456,7 +467,7 @@ mod tests {
                     power = power * power;
                 }
 
-                assert_eq!(lin.to_tower(), unit_batch(field, &[x], &r_mix), "{field:?}");
+                assert_eq!(lin.to_tower(), phi(field, x, &r_mix), "{field:?}");
             }
         }
     }
@@ -476,7 +487,7 @@ mod tests {
 
         let mut direct = Flat::from_raw(Block128::ZERO);
         for (&(_, a, k), &h) in ring.iter().zip(&pad) {
-            direct += a * unit_batch(FIELDS[k].0, &[h.to_tower()], &r_mix).to_hardware();
+            direct += a * phi(FIELDS[k].0, h.to_tower(), &r_mix).to_hardware();
         }
 
         let gadget = RingGadget::new(ring, mu, 0);
