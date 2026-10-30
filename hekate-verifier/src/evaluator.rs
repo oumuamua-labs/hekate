@@ -238,9 +238,7 @@ where
             .enumerate()
         {
             let eta_shift = from_block::<F>(unit_weights.shift);
-            let polys = [Some(pooled.trace), pooled.helper].into_iter().flatten();
-
-            for poly in polys {
+            for poly in pooled.polys() {
                 let lift = num_vars - layout.polys()[poly].vars;
                 let (r_pre, r_suf) = r.split_at(lift);
                 let (r_x, r_b) = r_suf.split_at(pooled.num_vars);
