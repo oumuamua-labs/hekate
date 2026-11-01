@@ -74,7 +74,7 @@ The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in r
 
 ---
 
-## The Hekate Ecosystem
+## The Satellites
 
 Hekate is not one crate. The prover is the engine; the math core, hardware chiplets, mobile toolchain,
 and fuzzer ship as independent crates you compose as needed.

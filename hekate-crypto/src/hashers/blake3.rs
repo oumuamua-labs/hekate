@@ -144,22 +144,50 @@ fn hash_lanes(msgs: &[u8], len: usize, out: &mut [[u8; 32]; LANES]) {
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[target_feature(enable = "neon")]
 fn load_block(msgs: &[u8], len: usize, start: usize, block_len: usize) -> [uint32x4_t; 16] {
-    let blocks: [[u8; BLOCK_LEN]; LANES] = core::array::from_fn(|lane| {
-        let at = lane * len + start;
+    let rows: [[uint32x4_t; 4]; LANES] = match block_len == BLOCK_LEN {
+        true => core::array::from_fn(|lane| {
+            let at = lane * len + start;
 
-        let mut block = [0u8; BLOCK_LEN];
-        block[..block_len].copy_from_slice(&msgs[at..at + block_len]);
+            words(&msgs[at..at + BLOCK_LEN])
+        }),
+        false => core::array::from_fn(|lane| {
+            let at = lane * len + start;
 
-        block
-    });
+            let mut block = [0u8; BLOCK_LEN];
+            block[..block_len].copy_from_slice(&msgs[at..at + block_len]);
 
-    core::array::from_fn(|j| {
-        let [w0, w1, w2, w3] = blocks
-            .each_ref()
-            .map(|block| u64::from(u32::from_le_bytes(block.as_chunks::<4>().0[j])));
+            words(&block)
+        }),
+    };
 
-        vcombine_u32(vcreate_u32(w0 | (w1 << 32)), vcreate_u32(w2 | (w3 << 32)))
-    })
+    let mut m = [vdupq_n_u32(0); 16];
+    for (k, quad) in m.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let t0 = vreinterpretq_u64_u32(vtrn1q_u32(rows[0][k], rows[1][k]));
+        let t1 = vreinterpretq_u64_u32(vtrn2q_u32(rows[0][k], rows[1][k]));
+        let t2 = vreinterpretq_u64_u32(vtrn1q_u32(rows[2][k], rows[3][k]));
+        let t3 = vreinterpretq_u64_u32(vtrn2q_u32(rows[2][k], rows[3][k]));
+
+        *quad = [
+            vreinterpretq_u32_u64(vtrn1q_u64(t0, t2)),
+            vreinterpretq_u32_u64(vtrn1q_u64(t1, t3)),
+            vreinterpretq_u32_u64(vtrn2q_u64(t0, t2)),
+            vreinterpretq_u32_u64(vtrn2q_u64(t1, t3)),
+        ];
+    }
+
+    m
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[target_feature(enable = "neon")]
+#[inline]
+fn words(block: &[u8]) -> [uint32x4_t; 4] {
+    let (quarters, _) = block.as_chunks::<16>();
+
+    // SAFETY:
+    // each quarter is a 16-byte array,
+    // the exact width `vld1q_u8` reads.
+    core::array::from_fn(|k| vreinterpretq_u32_u8(unsafe { vld1q_u8(quarters[k].as_ptr()) }))
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -189,18 +217,31 @@ fn compress(
         vdupq_n_u32(flags),
     ];
 
-    for s in &MSG_SCHEDULE {
-        g(&mut v, [0, 4, 8, 12], m[s[0]], m[s[1]]);
-        g(&mut v, [1, 5, 9, 13], m[s[2]], m[s[3]]);
-        g(&mut v, [2, 6, 10, 14], m[s[4]], m[s[5]]);
-        g(&mut v, [3, 7, 11, 15], m[s[6]], m[s[7]]);
-        g(&mut v, [0, 5, 10, 15], m[s[8]], m[s[9]]);
-        g(&mut v, [1, 6, 11, 12], m[s[10]], m[s[11]]);
-        g(&mut v, [2, 7, 8, 13], m[s[12]], m[s[13]]);
-        g(&mut v, [3, 4, 9, 14], m[s[14]], m[s[15]]);
-    }
+    round::<0>(&mut v, m);
+    round::<1>(&mut v, m);
+    round::<2>(&mut v, m);
+    round::<3>(&mut v, m);
+    round::<4>(&mut v, m);
+    round::<5>(&mut v, m);
+    round::<6>(&mut v, m);
 
     core::array::from_fn(|i| veorq_u32(v[i], v[i + 8]))
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[target_feature(enable = "neon")]
+#[inline]
+fn round<const R: usize>(v: &mut [uint32x4_t; 16], m: &[uint32x4_t; 16]) {
+    let s = &MSG_SCHEDULE[R];
+
+    g(v, [0, 4, 8, 12], m[s[0]], m[s[1]]);
+    g(v, [1, 5, 9, 13], m[s[2]], m[s[3]]);
+    g(v, [2, 6, 10, 14], m[s[4]], m[s[5]]);
+    g(v, [3, 7, 11, 15], m[s[6]], m[s[7]]);
+    g(v, [0, 5, 10, 15], m[s[8]], m[s[9]]);
+    g(v, [1, 6, 11, 12], m[s[10]], m[s[11]]);
+    g(v, [2, 7, 8, 13], m[s[12]], m[s[13]]);
+    g(v, [3, 4, 9, 14], m[s[14]], m[s[15]]);
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]

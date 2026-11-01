@@ -324,19 +324,6 @@ impl<F: TowerField + TraceCompatibleField> Air<F> for KeccakChiplet {
         let cs = ConstraintSystem::<F>::new();
 
         let s_round = cs.col(KeccakColumns::S_ROUND);
-        let s_in_out = cs.col(KeccakColumns::S_IN_OUT);
-
-        // lane = Σ bit[z] · 2^z on emit rows
-        for y in 0..5 {
-            for x in 0..5 {
-                let lane = cs.col(Self::get_lane_col(x, y));
-                let bits: Vec<_> = (0..64)
-                    .map(|z| cs.scale(F::from(1u128 << z), cs.col(Self::get_bit_col(x, y, z))))
-                    .collect();
-
-                cs.assert_zero_when(s_in_out, lane + cs.sum(&bits));
-            }
-        }
 
         // C[x,z] = Σ_y A[x,y,z]
         let col_parity: [[_; 64]; 5] = core::array::from_fn(|x| {
@@ -777,8 +764,12 @@ fn keccak_f(state: &mut [u64; 25]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hekate_core::config::Config;
     use hekate_math::Block128;
     use hekate_program::constraint::{ConstraintExpr, ExprId};
+    use hekate_program::expander::{ClaimBinding, ExpansionEntry};
+    use hekate_program::fold_pool::FoldPool;
+    use hekate_program::outer::{TableParts, TableShape, table_plan};
 
     type F = Block128;
 
@@ -994,8 +985,8 @@ mod tests {
         );
         assert_eq!(
             ast.roots.len(),
-            25 + 1600,
-            "Expected 25 packing + 1600 round; the schedule is cadence pins"
+            1600,
+            "Expected 1600 round roots; the schedule is cadence pins"
         );
     }
 
@@ -1007,15 +998,7 @@ mod tests {
 
         assert_eq!(ast.roots.len(), flat.len());
 
-        for i in 0..25 {
-            let root = ast.roots[i];
-            match ast.arena.get(root) {
-                ConstraintExpr::Mul(_, _) => {} // Gated by s_in_out
-                other => panic!("Packing root {} should be Mul, got {:?}", i, other),
-            }
-        }
-
-        for i in 25..25 + 1600 {
+        for i in 0..1600 {
             let root = ast.roots[i];
             match ast.arena.get(root) {
                 ConstraintExpr::Mul(_, _) => {} // Gated by s_round
@@ -1170,6 +1153,83 @@ mod tests {
                     pin.col_idx,
                     row
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn lane_reads_bound_to_planes() {
+        let num_vars = 10;
+        let chiplet =
+            KeccakChiplet::new(1 << num_vars, (1 << num_vars) / KeccakChiplet::BLOCK_ROWS);
+        let entries = Air::<F>::virtual_expander(&chiplet)
+            .unwrap()
+            .expansion_entries();
+
+        assert_eq!(PhysKeccakColumns::P_LANES, 0);
+        assert_eq!(
+            entries[..3],
+            [
+                ExpansionEntry::ExpandBits {
+                    count: 25,
+                    storage: ColumnType::B64,
+                },
+                ExpansionEntry::ExpandBits {
+                    count: 1,
+                    storage: ColumnType::B32,
+                },
+                ExpansionEntry::ReusePassThrough {
+                    phy_col_start: PhysKeccakColumns::P_LANES,
+                    count: 25,
+                    storage: ColumnType::B64,
+                },
+            ]
+        );
+
+        let parts = TableParts::<F>::of(&chiplet);
+        let shape = TableShape::from_air(&chiplet, &parts.statics()).unwrap();
+
+        for zero_knowledge in [false, true] {
+            let config = Config {
+                fold_arity_log: 2,
+                early_stop_vars: 2,
+                zero_knowledge,
+                ..Config::dev()
+            };
+
+            let plan = table_plan::<F>(&chiplet, &shape, &config).unwrap();
+            let pool = FoldPool::new(&[(&plan, num_vars)], &config).unwrap();
+            let plan = &pool.tables()[0].plan;
+            let blocks = plan.unit_blocks();
+
+            let unit_of = |claim: usize| {
+                plan.units
+                    .iter()
+                    .position(|unit| unit.claims.contains(&claim))
+                    .unwrap()
+            };
+
+            let bindings: Vec<ClaimBinding> = (0..25)
+                .map(|lane| ClaimBinding {
+                    whole: KeccakColumns::LANES + lane,
+                    first: KeccakColumns::STATE_BITS + 64 * lane,
+                    width: 64,
+                })
+                .collect();
+
+            for binding in &bindings {
+                let whole = blocks[unit_of(binding.whole)];
+                let planes = blocks[unit_of(binding.first)];
+
+                match zero_knowledge {
+                    false => assert!(whole.is_some() && whole == planes, "{binding:?}"),
+                    true => assert!(whole.is_none() && planes.is_some(), "{binding:?}"),
+                }
+            }
+
+            match zero_knowledge {
+                false => assert!(plan.binding_claims().is_empty()),
+                true => assert_eq!(plan.binding_claims(), bindings),
             }
         }
     }

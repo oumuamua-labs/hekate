@@ -667,18 +667,14 @@ impl RingSwitchPlan {
         self.num_claims
     }
 
-    /// Returns the polynomial and block that commit each unit,
-    /// `None` for a whole unit bound to its column's planes.
-    pub fn unit_blocks(
-        &self,
-        trace_noise: usize,
-        helper_noise: usize,
-    ) -> Vec<Option<(PolyKind, usize)>> {
+    /// Returns the polynomial and plan block that commit each unit, noise
+    /// not counted; `None` for a whole unit bound to its column's planes.
+    pub fn unit_blocks(&self) -> Vec<Option<(PolyKind, usize)>> {
         self.places
             .iter()
             .map(|place| match *place {
-                Place::Trace(block) => Some((PolyKind::Trace, trace_noise + block)),
-                Place::Helper(slot) => Some((PolyKind::Helper, helper_noise + slot)),
+                Place::Trace(block) => Some((PolyKind::Trace, block)),
+                Place::Helper(slot) => Some((PolyKind::Helper, slot)),
                 Place::Bound => None,
             })
             .collect()
@@ -1540,11 +1536,11 @@ mod tests {
         let layout = keccak_physical_layout();
 
         let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
-        let blocks = plan.unit_blocks(1, 1);
+        let blocks = plan.unit_blocks();
 
         for p in 0..plan.phys_rs.len() {
             assert!(
-                blocks.contains(&Some((PolyKind::Trace, 1 + p))),
+                blocks.contains(&Some((PolyKind::Trace, p))),
                 "committed column {p} enters no unit"
             );
         }
@@ -1579,21 +1575,21 @@ mod tests {
         assert_eq!(plan.row_bytes(), bare.row_bytes() + 32);
 
         let n = plan.phys_rs.len();
-        let blocks = plan.unit_blocks(1, 1);
+        let blocks = plan.unit_blocks();
 
         assert_eq!(
             &blocks[tail..],
             &[
+                Some((PolyKind::Helper, 1)),
                 Some((PolyKind::Helper, 2)),
-                Some((PolyKind::Helper, 3)),
-                Some((PolyKind::Helper, 1))
+                Some((PolyKind::Helper, 0))
             ]
         );
-        assert_eq!(blocks[tail - 1], Some((PolyKind::Trace, 2)));
+        assert_eq!(blocks[tail - 1], Some((PolyKind::Trace, 1)));
         assert!(
             blocks[..tail]
                 .iter()
-                .all(|b| matches!(b, Some((PolyKind::Trace, block)) if (1..=n).contains(block)))
+                .all(|b| matches!(b, Some((PolyKind::Trace, block)) if (0..n).contains(block)))
         );
     }
 
@@ -1629,8 +1625,8 @@ mod tests {
         );
 
         assert_eq!(
-            blinded.unit_blocks(1, 1).last(),
-            Some(&Some((PolyKind::Trace, 1 + blinded.whole_blinds())))
+            blinded.unit_blocks().last(),
+            Some(&Some((PolyKind::Trace, blinded.whole_blinds())))
         );
     }
 
