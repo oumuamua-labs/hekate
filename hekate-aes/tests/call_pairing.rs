@@ -197,6 +197,9 @@ fn verdicts(level: &Level, claims: [Claim; 2], block_order: [usize; 2]) -> [bool
 
     [false, true].map(|zero_knowledge| {
         let config = Config {
+            num_queries: 2,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge,
             ..Config::dev()
         };

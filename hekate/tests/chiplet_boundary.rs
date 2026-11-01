@@ -27,7 +27,8 @@ fn test_config() -> Config {
     Config {
         num_queries: 8,
         min_security_bits: 0,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
@@ -136,7 +137,7 @@ fn build_traces(num_vars: usize, row0_flag: Bit) -> (ColumnTrace, ColumnTrace) {
 
 #[test]
 fn chiplet_boundary_happy_path() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = single_bnd_host(num_rows, F::ONE);
@@ -153,7 +154,7 @@ fn chiplet_boundary_happy_path() {
 
 #[test]
 fn chiplet_boundary_pin_zero_happy_path() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = single_bnd_host(num_rows, F::ZERO);
@@ -170,7 +171,7 @@ fn chiplet_boundary_pin_zero_happy_path() {
 
 #[test]
 fn chiplet_boundary_violation_rejected() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = single_bnd_host(num_rows, F::ONE);
@@ -188,7 +189,7 @@ fn chiplet_boundary_violation_rejected() {
 
 #[test]
 fn chiplet_boundary_constant_swap_rejected() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let prover_air = single_bnd_host(num_rows, F::ONE);
@@ -277,7 +278,7 @@ fn build_multi_traces(
 
 #[test]
 fn chiplet_multiple_boundaries_all_satisfied() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);
@@ -291,7 +292,7 @@ fn chiplet_multiple_boundaries_all_satisfied() {
 
 #[test]
 fn chiplet_multiple_boundaries_first_violated() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);
@@ -305,7 +306,7 @@ fn chiplet_multiple_boundaries_first_violated() {
 
 #[test]
 fn chiplet_multiple_boundaries_last_violated() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);
@@ -319,7 +320,7 @@ fn chiplet_multiple_boundaries_last_violated() {
 
 #[test]
 fn chiplet_multiple_boundaries_both_violated() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);

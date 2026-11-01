@@ -28,7 +28,6 @@ cargo add hekate-rsa hekate-sha2 hekate-core hekate-math hekate-program
 A PKCS#1 v1.5 statement for one RSA-2048 signature over `message`:
 
 ```rust
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::ColumnTrace;
 use hekate_math::Block128;
@@ -49,15 +48,12 @@ fn pkcs1(
 )> {
     let blocks = pad_message(message).len();
     let rounds_per_row = 2;
-    let floor = Config::default().min_table_rows();
 
     let statement = Pkcs1Statement::new(
         blocks,
         rounds_per_row,
-        (blocks * ROUNDS / rounds_per_row)
-            .next_power_of_two()
-            .max(floor),
-        blocks.next_power_of_two().max(floor),
+        (blocks * ROUNDS / rounds_per_row).next_power_of_two(),
+        blocks.next_power_of_two().max(2),
     )?;
 
     let instance = statement.instance(modulus);

@@ -346,7 +346,12 @@ struct Proof {
 
 impl Proof {
     fn new(chiplet: &CodecChiplet<F>, trace: ColumnTrace, st: &Statement) -> Self {
-        let rows = height(st.coefs.len().max(st.hints.len()).max(st.words.len()));
+        let rows = st
+            .coefs
+            .len()
+            .max(st.hints.len())
+            .max(st.words.len())
+            .next_power_of_two();
 
         Self {
             program: host_program(chiplet, st, rows),
@@ -682,12 +687,11 @@ fn word_tokens(streams: &[Stream], words: &WordValues) -> Vec<(u16, u16, u32)> {
 }
 
 fn table_rows(steps: &[CodecStep]) -> usize {
-    height(steps.iter().map(CodecStep::rows).sum())
-}
-
-fn height(rows: usize) -> usize {
-    rows.next_power_of_two()
-        .max(Config::prod().min_table_rows())
+    steps
+        .iter()
+        .map(CodecStep::rows)
+        .sum::<usize>()
+        .next_power_of_two()
 }
 
 fn hint_pattern(params: &MlDsaParams, seed: &mut u64) -> Vec<[bool; N]> {

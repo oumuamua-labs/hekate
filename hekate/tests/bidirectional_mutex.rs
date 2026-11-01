@@ -208,7 +208,6 @@ fn run(
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -435,10 +434,11 @@ fn paired_air_constraint_ast_mutated_post_prove_rejected() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(trace);
     let config = Config {
-        num_queries: 4,
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -605,10 +605,11 @@ fn chiplet_witness_selector_spec_injected_post_construction_rejected() {
     let witness = ProgramWitness::new(main_trace).with_chiplets(vec![chiplet_trace]);
 
     let config = Config {
-        num_queries: 4,
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
         ..Config::default()
     };
 

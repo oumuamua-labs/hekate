@@ -282,7 +282,8 @@ fn test_config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
@@ -615,6 +616,8 @@ fn arithmetic_chiplet_mixed_widths_isolated() {
     let ops32 = vec![op_add(10, 20), op_sub(100, 50)];
     let ops64 = vec![op_add64(u64::MAX, 1), op_add64(1u64 << 40, 1u64 << 40)];
 
+    let config = test_config();
+
     let cpu_rows: usize = 4;
     let chip32_rows: usize = ops32.len().next_power_of_two().max(2);
     let chip64_rows: usize = ops64.len().next_power_of_two().max(2);
@@ -690,14 +693,6 @@ fn arithmetic_chiplet_mixed_widths_isolated() {
         report.boundary_violations.len(),
         report.bus_diagnostics.len(),
     );
-
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        zero_knowledge: true,
-        ldt_support_size: 2,
-        ..Config::default()
-    };
 
     let proof = prove(
         b"ARITH_MIXED",

@@ -220,7 +220,6 @@ fn valid_halt_trace_passes() {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
         ..Config::default()
     };
 
@@ -406,7 +405,6 @@ fn boolean_constraint_enforced() {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
         ..Config::default()
     };
 

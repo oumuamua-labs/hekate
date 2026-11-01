@@ -11,7 +11,8 @@ use hekate_math::{Block128, Flat, HardwareField, TowerField};
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::expander::{PoolLayout, RingSwitchPlan};
+use hekate_program::expander::RingSwitchPlan;
+use hekate_program::fold_pool::FoldPool;
 use hekate_program::linearized::{self, RingGadget};
 use hekate_program::outer::{
     BusColumnRow, ConsistencyInputs, EvalRecord, OuterLayout, OuterStatement, TableRecord,
@@ -218,6 +219,7 @@ fn record(
             })
             .collect(),
         claimed_sums,
+        bindings: Vec::new(),
         shape,
     };
 
@@ -227,7 +229,7 @@ fn record(
 /// The pool's eval record with random masked values,
 /// its pads from `base` on and its gadget's wires
 /// from `first_wire` on; returns the next free pad.
-fn eval(ring_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32) {
+fn eval(subfield_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32) {
     let seed = base as u128;
     let ring_pad = base + 3;
 
@@ -235,12 +237,17 @@ fn eval(ring_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32) {
         .map(|j| (Unknown::Pad(base + j), mix(seed + 30 + j as u128)))
         .collect();
 
-    let gadget = ring_units.then(|| {
+    let gadget = subfield_units.then(|| {
         let entries = (0..4)
-            .map(|c| (ring_pad + c, mix(seed + 40 + c as u128)))
+            .map(|c| (ring_pad + c, mix(seed + 40 + c as u128), c as usize % 2))
             .collect();
-        let mu = (0..linearized::BITS as u128)
-            .map(|j| mix(seed + 100 + j))
+
+        let mu = (0..2u128)
+            .map(|k| {
+                (0..linearized::BITS as u128)
+                    .map(|j| mix(seed + 100 + 200 * k + j))
+                    .collect()
+            })
             .collect();
 
         RingGadget::new(entries, mu, first_wire)
@@ -285,24 +292,24 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
             .collect();
 
         let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
-        let pool = PoolLayout::new(&heights, field_bits, &config);
+        let pool = FoldPool::new(&heights, &config).unwrap();
 
         let mut records = Vec::with_capacity(defs.len());
         let mut base = 0;
 
-        for ((def, shape), layout) in defs.iter().zip(&shapes).zip(&pool.tables) {
+        for ((def, shape), layout) in defs.iter().zip(&shapes).zip(pool.tables()) {
             let (table, next) = record(def, shape.at(layout), blind_units, base);
             records.push(table);
 
             base = next;
         }
 
-        let ring_units = records.iter().any(|r| r.shape.ring_units);
+        let subfield_units = records.iter().any(|r| r.shape.subfield_units);
         let table_wires: usize = records.iter().map(|r| r.shape.mul_wires()).sum();
 
-        let (eval, next) = eval(ring_units, base, table_wires as u32);
+        let (eval, next) = eval(subfield_units, base, table_wires as u32);
 
-        let gadget_wires = match ring_units {
+        let gadget_wires = match subfield_units {
             true => linearized::BITS - 1,
             false => 0,
         };

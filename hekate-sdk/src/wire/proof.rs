@@ -8,7 +8,7 @@ use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::Result;
 use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::{
-    BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
+    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof, TreeOpening,
 };
 use hekate_crypto::merkle::Multiproof;
 use hekate_math::TowerField;
@@ -26,7 +26,7 @@ pub fn serialize_proof<'a, F: TowerField>(
     let zc = serialize_sumcheck(fbb, &proof.zerocheck_proof);
     let mla = serialize_logup_aux(fbb, &proof.main_logup_aux);
     let mpe = serialize_point_evaluation(fbb, &proof.main_point_evaluation);
-    let ep = serialize_eval_batch(fbb, &proof.eval_proof);
+    let ep = serialize_fold_eval(fbb, &proof.eval_proof);
 
     let rows: Vec<u64> = proof.chiplet_rows.iter().map(|&r| r as u64).collect();
     let cr = fbb.create_vector(&rows);
@@ -189,7 +189,7 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
 
     let eval_proof = fb_proof
         .eval_proof()
-        .map(|p| deserialize_eval_batch::<F>(p))
+        .map(|p| deserialize_fold_eval::<F>(p))
         .transpose()?
         .ok_or(wire_err("missing eval_proof"))?;
 
@@ -413,67 +413,62 @@ fn serialize_sumcheck<'a, F: TowerField>(
     )
 }
 
-fn serialize_brakedown_proof<'a, F: TowerField>(
+fn serialize_tree_opening<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
-    proof: &BrakedownProof<F>,
-) -> flatbuffers::WIPOffset<fb::BrakedownProof<'a>> {
-    let mut flat_cols = Vec::new();
-    for col in &proof.opened_columns {
-        let len_bytes = (col.len() as u32).to_le_bytes();
-        flat_cols.extend_from_slice(&len_bytes);
-        flat_cols.extend_from_slice(col);
-    }
+    opening: &TreeOpening,
+) -> flatbuffers::WIPOffset<fb::TreeOpening<'a>> {
+    let leaves = fbb.create_vector(&opening.leaves);
+    let multiproof = serialize_multiproof(fbb, &opening.multiproof);
 
-    let cols = fbb.create_vector(&flat_cols);
-    let multiproof = serialize_multiproof(fbb, &proof.multiproof);
-
-    fb::BrakedownProof::create(
+    fb::TreeOpening::create(
         fbb,
-        &fb::BrakedownProofArgs {
-            opened_columns: Some(cols),
+        &fb::TreeOpeningArgs {
+            leaves: Some(leaves),
             multiproof: Some(multiproof),
         },
     )
 }
 
-fn serialize_eval_batch<'a, F: TowerField>(
+fn serialize_fold_eval<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
-    proof: &EvalBatchProof<F>,
-) -> flatbuffers::WIPOffset<fb::EvalBatchProof<'a>> {
+    proof: &FoldEvalProof<F>,
+) -> flatbuffers::WIPOffset<fb::FoldEvalProof<'a>> {
     let sc = serialize_sumcheck(fbb, &proof.sumcheck_proof);
-    let ldt = serialize_brakedown_proof(fbb, &proof.ldt_proof);
+    let masters = serialize_field_vec(fbb, &proof.masters);
+    let mask_masters = serialize_field_vec(fbb, &proof.mask_masters);
+    let fold_rounds = serialize_field_vec(fbb, &proof.fold_rounds);
+    let round_roots = fbb.create_vector(proof.round_roots.as_flattened());
+    let final_layer = serialize_field_vec(fbb, &proof.final_layer);
 
-    let tv: Vec<fb::Block128> = proof
-        .tensor_vec
+    let opening_offsets: Vec<_> = proof
+        .openings
         .iter()
-        .map(|f| block128_from_field(f))
+        .map(|o| serialize_tree_opening(fbb, o))
         .collect();
 
-    let tensor = fbb.create_vector(&tv);
+    let openings = fbb.create_vector(&opening_offsets);
 
-    let mv: Vec<fb::Block128> = proof
-        .masters
-        .iter()
-        .map(|f| block128_from_field(f))
-        .collect();
-
-    let masters = fbb.create_vector(&mv);
-
-    let h_ldt_proof = proof
-        .h_ldt_proof
-        .as_ref()
-        .map(|p| serialize_brakedown_proof(fbb, p));
-
-    fb::EvalBatchProof::create(
+    fb::FoldEvalProof::create(
         fbb,
-        &fb::EvalBatchProofArgs {
+        &fb::FoldEvalProofArgs {
             sumcheck_proof: Some(sc),
-            ldt_proof: Some(ldt),
-            tensor_vec: Some(tensor),
             masters: Some(masters),
-            h_ldt_proof,
+            mask_masters: Some(mask_masters),
+            fold_rounds: Some(fold_rounds),
+            round_roots: Some(round_roots),
+            final_layer: Some(final_layer),
+            openings: Some(openings),
         },
     )
+}
+
+fn serialize_field_vec<'a, F: TowerField>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    values: &[F],
+) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, fb::Block128>> {
+    let blocks: Vec<fb::Block128> = values.iter().map(block128_from_field).collect();
+
+    fbb.create_vector(&blocks)
 }
 
 fn serialize_point_evaluation<'a, F: TowerField>(
@@ -560,44 +555,36 @@ fn deserialize_univariate<F: TowerField>(fb: fb::UnivariatePoly<'_>) -> Result<U
     Ok(UnivariatePoly::new(coeffs))
 }
 
-fn deserialize_eval_batch<F: TowerField>(fb: fb::EvalBatchProof<'_>) -> Result<EvalBatchProof<F>> {
+fn deserialize_fold_eval<F: TowerField>(fb: fb::FoldEvalProof<'_>) -> Result<FoldEvalProof<F>> {
     let sumcheck_proof = fb
         .sumcheck_proof()
         .map(|p| deserialize_sumcheck::<F>(p))
         .transpose()?
         .ok_or(wire_err("missing eval sumcheck_proof"))?;
 
-    let ldt_proof = fb
-        .ldt_proof()
-        .map(|p| deserialize_brakedown_proof::<F>(p))
-        .transpose()?
-        .ok_or(wire_err("missing eval ldt_proof"))?;
-
-    let tensor_vec = match fb.tensor_vec() {
+    let openings = match fb.openings() {
         Some(v) => {
-            let mut tv = Vec::with_capacity(v.len());
+            let mut openings = Vec::with_capacity(v.len());
             for i in 0..v.len() {
-                tv.push(field_from_block128::<F>(*v.get(i))?);
+                openings.push(deserialize_tree_opening(v.get(i))?);
             }
 
-            tv
+            openings
         }
         None => Vec::new(),
     };
 
-    let masters = deserialize_field_vec::<F>(fb.masters())?;
-
-    let h_ldt_proof = fb
-        .h_ldt_proof()
-        .map(|p| deserialize_brakedown_proof::<F>(p))
-        .transpose()?;
-
-    Ok(EvalBatchProof {
+    Ok(FoldEvalProof {
         sumcheck_proof,
-        ldt_proof,
-        tensor_vec,
-        masters,
-        h_ldt_proof,
+        masters: deserialize_field_vec::<F>(fb.masters())?,
+        mask_masters: deserialize_field_vec::<F>(fb.mask_masters())?,
+        fold_rounds: deserialize_field_vec::<F>(fb.fold_rounds())?,
+        round_roots: deserialize_hashes(
+            fb.round_roots(),
+            "round_roots length not a multiple of 32",
+        )?,
+        final_layer: deserialize_field_vec::<F>(fb.final_layer())?,
+        openings,
     })
 }
 
@@ -610,40 +597,16 @@ fn deserialize_point_evaluation<F: TowerField>(
     ))
 }
 
-fn deserialize_brakedown_proof<F: TowerField>(
-    fb: fb::BrakedownProof<'_>,
-) -> Result<BrakedownProof<F>> {
-    let opened_columns = match fb.opened_columns() {
-        Some(data) => {
-            let bytes = data.bytes();
-
-            let mut cols = Vec::new();
-            let mut offset = 0;
-
-            while offset + 4 <= bytes.len() {
-                let len =
-                    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-
-                offset += 4;
-
-                if len > bytes.len() - offset {
-                    return Err(wire_err("truncated opened_columns data"));
-                }
-
-                cols.push(bytes[offset..offset + len].to_vec());
-
-                offset += len;
-            }
-
-            cols
-        }
+fn deserialize_tree_opening(fb: fb::TreeOpening<'_>) -> Result<TreeOpening> {
+    let leaves = match fb.leaves() {
+        Some(v) => v.bytes().to_vec(),
         None => Vec::new(),
     };
 
-    Ok(BrakedownProof::new(
-        opened_columns,
-        deserialize_multiproof(fb.multiproof())?,
-    ))
+    Ok(TreeOpening {
+        leaves,
+        multiproof: deserialize_multiproof(fb.multiproof())?,
+    })
 }
 
 fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux<F>> {

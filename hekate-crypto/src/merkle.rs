@@ -17,11 +17,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "parallel")]
 const SUBTREE_LEAVES: usize = 1024;
 
-/// Scratch bytes per worker for one tile of leaf preimages.
-const TILE_BYTES: usize = 256 * 1024;
-
-/// Most leaves in one tile.
-const TILE_LEAVES: usize = 64;
+const BATCH: usize = 64;
+const NODE_BYTES: usize = 65;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -30,6 +27,20 @@ pub enum Error {
     LeafIndexOutOfBounds {
         leaf_index: usize,
         num_leaves: usize,
+    },
+    Pruned {
+        floor: usize,
+    },
+    SubtreeMismatch {
+        subtree: usize,
+    },
+    SubtreeTiling {
+        num_leaves: usize,
+        floor: usize,
+        roots: usize,
+    },
+    SubtreeWidth {
+        leaves: usize,
     },
 }
 
@@ -43,6 +54,25 @@ impl fmt::Display for Error {
                 f,
                 "Merkle leaf index out of bounds: leaf_index={leaf_index}, num_leaves={num_leaves}",
             ),
+            Self::Pruned { floor } => write!(
+                f,
+                "Merkle tree stores no level below {floor}: open it with prove_batch_with",
+            ),
+            Self::SubtreeMismatch { subtree } => write!(
+                f,
+                "Merkle subtree {subtree} rebuilt to a root the tree does not hold",
+            ),
+            Self::SubtreeTiling {
+                num_leaves,
+                floor,
+                roots,
+            } => write!(
+                f,
+                "{roots} Merkle subtree roots do not tile {num_leaves} leaves at level {floor}",
+            ),
+            Self::SubtreeWidth { leaves } => {
+                write!(f, "Merkle subtree over {leaves} leaves, not a power of two",)
+            }
         }
     }
 }
@@ -51,10 +81,10 @@ impl fmt::Display for Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Tag {
-    Part = 0x00,
     Node = 0x01,
     PoolLeaf = 0x02,
     OuterLeaf = 0x03,
+    RoundLeaf = 0x04,
 }
 
 /// Opening of a leaf set: the octopus siblings below the [`layer_log`] layer,
@@ -69,7 +99,7 @@ pub struct Multiproof {
 ///
 /// Internal node = `H(left || right || 0x01)`.
 /// Leaves are expected to already be hashes; callers
-/// serialize their field payloads via `hash_column_leaves`.
+/// hash their symbols via `hash_symbol_leaves`.
 #[derive(Clone, Debug)]
 pub struct MerkleTree<F: TowerField, H: Hasher = DefaultHasher> {
     nodes: Vec<MaybeUninit<[u8; 32]>>,
@@ -80,13 +110,15 @@ pub struct MerkleTree<F: TowerField, H: Hasher = DefaultHasher> {
     /// before `build_layers` runs is UB.
     built: bool,
 
+    /// Lowest stored level.
+    floor: usize,
+
     _marker: PhantomData<(F, H)>,
 }
 
 impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
-    /// Build a tree from pre-computed
-    /// leaf hashes. Non-power-of-two
-    /// inputs pad with zero leaves.
+    /// Build a tree from pre-computed leaf hashes.
+    /// Non-power-of-two inputs pad with zero leaves.
     pub fn new(leaves: &[[u8; 32]]) -> Self {
         let num_leaves = leaves.len();
         if num_leaves == 0 {
@@ -95,7 +127,7 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
 
         let (mut tree, leaf_offset) = Self::allocate_tree(num_leaves);
 
-        let leaf_layer = tree.leaves_mut(leaf_offset);
+        let leaf_layer = &mut tree.nodes[leaf_offset..leaf_offset + tree.num_leaves];
 
         #[cfg(feature = "parallel")]
         {
@@ -123,9 +155,31 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
             }
         }
 
-        tree.build_layers(leaf_offset);
+        tree.hash_layers(leaf_offset);
 
         tree
+    }
+
+    /// Builds the tree over `num_leaves` leaves from its
+    /// level-`floor` nodes `roots`, storing levels `floor` and up;
+    /// errors unless the roots tile a power-of-two leaf count.
+    pub fn from_subtree_roots(num_leaves: usize, floor: usize, roots: &[[u8; 32]]) -> Result<Self> {
+        if !(num_leaves.is_power_of_two()
+            && floor <= num_leaves.trailing_zeros() as usize
+            && roots.len() == num_leaves >> floor)
+        {
+            return Err(Error::SubtreeTiling {
+                num_leaves,
+                floor,
+                roots: roots.len(),
+            });
+        }
+
+        let mut tree = Self::new(roots);
+        tree.num_leaves = num_leaves;
+        tree.floor = floor;
+
+        Ok(tree)
     }
 
     pub fn num_leaves(&self) -> usize {
@@ -135,8 +189,12 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
     /// Mutable view of the leaf layer for streaming
     /// writes. Slots are `MaybeUninit`, the caller
     /// must populate every slot before `build_layers`.
-    pub fn leaves_mut(&mut self, leaf_offset: usize) -> &mut [MaybeUninit<[u8; 32]>] {
-        &mut self.nodes[leaf_offset..leaf_offset + self.num_leaves]
+    pub fn leaves_mut(&mut self, leaf_offset: usize) -> Result<&mut [MaybeUninit<[u8; 32]>]> {
+        if self.floor > 0 {
+            return Err(Error::Pruned { floor: self.floor });
+        }
+
+        Ok(&mut self.nodes[leaf_offset..leaf_offset + self.num_leaves])
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -160,6 +218,10 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
             self.nodes.is_empty() || self.built,
             "MerkleTree::prove called before build_layers"
         );
+
+        if self.floor > 0 {
+            return Err(Error::Pruned { floor: self.floor });
+        }
 
         if leaf_index >= self.num_leaves {
             return Err(Error::LeafIndexOutOfBounds {
@@ -220,6 +282,7 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
             nodes: vec![],
             num_leaves: 0,
             built: true,
+            floor: 0,
             _marker: PhantomData,
         }
     }
@@ -248,13 +311,24 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
                 nodes,
                 num_leaves: pow2_leaves,
                 built: false,
+                floor: 0,
                 _marker: PhantomData,
             },
             leaf_offset,
         )
     }
 
-    pub fn build_layers(&mut self, leaf_offset: usize) {
+    pub fn build_layers(&mut self, leaf_offset: usize) -> Result<()> {
+        if self.floor > 0 {
+            return Err(Error::Pruned { floor: self.floor });
+        }
+
+        self.hash_layers(leaf_offset);
+
+        Ok(())
+    }
+
+    fn hash_layers(&mut self, leaf_offset: usize) {
         #[cfg(feature = "parallel")]
         let (mut current_layer_size, mut current_offset) = self.build_subtrees(leaf_offset);
 
@@ -333,78 +407,81 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
             "MerkleTree::prove_batch called before build_layers"
         );
 
-        let mut frontier: Vec<usize> = Vec::with_capacity(leaf_indices.len());
-        for &idx in leaf_indices {
-            if idx >= self.num_leaves {
-                return Err(Error::LeafIndexOutOfBounds {
-                    leaf_index: idx,
-                    num_leaves: self.num_leaves,
-                });
-            }
-
-            frontier.push(idx);
+        if self.floor > 0 {
+            return Err(Error::Pruned { floor: self.floor });
         }
 
-        frontier.sort_unstable();
-        frontier.dedup();
+        self.multiproof(leaf_indices, queries, |layer_width, position| {
+            // SAFETY:
+            // `built` guarantees every node is initialized;
+            // `position < layer_width` keeps the index inside the layer.
+            Ok(unsafe { self.nodes[layer_width - 1 + position].assume_init() })
+        })
+    }
 
-        let Some(depth) = self.num_leaves.checked_ilog2() else {
-            return Ok(Multiproof::default());
+    /// Opens `leaf_indices` as `prove_batch` does, rebuilding each
+    /// pruned subtree `s` it reads from the hashes `subtree(s, ..)`
+    /// writes; errs when a rebuilt root differs from the stored one.
+    pub fn prove_batch_with(
+        &self,
+        leaf_indices: &[usize],
+        queries: usize,
+        subtree: impl Fn(usize, &mut [[u8; 32]]) + Sync,
+    ) -> Result<Multiproof> {
+        if self.floor == 0 {
+            return self.prove_batch(leaf_indices, queries);
+        }
+
+        let depth = self.num_leaves.trailing_zeros() as usize;
+        let width = self.num_leaves >> self.floor;
+        let span = 1usize << self.floor;
+
+        let frontier = self.frontier(leaf_indices)?;
+
+        let needed: Vec<usize> = match 1usize << layer_log(queries, depth) > width {
+            true => (0..width).collect(),
+            false => {
+                let mut subtrees: Vec<usize> =
+                    frontier.iter().map(|&idx| idx >> self.floor).collect();
+
+                subtrees.dedup();
+
+                subtrees
+            }
         };
 
-        let top_width = 1 << layer_log(queries, depth as usize);
+        let rebuild = |&s: &usize| subtree_nodes::<H>(span, |hashes| subtree(s, hashes));
 
-        let mut siblings = Vec::new();
-        let mut next: Vec<usize> = Vec::with_capacity(frontier.len());
-        let mut layer_width = self.num_leaves;
+        #[cfg(feature = "parallel")]
+        let rebuilt: Vec<Vec<[u8; 32]>> = needed.par_iter().map(rebuild).collect();
 
-        while layer_width > top_width {
-            let layer_offset = layer_width - 1;
+        #[cfg(not(feature = "parallel"))]
+        let rebuilt: Vec<Vec<[u8; 32]>> = needed.iter().map(rebuild).collect();
 
-            next.clear();
-
-            let mut i = 0;
-            while i < frontier.len() {
-                let node = frontier[i];
-                let sibling = node ^ 1;
-
-                if i + 1 < frontier.len() && frontier[i + 1] == sibling {
-                    i += 2;
-                } else {
-                    // SAFETY:
-                    // `built` guarantees every node is
-                    // initialized; `sibling < layer_width`
-                    // keeps the index inside this layer.
-                    siblings.push(unsafe { self.nodes[layer_offset + sibling].assume_init() });
-
-                    i += 1;
-                }
-
-                next.push(node >> 1);
+        for (&s, nodes) in needed.iter().zip(&rebuilt) {
+            // SAFETY:
+            // a pruned tree is built when constructed; `s < width`
+            // keeps the index inside its lowest stored layer.
+            if nodes[0] != unsafe { self.nodes[width - 1 + s].assume_init() } {
+                return Err(Error::SubtreeMismatch { subtree: s });
             }
-
-            core::mem::swap(&mut frontier, &mut next);
-
-            layer_width >>= 1;
         }
 
-        let layer_offset = top_width - 1;
-
-        let mut reached = frontier.iter().copied().peekable();
-        let mut unreached = Vec::with_capacity(top_width - frontier.len());
-
-        for position in 0..top_width {
-            if reached.next_if_eq(&position).is_none() {
+        self.multiproof(leaf_indices, queries, |layer_width, position| {
+            if layer_width <= width {
                 // SAFETY:
-                // `built` guarantees every node is initialized;
-                // `position < top_width` keeps the index inside the layer.
-                unreached.push(unsafe { self.nodes[layer_offset + position].assume_init() });
+                // a pruned tree is built when constructed;
+                // `position < layer_width` keeps the index inside the layer.
+                return Ok(unsafe { self.nodes[layer_width - 1 + position].assume_init() });
             }
-        }
 
-        Ok(Multiproof {
-            siblings,
-            unreached,
+            let per = layer_width / width;
+            let s = position / per;
+            let slot = needed
+                .binary_search(&s)
+                .map_err(|_| Error::SubtreeMismatch { subtree: s })?;
+
+            Ok(rebuilt[slot][per - 1 + position % per])
         })
     }
 
@@ -520,6 +597,82 @@ impl<F: TowerField, H: Hasher> MerkleTree<F, H> {
 
         layer.first() == Some(root)
     }
+
+    fn multiproof(
+        &self,
+        leaf_indices: &[usize],
+        queries: usize,
+        node: impl Fn(usize, usize) -> Result<[u8; 32]>,
+    ) -> Result<Multiproof> {
+        let mut frontier = self.frontier(leaf_indices)?;
+
+        let Some(depth) = self.num_leaves.checked_ilog2() else {
+            return Ok(Multiproof::default());
+        };
+
+        let top_width = 1 << layer_log(queries, depth as usize);
+
+        let mut siblings = Vec::new();
+        let mut next: Vec<usize> = Vec::with_capacity(frontier.len());
+        let mut layer_width = self.num_leaves;
+
+        while layer_width > top_width {
+            next.clear();
+
+            let mut i = 0;
+            while i < frontier.len() {
+                let current = frontier[i];
+                let sibling = current ^ 1;
+
+                if i + 1 < frontier.len() && frontier[i + 1] == sibling {
+                    i += 2;
+                } else {
+                    siblings.push(node(layer_width, sibling)?);
+
+                    i += 1;
+                }
+
+                next.push(current >> 1);
+            }
+
+            core::mem::swap(&mut frontier, &mut next);
+
+            layer_width >>= 1;
+        }
+
+        let mut reached = frontier.iter().copied().peekable();
+        let mut unreached = Vec::with_capacity(top_width - frontier.len());
+
+        for position in 0..top_width {
+            if reached.next_if_eq(&position).is_none() {
+                unreached.push(node(top_width, position)?);
+            }
+        }
+
+        Ok(Multiproof {
+            siblings,
+            unreached,
+        })
+    }
+
+    fn frontier(&self, leaf_indices: &[usize]) -> Result<Vec<usize>> {
+        let mut frontier: Vec<usize> = Vec::with_capacity(leaf_indices.len());
+        for &idx in leaf_indices {
+            if idx >= self.num_leaves {
+                return Err(Error::LeafIndexOutOfBounds {
+                    leaf_index: idx,
+                    num_leaves: self.num_leaves,
+                });
+            }
+
+            frontier.push(idx);
+        }
+
+        frontier.sort_unstable();
+        frontier.dedup();
+
+        Ok(frontier)
+    }
 }
 
 /// Level of the [`Multiproof`] layer:
@@ -533,118 +686,95 @@ pub fn layer_log(queries: usize, depth: usize) -> usize {
     ceil_log2.min(depth)
 }
 
-/// One digest per grid column, `H(its cells row by row ‖ 0x00)`,
-/// for columns `0..digests.len()`, hashed by tiles of columns.
-pub fn hash_column_leaves<H: Hasher>(
-    grid_rows: usize,
-    encoded_width: usize,
-    code_views: &[(&[u8], usize)],
-    digests: &mut [[u8; 32]],
-) {
-    let stride = 1 + grid_rows * code_views.iter().map(|&(_, width)| width).sum::<usize>();
-    let tile = (TILE_BYTES / stride).clamp(1, TILE_LEAVES);
-
-    #[cfg(feature = "parallel")]
-    digests
-        .par_chunks_mut(tile)
-        .enumerate()
-        .for_each_init(Vec::new, |scratch, (t, out)| {
-            hash_tile::<H>(t * tile, grid_rows, encoded_width, code_views, scratch, out);
-        });
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut scratch = Vec::new();
-        for (t, out) in digests.chunks_mut(tile).enumerate() {
-            hash_tile::<H>(
-                t * tile,
-                grid_rows,
-                encoded_width,
-                code_views,
-                &mut scratch,
-                out,
-            );
-        }
-    }
-}
-
-/// Writes one pool leaf per column: each leaf hashes
-/// every table's digest of that column, in pool order.
+/// Writes leaf `j` as [`hash_symbol_leaf`] over `bytes[j·run..(j+1)·run]`
+/// of every `(bytes, run)` member, in member order.
 ///
 /// # Panics
-/// If a table holds fewer digests than `leaves`.
-pub fn hash_parts_leaves<H: Hasher>(
-    table_digests: &[&[[u8; 32]]],
-    leaves: &mut [MaybeUninit<[u8; 32]>],
+/// If a member holds fewer than `leaves.len()` runs.
+pub fn hash_symbol_leaves<H: Hasher>(
+    members: &[(&[u8], usize)],
+    tag: Tag,
+    leaves: &mut [[u8; 32]],
+    preimages: &mut Vec<u8>,
 ) {
-    #[cfg(feature = "parallel")]
-    leaves.par_iter_mut().enumerate().for_each(|(j, leaf)| {
-        leaf.write(hash_parts_leaf::<H>(table_digests.iter().map(|t| &t[j])));
-    });
+    let len = members.iter().map(|&(_, run)| run).sum::<usize>() + 1;
 
-    #[cfg(not(feature = "parallel"))]
-    for (j, leaf) in leaves.iter_mut().enumerate() {
-        leaf.write(hash_parts_leaf::<H>(table_digests.iter().map(|t| &t[j])));
+    for (b, slots) in leaves.chunks_mut(BATCH).enumerate() {
+        preimages.clear();
+        preimages.reserve_exact(slots.len() * len);
+
+        for j in b * BATCH..b * BATCH + slots.len() {
+            for &(bytes, run) in members {
+                preimages.extend_from_slice(&bytes[j * run..(j + 1) * run]);
+            }
+
+            preimages.push(tag as u8);
+        }
+
+        H::digest_many(preimages, len, slots);
     }
 }
 
-/// Hashes one pool leaf from each table's digest of
-/// the column, in pool order, followed by the `0x02` tag.
-pub fn hash_parts_leaf<'a, H: Hasher>(digests: impl IntoIterator<Item = &'a [u8; 32]>) -> [u8; 32] {
+/// `H(parts ‖ tag)`: one leaf of a tree over codeword symbols.
+pub fn hash_symbol_leaf<'a, H: Hasher>(
+    parts: impl IntoIterator<Item = &'a [u8]>,
+    tag: Tag,
+) -> [u8; 32] {
     let mut hasher = H::new();
 
-    for digest in digests {
-        hasher.update(digest);
+    for part in parts {
+        hasher.update(part);
     }
 
-    hasher.update(&[Tag::PoolLeaf as u8]);
+    hasher.update(&[tag as u8]);
 
     hasher.finalize()
 }
 
-/// Digests of columns `first..first + out.len()`,
-/// their preimages assembled side by side in `scratch`.
-fn hash_tile<H: Hasher>(
-    first: usize,
-    grid_rows: usize,
-    encoded_width: usize,
-    code_views: &[(&[u8], usize)],
-    scratch: &mut Vec<u8>,
-    out: &mut [[u8; 32]],
-) {
-    let stride = 1 + grid_rows * code_views.iter().map(|&(_, width)| width).sum::<usize>();
-
-    scratch.resize(out.len() * stride, 0);
-
-    for tag in scratch.iter_mut().skip(stride - 1).step_by(stride) {
-        *tag = Tag::Part as u8;
+/// Returns the root over the power-of-two leaf hashes `leaves`,
+/// reducing them in place; errors on any other count.
+pub fn subtree_root<H: Hasher>(leaves: &mut [[u8; 32]]) -> Result<[u8; 32]> {
+    if !leaves.len().is_power_of_two() {
+        return Err(Error::SubtreeWidth {
+            leaves: leaves.len(),
+        });
     }
 
-    let mut offset = 0;
-    for row in 0..grid_rows {
-        let base = row * encoded_width + first;
-        for &(column, width) in code_views {
-            let cells = &column[base * width..(base + out.len()) * width];
+    let mut preimages = [0u8; BATCH * NODE_BYTES];
+    let mut digests = [[0u8; 32]; BATCH];
 
-            match width {
-                4 => scatter::<4>(cells, scratch, stride, offset),
-                8 => scatter::<8>(cells, scratch, stride, offset),
-                16 => scatter::<16>(cells, scratch, stride, offset),
-                _ => {
-                    for (i, cell) in cells.chunks_exact(width).enumerate() {
-                        let at = i * stride + offset;
-                        scratch[at..at + width].copy_from_slice(cell);
-                    }
-                }
+    let mut width = leaves.len();
+    while width > 1 {
+        let parents = width / 2;
+
+        for first in (0..parents).step_by(BATCH) {
+            let count = BATCH.min(parents - first);
+
+            for (k, preimage) in preimages
+                .as_chunks_mut::<NODE_BYTES>()
+                .0
+                .iter_mut()
+                .take(count)
+                .enumerate()
+            {
+                preimage[..32].copy_from_slice(&leaves[2 * (first + k)]);
+                preimage[32..64].copy_from_slice(&leaves[2 * (first + k) + 1]);
+                preimage[64] = Tag::Node as u8;
             }
 
-            offset += width;
+            H::digest_many(
+                &preimages[..count * NODE_BYTES],
+                NODE_BYTES,
+                &mut digests[..count],
+            );
+
+            leaves[first..first + count].copy_from_slice(&digests[..count]);
         }
+
+        width = parents;
     }
 
-    for (digest, preimage) in out.iter_mut().zip(scratch.chunks_exact(stride)) {
-        *digest = H::digest(preimage);
-    }
+    Ok(leaves[0])
 }
 
 /// One tree layer, each parent the node of its two children.
@@ -652,13 +782,79 @@ fn hash_layer<H: Hasher>(
     children: &[MaybeUninit<[u8; 32]>],
     parents: &mut [MaybeUninit<[u8; 32]>],
 ) {
-    for (parent, [lo, hi]) in parents.iter_mut().zip(children.as_chunks::<2>().0) {
+    let pairs = children.as_chunks::<2>().0.iter().map(|[lo, hi]| {
         // SAFETY: a layer is hashed only after the one below
         // it is written, the leaves by `build_layers`' caller.
-        let (left, right) = unsafe { (lo.assume_init_ref(), hi.assume_init_ref()) };
+        unsafe { (lo.assume_init_ref(), hi.assume_init_ref()) }
+    });
 
-        parent.write(hash_node::<H>(left, right));
+    hash_pairs::<H>(pairs, |k, digest| {
+        parents[k].write(digest);
+    });
+}
+
+fn subtree_nodes<H: Hasher>(span: usize, leaves: impl FnOnce(&mut [[u8; 32]])) -> Vec<[u8; 32]> {
+    let mut nodes = vec![[0u8; 32]; 2 * span - 1];
+    leaves(&mut nodes[span - 1..]);
+
+    let mut width = span;
+    while width > 1 {
+        let (upper, lower) = nodes.split_at_mut(width - 1);
+        let parents = &mut upper[width / 2 - 1..];
+
+        let pairs = lower[..width]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[left, right]| (left, right));
+
+        hash_pairs::<H>(pairs, |k, digest| parents[k] = digest);
+
+        width /= 2;
     }
+
+    nodes
+}
+
+fn hash_pairs<'a, H: Hasher>(
+    pairs: impl Iterator<Item = (&'a [u8; 32], &'a [u8; 32])>,
+    mut write: impl FnMut(usize, [u8; 32]),
+) {
+    let mut preimages = [0u8; BATCH * NODE_BYTES];
+    let mut digests = [[0u8; 32]; BATCH];
+
+    let mut filled = 0;
+    let mut written = 0;
+
+    let mut flush = |filled: usize, written: usize, preimages: &[u8], digests: &mut [[u8; 32]]| {
+        H::digest_many(
+            &preimages[..filled * NODE_BYTES],
+            NODE_BYTES,
+            &mut digests[..filled],
+        );
+
+        for (k, digest) in digests[..filled].iter().enumerate() {
+            write(written + k, *digest);
+        }
+    };
+
+    for (left, right) in pairs {
+        let preimage = &mut preimages[filled * NODE_BYTES..(filled + 1) * NODE_BYTES];
+        preimage[..32].copy_from_slice(left);
+        preimage[32..64].copy_from_slice(right);
+        preimage[64] = Tag::Node as u8;
+
+        filled += 1;
+
+        if filled == BATCH {
+            flush(filled, written, &preimages, &mut digests);
+
+            written += filled;
+            filled = 0;
+        }
+    }
+
+    flush(filled, written, &preimages, &mut digests);
 }
 
 /// `H(left ‖ right ‖ 0x01)`, an internal node of [`MerkleTree`].
@@ -669,14 +865,6 @@ fn hash_node<H: Hasher>(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     node[64] = Tag::Node as u8;
 
     H::digest(&node)
-}
-
-/// Copies cell `i` of `cells` to `dst[i * stride + offset..]`.
-fn scatter<const CELL: usize>(cells: &[u8], dst: &mut [u8], stride: usize, offset: usize) {
-    for (i, cell) in cells.as_chunks::<CELL>().0.iter().enumerate() {
-        let at = i * stride + offset;
-        dst[at..at + CELL].copy_from_slice(cell);
-    }
 }
 
 #[cfg(test)]
@@ -716,47 +904,6 @@ mod tests {
         layer
     }
 
-    fn per_column_leaf(
-        col: usize,
-        grid_rows: usize,
-        encoded_width: usize,
-        views: &[(&[u8], usize)],
-    ) -> [u8; 32] {
-        let mut hasher = H::new();
-        for row in 0..grid_rows {
-            for &(column, width) in views {
-                let start = (row * encoded_width + col) * width;
-                hasher.update(&column[start..start + width]);
-            }
-        }
-
-        hasher.update(&[0u8]);
-
-        hasher.finalize()
-    }
-
-    fn code_columns(cells: &[usize], grid_rows: usize, width: usize) -> Vec<Vec<u8>> {
-        cells
-            .iter()
-            .enumerate()
-            .map(|(k, &cell)| {
-                let mut state =
-                    0x9E37_79B9_7F4A_7C15u64 ^ (k as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93);
-                let mut out = vec![0u8; grid_rows * width * cell];
-
-                for chunk in out.chunks_mut(8) {
-                    state ^= state << 13;
-                    state ^= state >> 7;
-                    state ^= state << 17;
-
-                    chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
-                }
-
-                out
-            })
-            .collect()
-    }
-
     fn check_tags<H: Hasher>() {
         let right: [u8; 32] = core::array::from_fn(|i| 0x80 | i as u8);
 
@@ -765,15 +912,106 @@ mod tests {
             left[0] = first;
 
             let payload = [left, right].concat();
+
             let tagged = |tag: u8| H::digest(&[&payload[..], &[tag][..]].concat());
 
-            let mut part = [[0u8; 32]];
-            hash_column_leaves::<H>(1, 1, &[(&payload[..], 64)], &mut part);
-
-            assert_eq!(part[0], tagged(0x00));
             assert_eq!(hash_node::<H>(&left, &right), tagged(0x01));
-            assert_eq!(hash_parts_leaf::<H>([&left, &right]), tagged(0x02));
+
+            for (tag, byte) in [(Tag::PoolLeaf, 0x02), (Tag::RoundLeaf, 0x04)] {
+                assert_eq!(
+                    hash_symbol_leaf::<H>([&left[..], &right[..]], tag),
+                    tagged(byte)
+                );
+            }
         }
+    }
+
+    fn check_symbol_leaves<H: Hasher>() {
+        let bytes: Vec<u8> = (0..1u32 << 18)
+            .map(|i| (i.wrapping_mul(0x9E37_79B9) >> 11) as u8)
+            .collect();
+
+        for runs in [
+            &[1usize][..],
+            &[16, 4],
+            &[134],
+            &[135],
+            &[8, 64, 16, 40],
+            &[1023],
+            &[1024],
+        ] {
+            for count in [1usize, 3, 64, 65, 202] {
+                let members: Vec<(&[u8], usize)> = runs
+                    .iter()
+                    .enumerate()
+                    .map(|(m, &run)| (&bytes[977 * m..977 * m + count * run], run))
+                    .collect();
+
+                let mut leaves = vec![[0u8; 32]; count];
+                hash_symbol_leaves::<H>(&members, Tag::PoolLeaf, &mut leaves, &mut Vec::new());
+
+                for (j, leaf) in leaves.iter().enumerate() {
+                    let parts = members.iter().map(|&(b, run)| &b[j * run..(j + 1) * run]);
+
+                    assert_eq!(
+                        *leaf,
+                        hash_symbol_leaf::<H>(parts, Tag::PoolLeaf),
+                        "runs {runs:?}, {count} leaves, leaf {j}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_layers<H: Hasher>() {
+        for count in [1usize, 2, 3, 64, 65, 129, 1024, 1025, 4097] {
+            let leaves: Vec<[u8; 32]> = (0..count as u32)
+                .map(|i| H::digest(&i.to_le_bytes()))
+                .collect();
+
+            let mut padded = leaves.clone();
+            padded.resize(count.next_power_of_two(), [0u8; 32]);
+
+            let mut layer = padded.clone();
+            while layer.len() > 1 {
+                layer = layer
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|[left, right]| hash_node::<H>(left, right))
+                    .collect();
+            }
+
+            let tree = MerkleTree::<Block128, H>::new(&leaves);
+
+            assert_eq!(tree.root(), layer[0], "{count} leaves");
+            assert_eq!(
+                subtree_root::<H>(&mut padded).unwrap(),
+                layer[0],
+                "{count} leaves"
+            );
+        }
+    }
+
+    fn pruned(leaf_hashes: &[[u8; 32]], floor: usize) -> MerkleTree<Block128, H> {
+        let roots: Vec<[u8; 32]> = leaf_hashes
+            .chunks(1 << floor)
+            .map(|chunk| subtree_root::<H>(&mut chunk.to_vec()).unwrap())
+            .collect();
+
+        MerkleTree::from_subtree_roots(leaf_hashes.len(), floor, &roots).unwrap()
+    }
+
+    fn random_indices(state: &mut u64, count: usize, num_leaves: usize) -> Vec<usize> {
+        (0..count)
+            .map(|_| {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+
+                *state as usize % num_leaves
+            })
+            .collect()
     }
 
     #[test]
@@ -834,7 +1072,7 @@ mod tests {
         let tree_ref = MerkleTree::<Block128, H>::new(&leaves);
 
         let (mut tree_stream, leaf_offset) = MerkleTree::<Block128, H>::allocate_tree(leaves.len());
-        let leaf_layer = tree_stream.leaves_mut(leaf_offset);
+        let leaf_layer = tree_stream.leaves_mut(leaf_offset).unwrap();
 
         for (i, slot) in leaf_layer.iter_mut().enumerate() {
             if i < leaves.len() {
@@ -844,7 +1082,7 @@ mod tests {
             }
         }
 
-        tree_stream.build_layers(leaf_offset);
+        tree_stream.build_layers(leaf_offset).unwrap();
 
         assert_eq!(tree_stream.root(), tree_ref.root());
 
@@ -869,7 +1107,7 @@ mod tests {
             let tree_ref = MerkleTree::<Block128, H>::new(&leaves);
 
             let (mut tree_stream, leaf_offset) = MerkleTree::<Block128, H>::allocate_tree(n);
-            let leaf_layer = tree_stream.leaves_mut(leaf_offset);
+            let leaf_layer = tree_stream.leaves_mut(leaf_offset).unwrap();
 
             for (i, slot) in leaf_layer.iter_mut().enumerate() {
                 if i < leaves.len() {
@@ -879,7 +1117,7 @@ mod tests {
                 }
             }
 
-            tree_stream.build_layers(leaf_offset);
+            tree_stream.build_layers(leaf_offset).unwrap();
 
             assert_eq!(tree_stream.num_leaves(), tree_ref.num_leaves());
             assert_eq!(tree_stream.root(), tree_ref.root());
@@ -1116,43 +1354,6 @@ mod tests {
     }
 
     #[test]
-    fn tiled_column_leaves_equal_per_column_leaves() {
-        let layouts: [&[usize]; 7] = [
-            &[1; 3],
-            &[2; 3],
-            &[4; 5],
-            &[8; 2],
-            &[16; 4],
-            &[16; 16],
-            &[4, 16, 8, 1, 2, 16],
-        ];
-
-        for cells in layouts {
-            for grid_rows in [1usize, 2, 8, 32] {
-                for width in [1usize, 63, 300] {
-                    let columns = code_columns(cells, grid_rows, width);
-                    let views: Vec<(&[u8], usize)> = columns
-                        .iter()
-                        .zip(cells)
-                        .map(|(column, &cell)| (column.as_slice(), cell))
-                        .collect();
-
-                    let mut tiled = vec![[0u8; 32]; width];
-                    hash_column_leaves::<H>(grid_rows, width, &views, &mut tiled);
-
-                    for (col, &leaf) in tiled.iter().enumerate() {
-                        assert_eq!(
-                            leaf,
-                            per_column_leaf(col, grid_rows, width, &views),
-                            "cells {cells:?} grid_rows {grid_rows} width {width} col {col}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
     fn subtree_layers_equal_level_by_level_layers() {
         for count in [1usize, 2, 3, 1023, 1024, 1025, 4096, 70_000] {
             let leaves: Vec<[u8; 32]> = (0..count as u32)
@@ -1177,32 +1378,6 @@ mod tests {
                 .collect();
 
             assert_eq!(built, expected, "{count} leaves");
-        }
-    }
-
-    #[test]
-    fn parts_leaves_hash_tagged_table_digests() {
-        let tables: Vec<Vec<[u8; 32]>> = (0..3u8)
-            .map(|t| (0..37u8).map(|j| [t.wrapping_mul(41) ^ j; 32]).collect())
-            .collect();
-
-        let views: Vec<&[[u8; 32]]> = tables.iter().map(Vec::as_slice).collect();
-
-        let mut leaves = vec![MaybeUninit::new([0u8; 32]); 37];
-        hash_parts_leaves::<H>(&views, &mut leaves);
-
-        for (j, leaf) in leaves.iter().enumerate() {
-            let mut preimage = Vec::new();
-            for table in &tables {
-                preimage.extend_from_slice(&table[j]);
-            }
-
-            preimage.push(2u8);
-
-            // SAFETY: every slot starts initialized
-            let leaf = unsafe { leaf.assume_init() };
-
-            assert_eq!(leaf, H::digest(&preimage));
         }
     }
 
@@ -1386,5 +1561,140 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn symbol_leaves_concatenate_member_runs_under_their_tag() {
+        let wide: Vec<u8> = (0..64u8).collect();
+        let narrow: Vec<u8> = (100..116u8).collect();
+        let members = [(wide.as_slice(), 16), (narrow.as_slice(), 4)];
+
+        let mut leaves = vec![[0u8; 32]; 4];
+        hash_symbol_leaves::<H>(&members, Tag::PoolLeaf, &mut leaves, &mut Vec::new());
+
+        for (j, leaf) in leaves.iter().enumerate() {
+            let mut preimage = wide[16 * j..16 * (j + 1)].to_vec();
+            preimage.extend_from_slice(&narrow[4 * j..4 * (j + 1)]);
+            preimage.push(Tag::PoolLeaf as u8);
+
+            assert_eq!(*leaf, H::digest(&preimage));
+        }
+
+        let parts = [&wide[..16], &narrow[..4]];
+
+        assert_ne!(
+            hash_symbol_leaf::<H>(parts, Tag::PoolLeaf),
+            hash_symbol_leaf::<H>(parts, Tag::RoundLeaf)
+        );
+    }
+
+    #[cfg(feature = "blake3")]
+    #[test]
+    fn blake3_symbol_leaves_match_per_leaf_hash() {
+        check_symbol_leaves::<crate::blake3::Blake3Hasher>();
+    }
+
+    #[cfg(feature = "sha2")]
+    #[test]
+    fn sha256_symbol_leaves_match_per_leaf_hash() {
+        check_symbol_leaves::<crate::sha256::Sha256Hasher>();
+    }
+
+    #[cfg(feature = "sha3")]
+    #[test]
+    fn sha3_symbol_leaves_match_per_leaf_hash() {
+        check_symbol_leaves::<crate::sha3::Sha3_256Hasher>();
+    }
+
+    #[cfg(feature = "blake3")]
+    #[test]
+    fn blake3_tree_root_matches_per_node_hash() {
+        check_layers::<crate::blake3::Blake3Hasher>();
+    }
+
+    #[cfg(feature = "sha2")]
+    #[test]
+    fn sha256_tree_root_matches_per_node_hash() {
+        check_layers::<crate::sha256::Sha256Hasher>();
+    }
+
+    #[cfg(feature = "sha3")]
+    #[test]
+    fn sha3_tree_root_matches_per_node_hash() {
+        check_layers::<crate::sha3::Sha3_256Hasher>();
+    }
+
+    #[test]
+    fn pruned_tree_root_and_multiproof_match_full_tree() {
+        let depth = 10;
+        let leaf_hashes: Vec<[u8; 32]> = (0..1u32 << depth)
+            .map(|i| hash_bytes(&i.to_le_bytes()))
+            .collect();
+
+        let full = MerkleTree::<Block128, H>::new(&leaf_hashes);
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for floor in [0, 1, 6, depth] {
+            let tree = pruned(&leaf_hashes, floor);
+            let span = 1 << floor;
+
+            assert_eq!(tree.root(), full.root(), "floor {floor}");
+
+            for draws in [1usize, 2, 3, 15, 16, 17, 64, 287, 2000] {
+                let query = random_indices(&mut state, draws, leaf_hashes.len());
+
+                let proof = tree.prove_batch_with(&query, draws, |s, hashes| {
+                    hashes.copy_from_slice(&leaf_hashes[s * span..(s + 1) * span]);
+                });
+
+                assert_eq!(
+                    proof,
+                    full.prove_batch(&query, draws),
+                    "floor {floor}, {draws} draws"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prove_batch_with_rejects_wrong_subtree_hashes() {
+        let leaf_hashes: Vec<[u8; 32]> =
+            (0..1024u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+
+        let full = MerkleTree::<Block128, H>::new(&leaf_hashes);
+        let tree = pruned(&leaf_hashes, 6);
+
+        let forged = |s: usize, hashes: &mut [[u8; 32]]| {
+            hashes.copy_from_slice(&leaf_hashes[64 * s..64 * (s + 1)]);
+
+            if s == 3 {
+                hashes[17][0] ^= 1;
+            }
+        };
+
+        assert_eq!(
+            tree.prove_batch_with(&[64 * 3 + 5], 1, forged),
+            Err(Error::SubtreeMismatch { subtree: 3 })
+        );
+        assert_eq!(
+            tree.prove_batch_with(&[5], 17, forged),
+            Err(Error::SubtreeMismatch { subtree: 3 })
+        );
+        assert_eq!(
+            tree.prove_batch_with(&[5], 1, forged),
+            full.prove_batch(&[5], 1)
+        );
+    }
+
+    #[test]
+    fn pruned_tree_rejects_prove_and_prove_batch() {
+        let leaf_hashes: Vec<[u8; 32]> = (0..64u32).map(|i| hash_bytes(&i.to_le_bytes())).collect();
+        let tree = pruned(&leaf_hashes, 2);
+
+        assert_eq!(tree.prove(5), Err(Error::Pruned { floor: 2 }));
+        assert_eq!(
+            tree.prove_batch(&[5, 9], 2),
+            Err(Error::Pruned { floor: 2 })
+        );
     }
 }

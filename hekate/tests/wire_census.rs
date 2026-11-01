@@ -9,7 +9,7 @@
 use hekate::core::config::Config;
 use hekate::core::poly::univariate::UnivariatePoly;
 use hekate::core::proofs::{
-    EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
+    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof, TreeOpening,
 };
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
@@ -29,7 +29,7 @@ use hekate_verifier::HekateVerifier;
 type F = Block128;
 type H = DefaultHasher;
 
-const NUM_VARS: usize = 4;
+const NUM_VARS: usize = 5;
 
 #[derive(Default)]
 struct Census {
@@ -37,6 +37,7 @@ struct Census {
     running_claim: usize,
     fold: usize,
     master_evals: usize,
+    mask_masters: usize,
     outer: usize,
     challenge_point: usize,
     opened_bytes: usize,
@@ -107,7 +108,8 @@ fn config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
@@ -137,23 +139,30 @@ fn opening(opening: &OuterOpening<F>) -> usize {
     values.len()
 }
 
-fn eval_batch(proof: &EvalBatchProof<F>, census: &mut Census) {
-    let EvalBatchProof {
+fn eval_batch(proof: &FoldEvalProof<F>, census: &mut Census) {
+    let FoldEvalProof {
         sumcheck_proof,
-        ldt_proof,
-        tensor_vec,
         masters,
-        h_ldt_proof,
+        mask_masters,
+        fold_rounds,
+        round_roots: _,
+        final_layer,
+        openings,
     } = proof;
 
     sumcheck(sumcheck_proof, census);
 
-    for opening in core::iter::once(ldt_proof).chain(h_ldt_proof.iter()) {
-        census.opened_bytes += opening.opened_columns.iter().map(Vec::len).sum::<usize>();
+    for TreeOpening {
+        leaves,
+        multiproof: _,
+    } in openings
+    {
+        census.opened_bytes += leaves.len();
     }
 
-    census.fold += tensor_vec.len();
+    census.fold += fold_rounds.len() + final_layer.len();
     census.master_evals += masters.len();
+    census.mask_masters += mask_masters.len();
 }
 
 fn point_evaluation(
@@ -190,10 +199,8 @@ fn outer(proof: &OuterProof<F>, census: &mut Census) {
     census.outer += opening(pad_opening) + opening(aux_opening);
 }
 
-/// No `..` in any wire pattern: a new field element
-/// on the wire must stop this compiling until it is
-/// classified. `BrakedownProof` is exempt, a private
-/// marker blocks the pattern outside `hekate-core`.
+/// No `..` in any wire pattern: a new field element on the
+/// wire must stop this compiling until it is classified.
 fn census(proof: &InnerProof<F>) -> Census {
     let InnerProof {
         trace_root: _,
@@ -291,6 +298,7 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
     assert_eq!(counted.padded, pad_budget(&air, &[]));
     assert_eq!(counted.running_claim, 2);
     assert_eq!(counted.master_evals, 1);
+    assert_eq!(counted.mask_masters, 2);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
     assert!(counted.outer > 0);
@@ -365,7 +373,8 @@ fn every_scalar_of_bus_proof_is_accounted() {
     assert_eq!(counted.running_claim, 3);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
-    assert_eq!(counted.master_evals, 3);
+    assert_eq!(counted.master_evals, 4);
+    assert_eq!(counted.mask_masters, 2);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
     assert!(counted.opened_bytes > 0);
@@ -442,7 +451,8 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
     assert_eq!(counted.running_claim, 3);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
-    assert_eq!(counted.master_evals, 3);
+    assert_eq!(counted.master_evals, 4);
+    assert_eq!(counted.mask_masters, 2);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
     assert!(counted.opened_bytes > 0);

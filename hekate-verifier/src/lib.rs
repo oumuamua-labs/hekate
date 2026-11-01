@@ -21,7 +21,7 @@
 
 extern crate alloc;
 
-mod brakedown;
+mod fold;
 mod outer;
 mod sumcheck;
 
@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use hekate_core::config::{Config, MAX_TABLE_VARS};
 use hekate_core::errors;
+use hekate_core::fold::{PolyKind, TreeKind};
 use hekate_core::proofs::{InnerProof, LogUpAux, SumcheckProof};
 use hekate_core::protocol;
 use hekate_core::tensor::TensorProduct;
@@ -49,7 +50,8 @@ use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::expander::{PoolLayout, RingSwitchPlan};
+use hekate_program::expander::RingSwitchPlan;
+use hekate_program::fold_pool::FoldPool;
 use hekate_program::outer::{
     EvalInputs, EvalRecord, OuterStatement, TableInputs, TablePads, TableRecord, TableShape,
     TableStatics, check_draws, eval_record, table_record,
@@ -336,36 +338,13 @@ where
             .chain([(main_plan, num_vars)])
             .collect();
 
-        let split_vars = PoolLayout::split_vars_for(&heights, field_bits, config);
+        let pool = FoldPool::new(&heights, config)?;
 
-        let point_evaluations = proof
-            .chiplet_point_evaluations
-            .iter()
-            .chain([&proof.main_point_evaluation]);
-
-        // Before at_split: its blind columns stay
-        // bounded by the claims the proof carries.
-        for (&(plan, table_vars), (_, claims)) in heights.iter().zip(point_evaluations) {
-            if claims.len() != 2 * plan.total_claims_at(table_vars, split_vars) {
-                return Err(errors::Error::Protocol {
-                    protocol: "verifier",
-                    message: "claimed evaluation count does not match the pool layout",
-                });
-            }
+        for (table, pooled) in chiplet_tables.iter_mut().zip(pool.tables()) {
+            table.shape = table.shape.at(pooled);
         }
 
-        let pool = PoolLayout::at_split(&heights, split_vars);
-        let pool_shape = pool.fold_shape();
-
-        let metrics = config.security_metrics(field_bits, pool_shape);
-
-        config.check_security(field_bits, pool_shape)?;
-
-        for (table, layout) in chiplet_tables.iter_mut().zip(&pool.tables) {
-            table.shape = table.shape.at(layout);
-        }
-
-        let main_layout = &pool.tables[chiplet_tables.len()];
+        let main_layout = &pool.tables()[chiplet_tables.len()];
         let main_shape = prepared.main_shape.at(main_layout);
 
         let mut rank_tables = Vec::with_capacity(1 + chiplet_tables.len());
@@ -441,10 +420,11 @@ where
                 .chain([(main_statics, main_shape)]),
         )?;
 
+        let fold_bits = pool.layout().estimated_security_bits();
+
         info!(
-            bits = metrics.security_bits.min(draws.weakest()),
-            ldt_query = metrics.ldt_bits,
-            fold_gap = metrics.proximity_bits,
+            bits = fold_bits.min(draws.weakest()),
+            fold = fold_bits,
             logup_bus = draws.bus,
             zerocheck = draws.zerocheck,
             sumcheck_round = draws.sumcheck,
@@ -452,7 +432,6 @@ where
             eval_round = draws.eval_round,
             outer = ?draws.outer,
             field_bits,
-            code_distance = metrics.relative_distance,
             "pool security"
         );
 
@@ -468,15 +447,16 @@ where
             lookup_bus_points: &lookup_bus_points,
         };
 
-        let has_bus = !main_perm.is_empty()
-            || chiplet_tables
-                .iter()
-                .any(|t| !t.def.permutation_checks.is_empty());
+        let has_helper = pool
+            .layout()
+            .trees()
+            .iter()
+            .any(|t| t.kind == TreeKind::Polys(PolyKind::Helper));
 
-        if proof.h_root.is_some() != has_bus {
+        if proof.h_root.is_some() != has_helper {
             return Err(errors::Error::Protocol {
                 protocol: "verifier",
-                message: "h_root presence must match bus presence",
+                message: "h_root presence must match the helper tree",
             });
         }
 
@@ -552,7 +532,6 @@ where
             &proof.eval_proof,
             transcript,
             ctx,
-            config,
         )? {
             Some(outcome) => outcome,
             None => {
@@ -566,11 +545,11 @@ where
         // =========================================================
         if let Some(mut cursor) = pad_cursor {
             let shapes: Vec<TableShape> = checked.iter().map(|t| *t.view.shape).collect();
-            let statement = OuterStatement::new(&shapes, pool.num_vars());
+            let statement = OuterStatement::new(&shapes, pool.layout().num_vars());
             let first_wire = shapes.iter().map(TableShape::mul_wires).sum::<usize>() as u32;
 
             let eval = Self::pool_eval_record(&pool, &checked, &outcome, first_wire, &mut cursor)?;
-            let records = Self::table_records(&checked, &logup, config)?;
+            let records = Self::table_records(&pool, &checked, &logup, config)?;
 
             return outer::verify_outer(
                 proof, transcript, config, statement, &records, &eval, cursor, scratch,
@@ -610,7 +589,7 @@ where
                 &def.name(),
                 1 << table.shape.num_vars,
                 def.num_columns(),
-                table.plan.opened_row_bytes(),
+                table.plan.row_bytes(),
             );
 
             for bc in def.boundaries() {
@@ -628,7 +607,7 @@ where
         chiplet_tables: &'a [ChipletTable<'s, F>],
         chiplet_clocks: &'a [Vec<Option<RankClock>>],
         chiplet_instances: &'a [ProgramInstance<F>],
-        pool: &PoolLayout,
+        pool: &FoldPool,
         proof: &'a InnerProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
@@ -667,7 +646,7 @@ where
                 point_evaluation: &proof.chiplet_point_evaluations[c_idx],
             };
 
-            let half = pool.tables[c_idx].plan.total_claims();
+            let half = pool.tables()[c_idx].plan.total_claims();
 
             match Self::verify_table(
                 view,
@@ -755,13 +734,13 @@ where
     /// The pool eval's outer record; its rounds take
     /// the pads after every table's claim pads.
     fn pool_eval_record(
-        pool: &PoolLayout,
+        pool: &FoldPool,
         checked: &[CheckedTable<'_, '_, F>],
         outcome: &EvalOutcome<F>,
         first_wire: u32,
         cursor: &mut PadCursor,
     ) -> errors::Result<EvalRecord<F>> {
-        let round_first = cursor.take(2 * pool.num_vars());
+        let round_first = cursor.take(2 * pool.layout().num_vars());
 
         let mut claim_pads = Vec::new();
         for table in checked {
@@ -790,6 +769,7 @@ where
 
     /// Each checked table's outer record.
     fn table_records<'s>(
+        pool: &FoldPool,
         checked: &[CheckedTable<'_, 's, F>],
         logup: &LogUpContext<'_>,
         config: &Config,
@@ -801,7 +781,8 @@ where
 
         checked
             .iter()
-            .map(|table| {
+            .zip(pool.tables())
+            .map(|(table, pooled)| {
                 let masked = table.zerocheck.masked.as_ref().ok_or_else(unpadded)?;
                 let claims_first = table.claims_first.ok_or_else(unpadded)?;
                 let view = &table.view;
@@ -822,6 +803,7 @@ where
                     h_evals_masked: &table.logup_aux.h_evals,
                     val_final_masked: masked.val_final,
                     claims_masked: table.claims.flat().to_vec(),
+                    bindings: pooled.plan.binding_claims(),
                     pads: TablePads {
                         claimed_sums: masked.claimed_sums_first,
                         zerocheck: masked.zerocheck_first,
@@ -847,12 +829,13 @@ where
         transcript.append_message(b"program_id", &program_id);
         transcript.append_u64(b"num_columns", num_cols as u64);
         transcript.append_u64(b"num_rows", num_rows as u64);
-        transcript.append_u64(b"ldt_support_size", config.ldt_support_size as u64);
         transcript.append_u64(b"zero_knowledge", u64::from(config.zero_knowledge));
         transcript.append_u64(b"num_queries", config.num_queries as u64);
         transcript.append_u64(b"log_inv_rate", u64::from(config.code_rate.log_inv_rate()));
+        transcript.append_u64(b"fold_arity_log", config.fold_arity_log as u64);
+        transcript.append_u64(b"early_stop_vars", config.early_stop_vars as u64);
         transcript.append_u64(b"outer_queries", config.outer_queries as u64);
-        transcript.append_u64(b"main_row_bytes", main.plan.opened_row_bytes() as u64);
+        transcript.append_u64(b"main_row_bytes", main.plan.row_bytes() as u64);
         transcript.append_field_list(b"public_input", main.instance.public_inputs());
 
         for bc in main.statics.boundary {
@@ -1014,7 +997,8 @@ where
 
         // Every reported h_eval is the base h claim
         // the eval argument binds to the committed h.
-        let h_claims = &trace_values[trace_values.len() - h_columns..];
+        let first_h = trace_values.len() - h_columns - shape.h_blinds();
+        let h_claims = &trace_values[first_h..first_h + h_columns];
 
         for (h_eval, &claim) in logup_aux.h_evals.iter().zip(h_claims) {
             if h_eval.to_hardware() != claim {

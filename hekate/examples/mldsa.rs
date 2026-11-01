@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! ML-DSA verification (FIPS 204) with the public key and
-//! the signature in the witness: the statement publishes M'
-//! and tr = H(pk). Usage: mldsa [--level 44|65|87]
+//! the signature in the witness: the statement publishes
+//! M' and tr = H(pk). Usage: mldsa [--level 44|65|87]
 
 #[path = "common/mod.rs"]
 mod common;

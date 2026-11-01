@@ -81,6 +81,13 @@ impl Air<F> for GenChiplet {
         LAYOUT.get_or_init(|| vec![ColumnType::B32, ColumnType::Bit])
     }
 
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![(
+            GEN_BUS_ID.into(),
+            gen_service().respond(&[CHIP_X], CHIP_SEL).unwrap(),
+        )]
+    }
+
     fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
         vec![fix(
             CHIP_SEL,
@@ -90,13 +97,6 @@ impl Air<F> for GenChiplet {
                 origin: 0,
                 values: vec![F::ONE],
             },
-        )]
-    }
-
-    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        vec![(
-            GEN_BUS_ID.into(),
-            gen_service().respond(&[CHIP_X], CHIP_SEL).unwrap(),
         )]
     }
 
@@ -266,8 +266,10 @@ fn run_seed(seed: u64) {
 
     let config = if s.zk {
         Config {
-            num_queries: 4,
+            num_queries: 2,
             min_security_bits: 0,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge: true,
             ..Config::default()
         }
@@ -275,7 +277,9 @@ fn run_seed(seed: u64) {
         Config {
             num_queries: 8,
             min_security_bits: 0,
-            ldt_support_size: 4,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
+            zero_knowledge: false,
             ..Config::default()
         }
     };

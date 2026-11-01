@@ -144,6 +144,9 @@ fn prove_and_verify(
     }
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };
@@ -191,6 +194,9 @@ where
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![chiplet_trace]);
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };

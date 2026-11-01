@@ -89,7 +89,7 @@ impl fmt::Display for Error {
 /// it must losslessly represent every `ColumnType`
 /// used by the trace (Bit, B8, B16, B32, B64, B128)
 /// and carry the additive-FFT substrate the
-/// Brakedown RS row code encodes over.
+/// Reed-Solomon codes encode over.
 pub trait TraceCompatibleField:
     TowerField
     + HardwareField
@@ -323,15 +323,10 @@ pub trait Trace: Send + Sync {
 // COLUMN LAYOUT METADATA
 // =========================================================
 
-/// Column storage type, without the data itself.
-/// Mixed-field traces require the verifier to know
-/// the exact byte width of every opened column in
-/// order to parse the raw LDT bytes.
+/// A column's field. The commitment binds every cell to it;
+/// an AIR needs no constraint to keep a cell in range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnType {
-    /// AIR authors MUST `cs.assert_boolean(cs.col(idx))` on
-    /// every `Bit` used as selector, constraint operand, or
-    /// LogUp source: the commitment binds a cell only to GF(2^32).
     Bit,
     B8,
     B16,
@@ -353,9 +348,8 @@ impl ColumnType {
         }
     }
 
-    /// The tower field this column's cells are committed
-    /// in under the MDS Reed-Solomon row code. GF(2),
-    /// GF(2^8), and GF(2^16) admit no rate-1/2 MDS RS.
+    /// Returns the narrowest code field type holding
+    /// the column's cells: Bit, B8 and B16 widen to B32.
     #[inline]
     pub const fn rs_field(&self) -> Self {
         match self {
@@ -521,32 +515,6 @@ impl TraceColumn {
             Self::B32(_) => ColumnType::B32,
             Self::B64(_) => ColumnType::B64,
             Self::B128(_) => ColumnType::B128,
-        }
-    }
-
-    /// Append this row's little-endian
-    /// serialization to `buf`. Used for
-    /// Merkle leaf hashing and LDT opening bytes.
-    pub fn append_bytes_at(&self, row_idx: usize, buf: &mut Vec<u8>) {
-        match self {
-            Self::Bit(v) => {
-                buf.push(v[row_idx].get());
-            }
-            Self::B8(v) => {
-                buf.push(v[row_idx].into_raw().0);
-            }
-            Self::B16(v) => {
-                buf.extend_from_slice(&v[row_idx].into_raw().0.to_le_bytes());
-            }
-            Self::B32(v) => {
-                buf.extend_from_slice(&v[row_idx].into_raw().0.to_le_bytes());
-            }
-            Self::B64(v) => {
-                buf.extend_from_slice(&v[row_idx].into_raw().0.to_le_bytes());
-            }
-            Self::B128(v) => {
-                buf.extend_from_slice(&v[row_idx].into_raw().0.to_le_bytes());
-            }
         }
     }
 

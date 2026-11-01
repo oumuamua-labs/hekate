@@ -61,22 +61,60 @@ where
     }
 }
 
-/// `Δ = Σ_c a_c φ(h_c)` over the pad entries `(pad, a_c)`
-/// as the chain `X_127 = T'_127`, `X_j = T'_j + X_{j+1}²`,
-/// `T'_j = Σ_c σ^{-j}(μ_j a_c) h_c`, on squaring wires
-/// `first_wire + j - 1` for `j = 1..128`; `Δ = X_0`.
+struct TieMap<F> {
+    lambda: [Flat<F>; BITS],
+    table: Option<LinearMap<F, F>>,
+}
+
+impl<F> TieMap<F>
+where
+    F: HardwareField + Into<Block128>,
+{
+    fn apply(&self, a: Flat<F>) -> Flat<F> {
+        match &self.table {
+            Some(table) => table.apply(a),
+            None => chain(&self.lambda, a),
+        }
+    }
+}
+
+/// `Δ = Σ_c a_c φ_k(h_c)` over pad entries `(pad, a_c, k)`, `φ_k`
+/// of `mu[k]`: `X_j = T'_j + X_{j+1}²` on wire `first_wire + j - 1`,
+/// `T'_j = Σ_c σ^{-j}(μ_{k,j} a_c) h_c`, `X_128 = 0`, `Δ = X_0`.
 pub struct RingGadget<F> {
-    pub ring: Vec<(u32, Flat<F>)>,
-    pub mu: Vec<Flat<F>>,
+    pub ring: Vec<(u32, Flat<F>, usize)>,
     pub first_wire: u32,
+
+    mu0: Vec<Flat<F>>,
+
+    /// `σ^i(μ_{k,128−i})` at `[k][i]`, `i ≥ 1`:
+    /// the coefficient every chain row reads.
+    conj: Vec<Vec<Flat<F>>>,
 }
 
 impl<F: HardwareField> RingGadget<F> {
-    pub fn new(ring: Vec<(u32, Flat<F>)>, mu: Vec<Flat<F>>, first_wire: u32) -> Self {
+    pub fn new(ring: Vec<(u32, Flat<F>, usize)>, mu: Vec<Vec<Flat<F>>>, first_wire: u32) -> Self {
+        let zero = Flat::from_raw(F::ZERO);
+
+        let conj = mu
+            .iter()
+            .map(|mu| {
+                let mut conj = vec![zero; BITS];
+                for (i, c) in conj.iter_mut().enumerate().skip(1) {
+                    if mu[BITS - i] != zero {
+                        *c = frobenius(mu[BITS - i], i);
+                    }
+                }
+
+                conj
+            })
+            .collect();
+
         Self {
             ring,
-            mu,
             first_wire,
+            mu0: mu.iter().map(|mu| mu[0]).collect(),
+            conj,
         }
     }
 
@@ -94,17 +132,16 @@ impl<F: HardwareField> RingGadget<F> {
     /// `tie_j[c] = σ^{-j}(μ_j a_c)`; the coefficients
     /// of row `Lhs_j` on the pad entries.
     pub fn for_each_tie_row(&self, mut f: impl FnMut(usize, &[Flat<F>])) {
-        let mut conj: Vec<Flat<F>> = self.ring.iter().map(|&(_, a)| a).collect();
-        let mut tie = vec![Flat::from_raw(F::ZERO); conj.len()];
+        let mut powers: Vec<Flat<F>> = self.ring.iter().map(|&(_, a, _)| a).collect();
+        let mut tie = vec![Flat::from_raw(F::ZERO); powers.len()];
 
         for j in (1..BITS).rev() {
-            for a in conj.iter_mut() {
+            for a in powers.iter_mut() {
                 *a = *a * *a;
             }
 
-            let mu_conj = frobenius(self.mu[j], BITS - j);
-            for (t, &a) in tie.iter_mut().zip(&conj) {
-                *t = a * mu_conj;
+            for ((t, &a), &(_, _, k)) in tie.iter_mut().zip(&powers).zip(&self.ring) {
+                *t = a * self.conj[k][BITS - j];
             }
 
             f(j, &tie);
@@ -118,26 +155,26 @@ impl<F: HardwareField> RingGadget<F> {
     where
         F: Into<Block128>,
     {
-        let mut lambda = [Flat::from_raw(F::ZERO); BITS];
-        for (i, l) in lambda.iter_mut().enumerate().skip(1) {
-            let j = BITS - i;
-            *l = scales[self.row_of(j)] * frobenius(self.mu[j], i);
-        }
+        let maps: Vec<TieMap<F>> = self
+            .conj
+            .iter()
+            .enumerate()
+            .map(|(k, conj)| {
+                let mut lambda = [Flat::from_raw(F::ZERO); BITS];
+                for (i, l) in lambda.iter_mut().enumerate().skip(1) {
+                    *l = scales[self.row_of(BITS - i)] * conj[i];
+                }
 
-        let map = LinearMap::new(|x: Flat<F>| {
-            let mut power = x;
-            let mut acc = Flat::from_raw(F::ZERO);
+                // A table pays the chain on all BITS basis vectors
+                let entries = self.ring.iter().filter(|&&(_, _, f)| f == k).count();
+                let table = (entries >= BITS).then(|| LinearMap::new(|x| chain(&lambda, x)));
 
-            for &l in &lambda[1..] {
-                power = power * power;
-                acc += l * power;
-            }
+                TieMap { lambda, table }
+            })
+            .collect();
 
-            acc
-        });
-
-        for &(pad, a) in &self.ring {
-            f(pad, map.apply(a));
+        for &(pad, a, k) in &self.ring {
+            f(pad, maps[k].apply(a));
         }
     }
 
@@ -203,7 +240,7 @@ impl<F: HardwareField> RingGadget<F> {
         let mut form: Vec<(Unknown, Flat<F>)> = self
             .ring
             .iter()
-            .map(|&(pad, a)| (Unknown::Pad(pad), a * self.mu[0]))
+            .map(|&(pad, a, k)| (Unknown::Pad(pad), a * self.mu0[k]))
             .collect();
 
         form.push((
@@ -237,8 +274,8 @@ impl<F: HardwareField> RingGadget<F> {
         self.for_each_tie_row(|_, tie| x = dot(pad_values, tie) + x * x);
 
         let mut t0 = Flat::from_raw(F::ZERO);
-        for (&h, &(_, a)) in pad_values.iter().zip(&self.ring) {
-            t0 += a * self.mu[0] * h;
+        for (&h, &(_, a, k)) in pad_values.iter().zip(&self.ring) {
+            t0 += a * self.mu0[k] * h;
         }
 
         t0 + x * x
@@ -261,21 +298,26 @@ pub fn dual_basis(u: usize) -> Block128 {
     Block128(acc)
 }
 
-/// `μ_j` with `Σ_u eq(r'',u)·bit_u(x) = Σ_j μ_j x^{2^j}`
-/// for every `x`, bits in the tower basis.
-pub fn linearized_coeffs(eq_mix: &[Block128]) -> Vec<Flat<Block128>> {
-    let eq: Vec<Flat<Block128>> = eq_mix.iter().map(|m| m.to_hardware()).collect();
+/// `μ_{k,j}` with `Σ_u m_{k,u}·bit_u(x) = Σ_j μ_{k,j} x^{2^j}` per
+/// `(m_k, w_k)`, bits in the tower basis; a map linear over the field
+/// of `2^{w_k}` elements has `μ_{k,j} = 0` unless `w_k` divides `j`.
+pub fn linearized_coeffs(maps: &[(Vec<Block128>, usize)]) -> Vec<Vec<Flat<Block128>>> {
+    let zero = Flat::from_raw(Block128::ZERO);
+
+    let coeffs: Vec<Vec<Flat<Block128>>> = maps
+        .iter()
+        .map(|(m, _)| m.iter().map(|x| x.to_hardware()).collect())
+        .collect();
 
     let mut gamma: Vec<Flat<Block128>> = (0..BITS).map(|u| dual_basis(u).to_hardware()).collect();
-    let mut mu = Vec::with_capacity(BITS);
+    let mut mu = vec![vec![zero; BITS]; maps.len()];
 
-    for _ in 0..BITS {
-        let mut acc = Flat::from_raw(Block128::ZERO);
-        for (g, m) in gamma.iter().zip(&eq) {
-            acc += *g * *m;
+    for j in 0..BITS {
+        for ((mu, coeffs), &(_, width)) in mu.iter_mut().zip(&coeffs).zip(maps) {
+            if j % width == 0 {
+                mu[j] = dot(&gamma, coeffs);
+            }
         }
-
-        mu.push(acc);
 
         for g in gamma.iter_mut() {
             *g = *g * *g;
@@ -283,6 +325,23 @@ pub fn linearized_coeffs(eq_mix: &[Block128]) -> Vec<Flat<Block128>> {
     }
 
     mu
+}
+
+fn chain<F: HardwareField>(lambda: &[Flat<F>; BITS], x: Flat<F>) -> Flat<F> {
+    let zero = Flat::from_raw(F::ZERO);
+
+    let mut power = x;
+    let mut acc = zero;
+
+    for &l in &lambda[1..] {
+        power = power * power;
+
+        if l != zero {
+            acc += l * power;
+        }
+    }
+
+    acc
 }
 
 fn dot<F: HardwareField>(a: &[Flat<F>], b: &[Flat<F>]) -> Flat<F> {
@@ -306,8 +365,17 @@ fn frobenius<F: HardwareField>(x: Flat<F>, k: usize) -> Flat<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expander::{eq_tensor_b, ring_batch_b};
+    use crate::expander::field_coeffs;
+    use hekate_core::trace::ColumnType;
     use hekate_math::BinaryFieldExtras;
+
+    const FIELDS: [(ColumnType, usize); 5] = [
+        (ColumnType::Bit, 1),
+        (ColumnType::B8, 8),
+        (ColumnType::B16, 16),
+        (ColumnType::B32, 32),
+        (ColumnType::B64, 64),
+    ];
 
     fn next(state: &mut u128) -> Block128 {
         *state ^= *state << 13;
@@ -315,6 +383,24 @@ mod tests {
         *state ^= *state << 17;
 
         Block128(*state)
+    }
+
+    fn maps(r_mix: &[Block128]) -> Vec<(Vec<Block128>, usize)> {
+        FIELDS
+            .iter()
+            .map(|&(field, width)| (field_coeffs(field, r_mix), width))
+            .collect()
+    }
+
+    fn phi(field: ColumnType, x: Block128, r_mix: &[Block128]) -> Block128 {
+        let mut acc = Block128::ZERO;
+        for (u, &m) in field_coeffs(field, r_mix).iter().enumerate() {
+            if (x.0 >> u) & 1 == 1 {
+                acc += m;
+            }
+        }
+
+        acc
     }
 
     /// Every chain row on the given values: wire terms
@@ -345,7 +431,7 @@ mod tests {
             .collect();
 
         gadget.for_each_tie_row(|j, tie| {
-            for (&(pad_idx, _), &t) in gadget.ring.iter().zip(tie) {
+            for (&(pad_idx, _, _), &t) in gadget.ring.iter().zip(tie) {
                 acc[gadget.row_of(j)] += t * value(Unknown::Pad(pad_idx));
             }
         });
@@ -364,25 +450,25 @@ mod tests {
     }
 
     #[test]
-    fn coefficients_reproduce_bit_transposition() {
+    fn coefficients_reproduce_field_maps() {
         let mut state = 0x0f0f_1234_5678_9abc_def0_1122_3344_5566u128;
 
         let r_mix: Vec<Block128> = (0..7).map(|_| next(&mut state)).collect();
-        let eq_mix = eq_tensor_b(&r_mix);
-        let mu = linearized_coeffs(&eq_mix);
 
-        for _ in 0..8 {
-            let x = next(&mut state);
+        for ((field, _), mu) in FIELDS.into_iter().zip(linearized_coeffs(&maps(&r_mix))) {
+            for _ in 0..8 {
+                let x = next(&mut state);
 
-            let mut lin = Flat::from_raw(Block128::ZERO);
-            let mut power = x.to_hardware();
+                let mut lin = Flat::from_raw(Block128::ZERO);
+                let mut power = x.to_hardware();
 
-            for m in &mu {
-                lin += *m * power;
-                power = power * power;
+                for m in &mu {
+                    lin += *m * power;
+                    power = power * power;
+                }
+
+                assert_eq!(lin.to_tower(), phi(field, x, &r_mix), "{field:?}");
             }
-
-            assert_eq!(lin.to_tower(), ring_batch_b(&[x], &eq_mix));
         }
     }
 
@@ -391,17 +477,17 @@ mod tests {
         let mut state = 0x7777_8888_9999_aaaa_bbbb_cccc_dddd_eeeeu128;
 
         let r_mix: Vec<Block128> = (0..7).map(|_| next(&mut state)).collect();
-        let eq_mix = eq_tensor_b(&r_mix);
-        let mu = linearized_coeffs(&eq_mix);
+        let mu = linearized_coeffs(&maps(&r_mix));
 
-        let ring: Vec<(u32, Flat<Block128>)> = (0..5u32)
-            .map(|c| (c, next(&mut state).to_hardware()))
+        let ring: Vec<(u32, Flat<Block128>, usize)> = (0..7u32)
+            .map(|c| (c, next(&mut state).to_hardware(), c as usize % FIELDS.len()))
             .collect();
-        let pad: Vec<Flat<Block128>> = (0..5).map(|_| next(&mut state).to_hardware()).collect();
+
+        let pad: Vec<Flat<Block128>> = (0..7).map(|_| next(&mut state).to_hardware()).collect();
 
         let mut direct = Flat::from_raw(Block128::ZERO);
-        for (&(_, a), &h) in ring.iter().zip(&pad) {
-            direct += a * ring_batch_b(&[h.to_tower()], &eq_mix).to_hardware();
+        for (&(_, a, k), &h) in ring.iter().zip(&pad) {
+            direct += a * phi(FIELDS[k].0, h.to_tower(), &r_mix).to_hardware();
         }
 
         let gadget = RingGadget::new(ring, mu, 0);
@@ -437,11 +523,12 @@ mod tests {
         let mut state = 0xdead_beef_0bad_f00d_1357_9bdf_2468_ace0u128;
 
         let r_mix: Vec<Block128> = (0..7).map(|_| next(&mut state)).collect();
-        let mu = linearized_coeffs(&eq_tensor_b(&r_mix));
+        let mu = linearized_coeffs(&[(field_coeffs(ColumnType::Bit, &r_mix), 1)]);
 
-        let ring: Vec<(u32, Flat<Block128>)> = (0..7u32)
-            .map(|c| (c, next(&mut state).to_hardware()))
+        let ring: Vec<(u32, Flat<Block128>, usize)> = (0..7u32)
+            .map(|c| (c, next(&mut state).to_hardware(), 0))
             .collect();
+
         let pad: Vec<Flat<Block128>> = (0..7).map(|_| next(&mut state).to_hardware()).collect();
 
         let gadget = RingGadget::new(ring, mu, 0);
@@ -471,12 +558,16 @@ mod tests {
     #[test]
     fn tie_weights_equal_scaled_tie_rows() {
         let mut state = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210u128;
-        for len in [1u32, 9, 40] {
+        for len in [1u32, 9, 40, 700] {
             let r_mix: Vec<Block128> = (0..7).map(|_| next(&mut state)).collect();
-            let mu = linearized_coeffs(&eq_tensor_b(&r_mix));
+            let mu = linearized_coeffs(&maps(&r_mix));
 
-            let ring: Vec<(u32, Flat<Block128>)> = (0..len)
-                .map(|c| (3 * c + 1, next(&mut state).to_hardware()))
+            let ring: Vec<(u32, Flat<Block128>, usize)> = (0..len)
+                .map(|c| {
+                    let k = c as usize % FIELDS.len();
+
+                    (3 * c + 1, next(&mut state).to_hardware(), k)
+                })
                 .collect();
 
             let gadget = RingGadget::new(ring, mu, 0);
@@ -488,7 +579,7 @@ mod tests {
             let mut expected: Vec<(u32, Flat<Block128>)> = gadget
                 .ring
                 .iter()
-                .map(|&(pad, _)| (pad, Flat::from_raw(Block128::ZERO)))
+                .map(|&(pad, _, _)| (pad, Flat::from_raw(Block128::ZERO)))
                 .collect();
 
             gadget.for_each_tie_row(|j, tie| {

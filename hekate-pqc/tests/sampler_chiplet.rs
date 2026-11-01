@@ -148,7 +148,11 @@ impl Case {
             })
             .collect();
 
-        let rows = height(steps.iter().map(SamplerStep::rows).sum());
+        let rows = steps
+            .iter()
+            .map(SamplerStep::rows)
+            .sum::<usize>()
+            .next_power_of_two();
 
         Self {
             streams,
@@ -189,8 +193,8 @@ impl Case {
     }
 
     fn proof(&self, trace: ColumnTrace, calls: &[[u64; 25]], st: &Statement) -> Proof {
-        let host_rows = height(st.coefs.len().max(st.lanes.len()));
-        let keccak_rows = height(KeccakChiplet::BLOCK_ROWS * calls.len());
+        let host_rows = st.coefs.len().max(st.lanes.len()).next_power_of_two();
+        let keccak_rows = (KeccakChiplet::BLOCK_ROWS * calls.len()).next_power_of_two();
 
         let inputs: Vec<[Block64; 25]> = calls.iter().map(|c| c.map(Block64)).collect();
         let keccak = generate_keccak_trace(&inputs, keccak_rows).unwrap();
@@ -539,11 +543,6 @@ fn next(seed: &mut u64) -> u64 {
         .wrapping_add(1442695040888963407);
 
     *seed >> 33
-}
-
-fn height(rows: usize) -> usize {
-    rows.next_power_of_two()
-        .max(Config::prod().min_table_rows())
 }
 
 #[test]

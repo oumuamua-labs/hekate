@@ -50,7 +50,7 @@ fn generate_trace(words: &[u32], rows: usize) -> errors::Result<ColumnTrace> {
 }
 ```
 
-`rows` is a power of two above `words.len()` and at least `Config::default().min_table_rows()`. `new_secret` zeroizes
+`rows` is a power of two above `words.len()`. `new_secret` zeroizes
 the columns when the trace drops. The `hekate-program` README builds the circuit this trace satisfies.
 
 ## Features

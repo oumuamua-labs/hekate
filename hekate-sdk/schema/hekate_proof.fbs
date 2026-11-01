@@ -29,10 +29,10 @@ table Multiproof {
   unreached: [ubyte];
 }
 
-// ===== Brakedown Opening =====
+// ===== Fold Opening =====
 
-table BrakedownProof {
-  opened_columns: [ubyte];
+table TreeOpening {
+  leaves: [ubyte];
   multiproof: Multiproof;
 }
 
@@ -43,12 +43,14 @@ table PointEvaluation {
   column_values: [Block128];
 }
 
-table EvalBatchProof {
+table FoldEvalProof {
   sumcheck_proof: SumcheckProof;
-  ldt_proof: BrakedownProof;
-  tensor_vec: [Block128];
   masters: [Block128];
-  h_ldt_proof: BrakedownProof;
+  mask_masters: [Block128];
+  fold_rounds: [Block128];
+  round_roots: [ubyte];
+  final_layer: [Block128];
+  openings: [TreeOpening];
 }
 
 // ===== LogUp Auxiliary =====
@@ -86,7 +88,7 @@ table Proof {
   zerocheck_proof: SumcheckProof;
   main_logup_aux: LogUpAux;
   main_point_evaluation: PointEvaluation;
-  eval_proof: EvalBatchProof;
+  eval_proof: FoldEvalProof;
 
   // Chiplets (parallel arrays)
   chiplet_rows: [uint64];

@@ -24,7 +24,7 @@ type H = DefaultHasher;
 
 const MAGIC: u32 = 0xDEAD_BEEF;
 
-const NUM_VARS: usize = 4;
+const NUM_VARS: usize = 5;
 const NUM_ROWS: usize = 1 << NUM_VARS;
 
 // =========================================================
@@ -155,7 +155,8 @@ fn zk_config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
@@ -165,8 +166,8 @@ fn zk_config() -> Config {
 // Virtual Packing Eval Forgery
 //
 // Corrupt a virtual bit column evaluation in
-// the chiplet's point_evaluation. The TensorPCS
-// proximity check must catch the mismatch between
+// the chiplet's point_evaluation. The fold
+// must catch the mismatch between
 // claimed virtual values and the physically
 // committed trace data.
 // =========================================================
@@ -217,7 +218,7 @@ fn virtual_packing_eval_forgery_rejected() {
 //
 // Stage A:
 // With ZK enabled, the magic witness bytes must
-// NOT appear in chiplet LDT openings. The noise
+// NOT appear in the fold openings. The noise
 // generation path through parse_virtual_row must
 // mask the data.
 // =========================================================
@@ -231,10 +232,9 @@ fn virtual_expansion_witness_isolation() {
     let scan_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
         proof
             .eval_proof
-            .ldt_proof
-            .opened_columns
+            .openings
             .iter()
-            .any(|col| col.windows(needle.len()).any(|w| w == needle))
+            .any(|opening| opening.leaves.windows(needle.len()).any(|w| w == needle))
     };
 
     let config_zk = zk_config();
@@ -262,19 +262,19 @@ fn virtual_expansion_witness_isolation() {
 
     assert!(
         !scan_openings(&proof_zk),
-        "ZK enabled but witness bytes leaked in chiplet LDT openings",
+        "ZK enabled but witness bytes leaked in fold openings",
     );
 
-    // The non-systematic row code emits no verbatim
-    // column, no real leak exists to detect.
+    // The non-systematic code emits no verbatim
+    // cell, no real leak exists to detect.
     let mut planted = proof_zk.clone();
 
     let target = planted
         .eval_proof
-        .ldt_proof
-        .opened_columns
+        .openings
         .iter_mut()
-        .find(|col| col.len() >= needle.len())
+        .map(|opening| &mut opening.leaves)
+        .find(|leaves| leaves.len() >= needle.len())
         .expect("opening wide enough to hold the needle");
 
     target[..needle.len()].copy_from_slice(&needle);

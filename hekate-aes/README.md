@@ -33,7 +33,6 @@ AES-256 over a run of plaintext blocks under one key, with both chiplets attache
 ```rust
 use hekate_aes::trace::{Aes256Call, expand_key_256};
 use hekate_aes::{Aes256Chiplet, AesRound256Air, host_key_selector_shape, host_selector_shape};
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::ColumnTrace;
 use hekate_math::Block128;
@@ -56,9 +55,7 @@ fn encrypt(
     plaintexts: &[[u8; 16]],
 ) -> errors::Result<(CircuitProgram<F>, Vec<ColumnTrace>)> {
     let blocks = plaintexts.len();
-    let floor = Config::default().min_table_rows();
-
-    let rows = |per_block: usize| (per_block * blocks).next_power_of_two().max(floor);
+    let rows = |per_block: usize| (per_block * blocks).next_power_of_two();
 
     let aes = Aes256Chiplet::new(
         rows(AesRound256Air::BLOCK_ROWS),

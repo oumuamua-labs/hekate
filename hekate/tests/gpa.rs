@@ -154,8 +154,10 @@ fn logup_bus_divergence_rejected() {
     let witness = ProgramWitness::new(trace);
     let instance = ProgramInstance::new(num_rows, vec![]);
     let config = Config {
-        ldt_support_size: 4,
+        num_queries: 2,
         min_security_bits: 0,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     };
 

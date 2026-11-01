@@ -174,10 +174,11 @@ fn rom_cpu_linking() {
     let instance = ProgramInstance::new(num_rows, vec![]); // No public inputs
 
     let config = Config {
-        num_queries: 4,
+        num_queries: 2,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     };
 
@@ -276,7 +277,6 @@ fn rom_padding_transparency() {
 
     // Reads plaintext claimed sums
     let config = Config {
-        ldt_support_size: 4,
         min_security_bits: 0,
         zero_knowledge: false,
         ..Config::default()

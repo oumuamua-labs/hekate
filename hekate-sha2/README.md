@@ -25,7 +25,6 @@ cargo add hekate-sha2 hekate-core hekate-math hekate-program
 SHA-256 of one message, one compression per host row, with the chiplet attached as its own table:
 
 ```rust
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, TowerField};
@@ -38,17 +37,14 @@ type F = Block128;
 fn sha256(message: &[u8]) -> errors::Result<(CircuitProgram<F>, CpuSha256Block, Sha256Chiplet<F>)> {
     let blocks = pad_message(message).len();
     let rounds_per_row = 4;
-    let floor = Config::default().min_table_rows();
 
     let sha = Sha256Chiplet::<F>::new(
-        (blocks * ROUNDS / rounds_per_row)
-            .next_power_of_two()
-            .max(floor),
+        (blocks * ROUNDS / rounds_per_row).next_power_of_two(),
         blocks,
         rounds_per_row,
     )?;
 
-    let mut cx = Circuit::<F>::new("Host", blocks.next_power_of_two().max(floor))?;
+    let mut cx = Circuit::<F>::new("Host", blocks.next_power_of_two().max(2))?;
 
     let block = CpuSha256Block::declare(&mut cx, 0);
 

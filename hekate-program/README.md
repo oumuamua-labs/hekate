@@ -20,7 +20,6 @@ cargo add hekate-program hekate-core hekate-math
 A circuit that proves some private 32-bit words have a public XOR checksum:
 
 ```rust
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_math::{Block128, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
@@ -36,8 +35,8 @@ define_columns! {
     }
 }
 
-fn table_rows(config: &Config, words: usize) -> usize {
-    (words + 1).next_power_of_two().max(config.min_table_rows())
+fn table_rows(words: usize) -> usize {
+    (words + 1).next_power_of_two()
 }
 
 fn build_program(rows: usize, words: usize) -> errors::Result<CircuitProgram<F>> {

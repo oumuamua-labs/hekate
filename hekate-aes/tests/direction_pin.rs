@@ -149,6 +149,9 @@ fn unpinned_host_is_rejected_at_verify() {
     .with_chiplets(pinned.aes.generate_traces(&[call.clone(), call]).unwrap());
 
     let config = Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         zero_knowledge: true,
         ..Config::dev()
     };

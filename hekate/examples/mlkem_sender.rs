@@ -449,12 +449,11 @@ where
     );
 
     let config = args.config();
-    let floor = config.min_table_rows();
 
     let pipeline = MlKemChiplet::<F>::new(params, &[MlKemCall::Encaps]).expect("pipeline build");
     let aes = Aes256Chiplet::new(
-        (blocks * AES_ROWS).next_power_of_two().max(floor),
-        (blocks * SBOX_ROUNDS).next_power_of_two().max(floor),
+        (blocks * AES_ROWS).next_power_of_two(),
+        (blocks * SBOX_ROUNDS).next_power_of_two(),
         blocks,
     )
     .expect("aes build");

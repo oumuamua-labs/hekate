@@ -269,7 +269,8 @@ fn run_lookup(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     };
 
@@ -310,7 +311,8 @@ fn run_rank(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: false,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     };
 

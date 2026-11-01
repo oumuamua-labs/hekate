@@ -5,9 +5,10 @@
 use crate::chiplet::ChipletDef;
 use crate::constraint::{BoundaryConstraint, ConstraintAst, ConstraintExpr, ExprId};
 use crate::expander::{
-    EVAL_SUMCHECK_DEGREE, PoolLayout, RING_BLIND_BITS, RingSwitchPlan, SlotLayout, claim_weights,
-    eq_tensor_b,
+    ClaimBinding, EVAL_SUMCHECK_DEGREE, RING_BLIND_BITS, RingSwitchPlan, claim_weights, field_bits,
+    field_coeffs,
 };
+use crate::fold_pool::{FoldPool, PoolTable};
 use crate::linearized::{self, RingGadget, linearized_coeffs};
 use crate::permutation::{
     BUS_LIMBS, BusColumn, BusElement, BusField, BusFraction, BusGroup, BusValue,
@@ -25,6 +26,7 @@ use hekate_core::errors;
 use hekate_core::outer::{OUTER_MASK_ROWS, OuterGeometry};
 use hekate_core::poly::univariate::{MAX_POINTS, UnivariatePoly};
 use hekate_core::tensor::TensorProduct;
+use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
 
 /// Hadamard wires of one GF(2^256) product.
@@ -137,7 +139,8 @@ pub struct TableShape {
     pub bus_wires: usize,
 
     pub mul_nodes: usize,
-    pub ring_units: bool,
+    pub expands_bits: bool,
+    pub subfield_units: bool,
     pub whole_blinds: usize,
 }
 
@@ -190,7 +193,8 @@ impl TableShape {
             bus_columns: columns.len(),
             bus_wires,
             mul_nodes: mul_node_count(ast),
-            ring_units: plan.has_ring(),
+            expands_bits: plan.expands_bits(),
+            subfield_units: plan.has_subfield_units(),
             whole_blinds: 0,
         })
     }
@@ -200,23 +204,34 @@ impl TableShape {
         BUS_LIMBS * self.bus_columns
     }
 
-    pub fn at(self, layout: &SlotLayout) -> Self {
+    pub fn at(self, table: &PoolTable) -> Self {
         Self {
-            num_vars: layout.num_vars,
-            whole_blinds: layout.plan.whole_blinds(),
+            num_vars: table.num_vars,
+            expands_bits: table.plan.expands_bits(),
+            subfield_units: table.plan.has_subfield_units(),
+            whole_blinds: table.plan.whole_blinds(),
             ..self
         }
     }
 
-    /// Eval claims per half: virtual columns, whole blind
-    /// units, the ring blind unit's planes, every `h` limb.
+    /// Whole blinds of the helper polynomial, one per
+    /// trace whole blind when the table carries a bus.
+    pub fn h_blinds(&self) -> usize {
+        match self.bus_columns > 0 {
+            true => self.whole_blinds,
+            false => 0,
+        }
+    }
+
+    /// Eval claims per half: virtual columns, whole blind units,
+    /// the ring blind unit's planes, every `h` limb, `h`'s blinds.
     pub fn eval_claims(&self) -> usize {
-        let ring_blind = match self.ring_units && self.whole_blinds > 0 {
+        let ring_blind = match self.expands_bits && self.whole_blinds > 0 {
             true => RING_BLIND_BITS,
             false => 0,
         };
 
-        self.num_columns + self.whole_blinds + ring_blind + self.h_columns()
+        self.num_columns + self.whole_blinds + ring_blind + self.h_columns() + self.h_blinds()
     }
 
     /// Final sumcheck values are the masked running
@@ -271,7 +286,7 @@ impl OuterStatement {
         let tables: usize = shapes.iter().map(TableShape::masked_scalars).sum();
         let wires: usize = shapes.iter().map(TableShape::mul_wires).sum();
 
-        let gadget = match shapes.iter().any(|s| s.ring_units) {
+        let gadget = match shapes.iter().any(|s| s.subfield_units) {
             true => linearized::BITS - 1,
             false => 0,
         };
@@ -320,15 +335,15 @@ impl OuterStatement {
             .map(|(plan, &num_vars)| (plan, num_vars))
             .collect();
 
-        let pool = PoolLayout::new(&heights, F::BITS, config);
+        let pool = FoldPool::new(&heights, config)?;
 
         let shapes: Vec<TableShape> = shapes
             .into_iter()
-            .zip(&pool.tables)
-            .map(|(shape, layout)| shape.at(layout))
+            .zip(pool.tables())
+            .map(|(shape, table)| shape.at(table))
             .collect();
 
-        Ok(Self::new(&shapes, pool.num_vars()))
+        Ok(Self::new(&shapes, pool.layout().num_vars()))
     }
 }
 
@@ -438,12 +453,18 @@ pub struct TableRecord<'s, F> {
     /// `(group, limb, pad, masked limb)` per claimed-sum limb.
     pub claimed_sums: Vec<(BusGroup, usize, u32, Flat<F>)>,
 
+    pub bindings: Vec<ClaimBinding>,
+
     pub shape: TableShape,
 }
 
 impl<F: TowerField + HardwareField> TableRecord<'_, F> {
     fn affine_rows(&self) -> usize {
-        2 * self.shape.mul_wires() + 1 + self.shape.h_columns() + self.fixed.len()
+        2 * self.shape.mul_wires()
+            + 1
+            + self.shape.h_columns()
+            + self.fixed.len()
+            + 2 * self.bindings.len()
     }
 
     /// `f` on each row after the predicate rows, in statement order;
@@ -463,7 +484,7 @@ impl<F: TowerField + HardwareField> TableRecord<'_, F> {
         }
 
         let half = (self.claims_masked.len() / 2) as u32;
-        let first_h = half - self.shape.h_columns() as u32;
+        let first_h = half - (self.shape.h_columns() + self.shape.h_blinds()) as u32;
 
         for (c, column) in consistency.buses.iter().enumerate() {
             for j in 0..BUS_LIMBS {
@@ -474,6 +495,17 @@ impl<F: TowerField + HardwareField> TableRecord<'_, F> {
                     column.h_masked[j],
                     pad_first + claim,
                     claim,
+                ));
+            }
+        }
+
+        for binding in &self.bindings {
+            for offset in [0, half] {
+                f(plane_binding_row(
+                    pad_first,
+                    binding.whole as u32 + offset,
+                    binding.first as u32 + offset,
+                    binding.width,
                 ));
             }
         }
@@ -505,7 +537,7 @@ pub struct TablePads {
 
 /// Public data of the pool's eval sumcheck on masked claims.
 pub struct EvalInputs<'a, F> {
-    pub pool: &'a PoolLayout,
+    pub pool: &'a FoldPool,
     pub eta: F,
     pub rho: &'a [F],
     pub r_mix: &'a [Block128],
@@ -538,6 +570,7 @@ pub struct TableInputs<'a, 's, F: TowerField> {
     pub h_evals_masked: &'a [F],
     pub val_final_masked: Flat<F>,
     pub claims_masked: Vec<Flat<F>>,
+    pub bindings: Vec<ClaimBinding>,
 
     pub pads: TablePads,
 }
@@ -729,7 +762,7 @@ impl<F: TowerField + HardwareField> Sweep<F> {
 }
 
 pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
-    pool: &PoolLayout,
+    pool: &FoldPool,
     eta: F,
     rho: &[F],
     r_mix: &[Block128],
@@ -737,16 +770,15 @@ pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
     claim_pads: &[u32],
     first_wire: u32,
 ) -> errors::Result<InitialForm<F>> {
-    let mut weights = Vec::with_capacity(claim_pads.len());
-    for layout in &pool.tables {
-        let rho = rho
-            .get(..layout.pack_vars())
-            .ok_or(errors::Error::Protocol {
-                protocol: "outer",
-                message: "fewer block challenges than a table packs",
-            })?;
+    let flat = |x: F| Into::<Block128>::into(x).to_hardware();
 
-        weights.extend(claim_weights(layout, eta, rho, shifted_claims)?);
+    let rho: Vec<Flat<Block128>> = rho.iter().map(|&r| flat(r)).collect();
+
+    let mut weights = Vec::with_capacity(claim_pads.len());
+    for (i, table) in pool.tables().iter().enumerate() {
+        let unit_weights = pool.unit_weights(i, flat(eta), &rho)?;
+
+        weights.extend(claim_weights(&table.plan, &unit_weights, shifted_claims));
     }
 
     if weights.len() != claim_pads.len() {
@@ -758,22 +790,43 @@ pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
 
     let mut form = Vec::new();
     let mut ring = Vec::new();
+    let mut fields: Vec<ColumnType> = Vec::new();
 
-    for ((is_ring, weight), &pad) in weights.iter().zip(claim_pads) {
+    for (&(field, weight), &pad) in weights.iter().zip(claim_pads) {
         let a: Flat<F> = F::from(weight.0).to_hardware();
-        match is_ring {
-            true => ring.push((pad, a)),
-            false => form.push((Unknown::Pad(pad), a)),
+
+        if field == ColumnType::B128 {
+            form.push((Unknown::Pad(pad), a));
+            continue;
         }
+
+        let k = match fields.iter().position(|&f| f == field) {
+            Some(k) => k,
+            None => {
+                fields.push(field);
+                fields.len() - 1
+            }
+        };
+
+        ring.push((pad, a, k));
     }
 
     if ring.is_empty() {
         return Ok(InitialForm { form, gadget: None });
     }
 
-    let mu: Vec<Flat<F>> = linearized_coeffs(&eq_tensor_b(r_mix))
+    let maps: Vec<(Vec<Block128>, usize)> = fields
         .iter()
-        .map(|m| F::from(m.to_tower().0).to_hardware())
+        .map(|&field| (field_coeffs(field, r_mix), field_bits(field)))
+        .collect();
+
+    let mu: Vec<Vec<Flat<F>>> = linearized_coeffs(&maps)
+        .iter()
+        .map(|mu| {
+            mu.iter()
+                .map(|m| F::from(m.to_tower().0).to_hardware())
+                .collect()
+        })
         .collect();
 
     let gadget = RingGadget::new(ring, mu, first_wire);
@@ -982,6 +1035,7 @@ where
         consistency,
         fixed,
         claimed_sums,
+        bindings: inputs.bindings,
         shape,
     })
 }
@@ -1269,6 +1323,32 @@ pub fn h_claim_pin_row<F: TowerField + HardwareField>(
     }
 }
 
+pub fn plane_binding_row<F: TowerField + HardwareField>(
+    pad_first: u32,
+    whole: u32,
+    first: u32,
+    width: usize,
+) -> AffineRow<F> {
+    let mut row = AffineRow {
+        unknowns: Vec::with_capacity(width + 1),
+        claims: Vec::with_capacity(width + 1),
+        constant: Flat::from_raw(F::ZERO),
+    };
+
+    push_claim(&mut row, pad_first, whole, Flat::from_raw(F::ONE));
+
+    for v in 0..width {
+        push_claim(
+            &mut row,
+            pad_first,
+            first + v as u32,
+            F::from(1u128 << v).to_hardware(),
+        );
+    }
+
+    row
+}
+
 /// `Σ claimed_sum = 0` over one bus group and limb:
 /// `(pad, masked sum)` per column.
 pub fn bus_sum_row<F: TowerField + HardwareField>(endpoints: &[(u32, Flat<F>)]) -> AffineRow<F> {
@@ -1489,7 +1569,7 @@ pub fn table_plan<F: TowerField>(
 /// the eval's batch draw and rounds, the outer argument in ZK mode.
 pub fn check_draws<'s, F, I>(
     config: &Config,
-    pool: &PoolLayout,
+    pool: &FoldPool,
     tables: I,
 ) -> errors::Result<DrawBits>
 where
@@ -1508,7 +1588,7 @@ where
     let shapes: Vec<TableShape> = tables.clone().map(|(_, shape)| shape).collect();
 
     let mut zerocheck_events: u128 = 0;
-    let mut degree: u128 = 0;
+    let mut sumcheck_events: u128 = 0;
 
     for (statics, shape) in tables {
         let terms = statics.ast.roots.len()
@@ -1516,11 +1596,13 @@ where
             + config.blind_units()
             + 2 * shape.h_columns();
 
+        let round = shape.sumcheck_degree + usize::from(shape.subfield_units);
+
         zerocheck_events = zerocheck_events.max((terms + shape.num_vars) as u128);
-        degree = degree.max(shape.sumcheck_degree as u128);
+        sumcheck_events = sumcheck_events.max(round as u128);
     }
 
-    let mix = match pool.tables.iter().any(|t| t.plan.has_ring()) {
+    let mix = match pool.has_subfield_units() {
         true => F::BITS.ilog2() as usize,
         false => 0,
     };
@@ -1532,13 +1614,13 @@ where
 
     config.check_draw("bus draw", BusElement::BITS, bus_events)?;
     config.check_draw("zerocheck draw", F::BITS, zerocheck_events)?;
-    config.check_draw("sumcheck round", F::BITS, degree)?;
+    config.check_draw("sumcheck round", F::BITS, sumcheck_events)?;
     config.check_draw("eval batch draw", F::BITS, batch_events)?;
     config.check_draw("eval sumcheck round", F::BITS, round_events)?;
 
     let outer = match config.zero_knowledge {
         true => {
-            let statement = OuterStatement::new(&shapes, pool.num_vars());
+            let statement = OuterStatement::new(&shapes, pool.layout().num_vars());
             let geom = config.outer_geom(statement.masked_scalars, statement.mul_wires, F::BITS)?;
 
             Some(
@@ -1553,7 +1635,7 @@ where
     Ok(DrawBits {
         bus: config.draw_bits(BusElement::BITS, bus_events),
         zerocheck: config.draw_bits(F::BITS, zerocheck_events),
-        sumcheck: config.draw_bits(F::BITS, degree),
+        sumcheck: config.draw_bits(F::BITS, sumcheck_events),
         eval_batch: config.draw_bits(F::BITS, batch_events),
         eval_round: config.draw_bits(F::BITS, round_events),
         outer,
@@ -1987,7 +2069,8 @@ mod tests {
             bus_columns: buses,
             bus_wires: KARATSUBA_WIRES * buses,
             mul_nodes: 0,
-            ring_units: false,
+            expands_bits: false,
+            subfield_units: false,
             whole_blinds: 0,
         }
     }
@@ -2094,6 +2177,7 @@ mod tests {
             claimed_sums: (0..BUS_LIMBS)
                 .map(|j| (BusGroup::Permutation, j, j as u32, mix(7 + j as u128)))
                 .collect(),
+            bindings: Vec::new(),
             shape: TableShape {
                 mul_nodes,
                 ..shape(1, 2, 3, 1)
@@ -2198,11 +2282,10 @@ mod tests {
         }
     }
 
-    fn empty_pool() -> PoolLayout {
-        PoolLayout {
-            split_vars: 0,
-            tables: Vec::new(),
-        }
+    fn pool_of(columns: usize, field: ColumnType) -> FoldPool {
+        let plan = RingSwitchPlan::new(&vec![field; columns], None, 0, 0).unwrap();
+
+        FoldPool::new(&[(&plan, 4)], &raw_at(0)).unwrap()
     }
 
     fn weighted_record(
@@ -2289,6 +2372,7 @@ mod tests {
                     })
                 })
                 .collect(),
+            bindings: Vec::new(),
             shape: TableShape {
                 num_vars: 3,
                 num_columns: columns as usize,
@@ -2296,7 +2380,8 @@ mod tests {
                 bus_columns: buses as usize,
                 bus_wires: (0..buses).map(wires).sum(),
                 mul_nodes,
-                ring_units: false,
+                expands_bits: false,
+                subfield_units: false,
                 whole_blinds: 0,
             },
         }
@@ -2310,11 +2395,15 @@ mod tests {
             .collect();
 
         let entries = (0..4)
-            .map(|c| (base + 6 + c, mix(seed + 50 + c as u128)))
+            .map(|c| (base + 6 + c, mix(seed + 50 + c as u128), c as usize % 2))
             .collect();
 
-        let mu = (0..linearized::BITS as u128)
-            .map(|j| mix(seed + 100 + j))
+        let mu = (0..2u128)
+            .map(|k| {
+                (0..linearized::BITS as u128)
+                    .map(|j| mix(seed + 100 + 200 * k + j))
+                    .collect()
+            })
             .collect();
 
         let gadget = RingGadget::new(entries, mu, first_wire);
@@ -2404,10 +2493,10 @@ mod tests {
     }
 
     #[test]
-    fn ring_units_add_one_squaring_chain() {
+    fn subfield_units_add_one_squaring_chain() {
         let plain = shape(12, 100, 3, 0);
         let ring = TableShape {
-            ring_units: true,
+            subfield_units: true,
             ..plain
         };
 
@@ -2422,7 +2511,7 @@ mod tests {
     fn ring_blind_planes_are_masked_only_under_blinding() {
         let plain = shape(12, 100, 3, 0);
         let ring = TableShape {
-            ring_units: true,
+            expands_bits: true,
             ..plain
         };
 
@@ -2542,11 +2631,13 @@ mod tests {
         };
 
         let claimed_sum_and_h_eval = 2 * BUS_LIMBS;
+
         let h_claim_halves = 2 * BUS_LIMBS;
+        let h_blind_halves = 2 * with_bus.whole_blinds;
 
         assert_eq!(
             with_bus.masked_scalars() - without.masked_scalars(),
-            claimed_sum_and_h_eval + h_claim_halves
+            claimed_sum_and_h_eval + h_claim_halves + h_blind_halves
         );
     }
 
@@ -2560,7 +2651,8 @@ mod tests {
 
             let claimed_sums_and_h_evals = 2 * BUS_LIMBS * 3;
             let zerocheck_rounds = 12 * 5;
-            let claims = 2 * (1977 + whole_blinds + BUS_LIMBS * 3);
+            let h_blinds = whole_blinds;
+            let claims = 2 * (1977 + whole_blinds + BUS_LIMBS * 3 + h_blinds);
 
             assert_eq!(
                 s.masked_scalars(),
@@ -2871,43 +2963,50 @@ mod tests {
             h[1] + pad[BUS_H_PAD as usize + 1],
         ];
 
-        for j in 0..BUS_LIMBS {
-            let claim = H_CLAIM + j;
-            let h_pad = BUS_H_PAD + j as u32;
+        for whole_blinds in [0, 1] {
+            let half = 4 + 2 * whole_blinds;
+            for j in 0..BUS_LIMBS {
+                let claim = H_CLAIM + whole_blinds + j;
+                let h_pad = BUS_H_PAD + j as u32;
 
-            let pin_form = [
-                (Unknown::Pad(h_pad), one),
-                (Unknown::Pad(BUS_PAD_FIRST + claim as u32), one),
-            ];
+                let pin_form = [
+                    (Unknown::Pad(h_pad), one),
+                    (Unknown::Pad(BUS_PAD_FIRST + claim as u32), one),
+                ];
 
-            for (h_claim, honest) in [(h[j], true), (h[j] + one, false)] {
-                let mut plain: Vec<Flat<F>> = (0..8).map(|i| mix(200 + i)).collect();
-                plain[claim] = h_claim;
+                for (h_claim, honest) in [(h[j], true), (h[j] + one, false)] {
+                    let mut plain: Vec<Flat<F>> =
+                        (0..2 * half).map(|i| mix(200 + i as u128)).collect();
 
-                let claims_masked = masked(&plain, &pad);
+                    plain[claim] = h_claim;
 
-                let ast = bus_ast();
-                let record = bus_record(&ast, claims_masked.clone(), h_masked);
-                let statement = OuterStatement {
-                    masked_scalars: 32,
-                    mul_wires: record.shape.mul_wires(),
-                };
+                    let claims_masked = masked(&plain, &pad);
+                    let ast = bus_ast();
 
-                let records = [record];
-                let eval = eval_without_gadget();
-                let rows = assemble(&records, &eval, &statement).unwrap();
-                let pins: Vec<&AffineRow<F>> = rows
-                    .affine
-                    .iter()
-                    .filter(|r| r.unknowns == pin_form)
-                    .collect();
+                    let mut record = bus_record(&ast, claims_masked.clone(), h_masked);
+                    record.shape.whole_blinds = whole_blinds;
 
-                assert_eq!(pins.len(), 1, "one pin row per limb");
-                assert_eq!(pins[0].constant, h_masked[j] + claims_masked[claim]);
+                    let statement = OuterStatement {
+                        masked_scalars: 32,
+                        mul_wires: record.shape.mul_wires(),
+                    };
 
-                let left = pad[h_pad as usize] + pad[BUS_PAD_FIRST as usize + claim];
+                    let records = [record];
+                    let eval = eval_without_gadget();
+                    let rows = assemble(&records, &eval, &statement).unwrap();
+                    let pins: Vec<&AffineRow<F>> = rows
+                        .affine
+                        .iter()
+                        .filter(|r| r.unknowns == pin_form)
+                        .collect();
 
-                assert_eq!(left == pins[0].constant, honest);
+                    assert_eq!(pins.len(), 1, "{whole_blinds} whole blinds, limb {j}");
+                    assert_eq!(pins[0].constant, h_masked[j] + claims_masked[claim]);
+
+                    let left = pad[h_pad as usize] + pad[BUS_PAD_FIRST as usize + claim];
+
+                    assert_eq!(left == pins[0].constant, honest);
+                }
             }
         }
     }
@@ -3060,10 +3159,11 @@ mod tests {
         let none = empty_ast();
         let specs = one_bus();
 
-        let empty = empty_pool();
-        let plan = RingSwitchPlan::new(&[ColumnType::B32], None, 0, 0).unwrap();
-        let packed = PoolLayout::at_split(&[(&plan, 4)], 6);
+        let empty = pool_of(1, ColumnType::B128);
+        let packed = pool_of(4, ColumnType::B128);
+        let narrow = pool_of(1, ColumnType::B32);
 
+        assert_eq!((empty.num_sigma(), empty.rho_vars()), (1, 0));
         assert_eq!((packed.num_sigma(), packed.rho_vars()), (1, 2));
 
         let cases = [
@@ -3093,11 +3193,30 @@ mod tests {
             ),
             (
                 statics(&none, &[]),
+                TableShape {
+                    subfield_units: true,
+                    ..shape(1, 1, 1, 0)
+                },
+                &empty,
+                128,
+                "sumcheck round",
+                127,
+            ),
+            (
+                statics(&none, &[]),
                 shape(1, 1, 1, 0),
                 &packed,
                 127,
                 "eval batch draw",
                 126,
+            ),
+            (
+                statics(&none, &[]),
+                shape(1, 1, 1, 0),
+                &narrow,
+                126,
+                "eval batch draw",
+                125,
             ),
             (
                 statics(&none, &[]),
@@ -3129,7 +3248,7 @@ mod tests {
 
         let draws = check_draws(
             &raw_at(100),
-            &empty_pool(),
+            &pool_of(1, ColumnType::B128),
             [
                 (statics(&roots, &specs), shape(4, 3, 3, 1)),
                 (statics(&none, &[]), shape(1, 1, 5, 0)),
@@ -3160,11 +3279,11 @@ mod tests {
             ..raw_at(0)
         };
 
-        let draws = check_draws(&zk, &empty_pool(), table).unwrap();
+        let draws = check_draws(&zk, &pool_of(1, ColumnType::B128), table).unwrap();
 
         assert!(draws.outer.is_some());
         assert!(
-            check_draws(&raw_at(0), &empty_pool(), table)
+            check_draws(&raw_at(0), &pool_of(1, ColumnType::B128), table)
                 .unwrap()
                 .outer
                 .is_none()

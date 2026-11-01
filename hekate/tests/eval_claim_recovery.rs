@@ -85,7 +85,6 @@ fn recover_from_proof(zero_knowledge: bool) -> (F, F) {
 
     let config = Config {
         zero_knowledge,
-        ldt_support_size: 4,
         num_queries: 4,
         min_security_bits: 0,
         ..Config::default()

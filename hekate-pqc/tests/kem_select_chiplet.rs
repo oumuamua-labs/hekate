@@ -79,7 +79,8 @@ impl Case {
         }
 
         Case {
-            chiplet: KemSelectChiplet::new(vec![step.clone()], height(step.rows())).unwrap(),
+            chiplet: KemSelectChiplet::new(vec![step.clone()], step.rows().next_power_of_two())
+                .unwrap(),
             step,
             c: ct,
             c_prime: ct_prime,
@@ -143,7 +144,7 @@ impl Case {
     }
 
     fn proof(&self, trace: ColumnTrace, tokens: &[(u16, u16, u32)]) -> Proof {
-        let rows = height(tokens.len());
+        let rows = tokens.len().next_power_of_two();
         let mut cx = Circuit::<F>::new("KemSelectHost", rows).unwrap();
 
         let cols = cx.schema(&HOST_LAYOUT);
@@ -254,11 +255,6 @@ fn set_bit(trace: &mut ColumnTrace, col: usize, row: usize, on: bool) {
     };
 
     cells[row] = Bit::from(on as u8);
-}
-
-fn height(rows: usize) -> usize {
-    rows.next_power_of_two()
-        .max(Config::prod().min_table_rows())
 }
 
 fn junk(i: usize) -> u32 {
