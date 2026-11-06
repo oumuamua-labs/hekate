@@ -7,7 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use hekate_crypto::merkle::{MerkleTree, Tag};
 #[cfg(feature = "parallel")]
 use hekate_crypto::merkle::{hash_symbol_leaf, hash_symbol_leaves};
-use hekate_crypto::{DefaultHasher, Hasher, default_hasher_name};
+use hekate_crypto::{DefaultHasher, Digest, Hasher, default_hasher_name};
 use hekate_math::Block128;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 #[cfg(feature = "parallel")]
@@ -24,13 +24,14 @@ const BATCH: usize = 64;
 const LEAF_RUN: usize = 128;
 
 #[cfg(feature = "parallel")]
-const NODE_BYTES: usize = 65;
+const NODE_BYTES: usize = 2 * D::BYTES + 1;
 
 type H = DefaultHasher;
+type D = <H as Hasher>::Digest;
 type F = Block128;
 
 #[inline(always)]
-fn hash_leaf(payload: &[u8]) -> [u8; 32] {
+fn hash_leaf(payload: &[u8]) -> D {
     let mut h = H::new();
     h.update(payload);
     h.update(&[Tag::PoolLeaf as u8]);
@@ -39,24 +40,24 @@ fn hash_leaf(payload: &[u8]) -> [u8; 32] {
 }
 
 #[inline(always)]
-fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+fn hash_node(left: &D, right: &D) -> D {
     let mut h = H::new();
-    h.update(left);
-    h.update(right);
+    h.update(left.as_ref());
+    h.update(right.as_ref());
     h.update(&[Tag::Node as u8]);
 
     h.finalize()
 }
 
-fn build_leaves(num_leaves: usize) -> Vec<[u8; 32]> {
+fn build_leaves(num_leaves: usize) -> Vec<D> {
     let mut rng = StdRng::seed_from_u64(42);
 
     // We intentionally keep the per-leaf
     // payload small here. The Merkle tree
-    // itself only sees 32-byte leaf hashes.
+    // itself only sees leaf hashes.
     let mut payload = [0u8; 32];
-
     let mut leaves = Vec::with_capacity(num_leaves);
+
     for _ in 0..num_leaves {
         rng.fill_bytes(&mut payload);
         leaves.push(hash_leaf(&payload));
@@ -84,7 +85,7 @@ fn bench_merkle_hashing(c: &mut Criterion) {
         );
     }
 
-    group.throughput(Throughput::Bytes((32 + 32 + 1) as u64));
+    group.throughput(Throughput::Bytes((2 * D::BYTES + 1) as u64));
     group.bench_function("node_hash", |b| {
         let left = hash_leaf(b"left");
         let right = hash_leaf(b"right");
@@ -188,7 +189,7 @@ fn bench_batched_leaves(c: &mut Criterion) {
     let mut symbols = vec![0u8; count * LEAF_RUN];
     StdRng::seed_from_u64(42).fill_bytes(&mut symbols);
 
-    let mut leaves = vec![[0u8; 32]; count];
+    let mut leaves = vec![D::ZERO; count];
 
     group.bench_with_input(
         BenchmarkId::new("per_leaf", BATCH_VARS),
@@ -237,7 +238,7 @@ fn bench_batched_nodes(c: &mut Criterion) {
     let mut preimages = vec![0u8; count * NODE_BYTES];
     StdRng::seed_from_u64(42).fill_bytes(&mut preimages);
 
-    let mut digests = vec![[0u8; 32]; count];
+    let mut digests = vec![D::ZERO; count];
 
     group.bench_with_input(
         BenchmarkId::new("digest", BATCH_VARS),

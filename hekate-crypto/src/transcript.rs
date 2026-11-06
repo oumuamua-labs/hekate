@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::{DefaultHasher, Hasher};
+use crate::{DefaultHasher, Digest, Hasher};
 use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
@@ -44,7 +44,7 @@ impl fmt::Display for Error {
 pub enum TranscriptOp {
     AppendMessage {
         label: &'static [u8],
-        digest: [u8; 32],
+        digest: Vec<u8>,
     },
     AppendU64 {
         label: &'static [u8],
@@ -52,12 +52,12 @@ pub enum TranscriptOp {
     },
     AppendField {
         label: &'static [u8],
-        digest: [u8; 32],
+        digest: Vec<u8>,
     },
     AppendFieldList {
         label: &'static [u8],
         count: u64,
-        digest: [u8; 32],
+        digest: Vec<u8>,
     },
     ChallengeField {
         label: &'static [u8],
@@ -174,7 +174,7 @@ impl<H: Hasher> Transcript<H> {
                 let mut digest_h = H::new();
                 digest_h.update_fields(elements.iter().copied());
 
-                digest_h.finalize()
+                digest_h.finalize().as_ref().to_vec()
             },
         });
     }
@@ -189,11 +189,11 @@ impl<H: Hasher> Transcript<H> {
         #[cfg(feature = "transcript-trace")]
         self.trace.push(TranscriptOp::ChallengeField { label });
 
-        Self::bytes_to_field(&digest)
+        Self::bytes_to_field(digest.as_ref())
     }
 
-    /// Draws `count` indices below `bound`, four per digest:
-    /// each 8-byte little-endian word modulo `bound`.
+    /// Draws `count` indices below `bound`, one per 8-byte
+    /// little-endian word of each digest, modulo `bound`.
     /// Errors with `EmptyIndexRange` if `bound` is zero.
     pub fn challenge_indices(
         &mut self,
@@ -212,6 +212,7 @@ impl<H: Hasher> Transcript<H> {
 
             indices.extend(
                 digest
+                    .as_ref()
                     .as_chunks::<8>()
                     .0
                     .iter()
@@ -231,7 +232,7 @@ impl<H: Hasher> Transcript<H> {
 
     fn bytes_to_field<F: TowerField>(bytes: &[u8]) -> Result<F> {
         let size = size_of::<F>();
-        let max_entropy_bytes = 32;
+        let max_entropy_bytes = H::Digest::BYTES;
 
         if size > max_entropy_bytes {
             return Err(Error::FieldTooLargeForChallenge {
@@ -253,12 +254,12 @@ impl<H: Hasher> Transcript<H> {
         Ok(elem)
     }
 
-    fn squeeze(&mut self, label: &'static [u8]) -> [u8; 32] {
+    fn squeeze(&mut self, label: &'static [u8]) -> H::Digest {
         self.absorb_label(label);
 
         let digest = self.hasher.clone().finalize();
 
-        self.hasher.update(&digest);
+        self.hasher.update(digest.as_ref());
 
         digest
     }
@@ -274,11 +275,11 @@ impl<H: Hasher> Transcript<H> {
 }
 
 #[cfg(feature = "transcript-trace")]
-fn payload_digest<H: Hasher>(bytes: &[u8]) -> [u8; 32] {
+fn payload_digest<H: Hasher>(bytes: &[u8]) -> Vec<u8> {
     let mut h = H::new();
     h.update(bytes);
 
-    h.finalize()
+    h.finalize().as_ref().to_vec()
 }
 
 #[cfg(test)]
@@ -286,13 +287,15 @@ mod tests {
     use super::*;
     use hekate_math::{Block128, CanonicalSerialize};
 
+    type D = <DefaultHasher as Hasher>::Digest;
+
     #[derive(Clone, Debug)]
     struct Recorder {
         bytes: Vec<u8>,
     }
 
     impl Hasher for Recorder {
-        const OUTPUT_SIZE: usize = 32;
+        type Digest = D;
 
         fn new() -> Self {
             Self { bytes: Vec::new() }
@@ -302,11 +305,11 @@ mod tests {
             self.bytes.extend_from_slice(data);
         }
 
-        fn finalize(self) -> [u8; 32] {
+        fn finalize(self) -> D {
             DefaultHasher::digest(&self.bytes)
         }
 
-        fn finalize_reset(&mut self) -> [u8; 32] {
+        fn finalize_reset(&mut self) -> D {
             DefaultHasher::digest(&core::mem::take(&mut self.bytes))
         }
     }
@@ -345,17 +348,18 @@ mod tests {
         expected.extend_from_slice(b"alpha\0\0\0");
 
         let digest = DefaultHasher::digest(&expected);
-        expected.extend_from_slice(&digest);
+        expected.extend_from_slice(digest.as_ref());
 
         let mut words = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..5usize.div_ceil(D::BYTES / 8) {
             expected.extend_from_slice(b"idx\0\0\0\0\0");
 
             let digest = DefaultHasher::digest(&expected);
-            expected.extend_from_slice(&digest);
+            expected.extend_from_slice(digest.as_ref());
 
             words.extend(
                 digest
+                    .as_ref()
                     .as_chunks::<8>()
                     .0
                     .iter()
