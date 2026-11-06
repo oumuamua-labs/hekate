@@ -4,9 +4,7 @@
 
 use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block16, Block32, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block16, Block32, Block256, HardwareField, TowerField};
 use hekate_pqc::codec::{CodecChiplet, CodecForgery, CodecStep};
 use hekate_pqc::mldsa::{self, MlDsaParams};
 use hekate_pqc::mlkem::{self, MlKemParams};
@@ -15,18 +13,18 @@ use hekate_pqc::wiring::{
     coef_spec, hint_spec, word_spec,
 };
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::{TableId, preflight};
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies, verdict};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 const T1_BITS: usize = 10;
 const KEM_BITS: usize = 12;
+
+const CODEC: TableId = TableId::Chiplet(0);
 
 const HOST_LAYOUT: [ColumnType; 11] = [
     ColumnType::B16,
@@ -232,6 +230,31 @@ impl DsaCase {
 
         st
     }
+
+    fn honest(&self, enc: &DsaEncoding) -> Proof {
+        let mut words = enc.words(self);
+        let mut values = PolyValues::default();
+
+        let (trace, _) = self.chiplet.trace(&mut words, &mut values).unwrap();
+        let st = self.accomplice(&words, &values, &trace);
+
+        Proof::new(&self.chiplet, trace, &st)
+    }
+
+    fn twin(&self, forged: &ColumnTrace) -> Proof {
+        let mut hints = vec![[false; N]; self.params.k()];
+        for (poly, pos) in emitted(&self.chiplet, forged) {
+            match poly {
+                0 => {}
+                _ => hints[poly as usize - 1][pos as usize] = true,
+            }
+        }
+
+        self.honest(&DsaEncoding {
+            hint: hint_bit_pack(&self.params, &hints),
+            ..self.encoding.clone()
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -336,6 +359,17 @@ impl KemCase {
     fn origin(&self, index: usize) -> usize {
         self.parts[..index].iter().map(|p| p.step().rows()).sum()
     }
+
+    fn honest(&self) -> Proof {
+        let (mut words, mut values) = kem_inputs(&self.parts);
+        let (trace, _) = self.chiplet.trace(&mut words, &mut values).unwrap();
+
+        Proof::new(
+            &self.chiplet,
+            trace,
+            &kem_accomplice(&self.parts, &words, &values),
+        )
+    }
 }
 
 struct Proof {
@@ -359,44 +393,6 @@ impl Proof {
             witness: ProgramWitness::new(host_trace(st, rows)).with_chiplets(vec![trace]),
         }
     }
-
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"CodecChiplet",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"CodecChiplet");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
-
-    fn rejected(&self) -> bool {
-        !self.accepted(false) && !self.accepted(true)
-    }
 }
 
 fn dsa_honest_case(params: MlDsaParams) {
@@ -415,9 +411,11 @@ fn dsa_honest_case(params: MlDsaParams) {
 
     let proof = Proof::new(&case.chiplet, trace, &case.statement());
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 fn kem_honest_case(params: MlKemParams) {
@@ -436,12 +434,90 @@ fn kem_honest_case(params: MlKemParams) {
 
     let proof = Proof::new(&case.chiplet, trace, &kem_statement(&case.parts));
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 fn assert_malformed_breaks_only(case: &DsaCase, enc: &DsaEncoding, label: &str) {
+    let (trace, st) = malformed(case, enc);
+    let honest = case.twin(&trace);
+
+    assert_breaks_only(&honest, &Proof::new(&case.chiplet, trace, &st), label);
+}
+
+fn assert_unsatisfiable_breaks_only(case: &DsaCase, enc: &DsaEncoding, label: &str) {
+    let (trace, st) = malformed(case, enc);
+    let forged = Proof::new(&case.chiplet, trace, &st);
+    let honest = case.honest(&case.encoding);
+
+    let fault = Fault {
+        constraint_labels: &[(CODEC, label)],
+        ..Fault::NONE
+    };
+
+    assert_verifies(
+        &honest.program,
+        (&honest.instance, &honest.witness),
+        &Config::prod(),
+    );
+
+    fault.assert_sole(&preflight(&forged.program, &forged.instance, &forged.witness).unwrap());
+
+    for zero_knowledge in [false, true] {
+        let config = Config {
+            zero_knowledge,
+            ..Config::prod()
+        };
+
+        let (outcome, log) = verdict(
+            &forged.program,
+            (&forged.instance, &forged.witness),
+            &config,
+        );
+
+        assert!(
+            fault.rejects(&outcome, &log, zero_knowledge),
+            "zk {zero_knowledge}: {outcome:?}\n{log}"
+        );
+    }
+}
+
+fn assert_breaks_only(honest: &Proof, forged: &Proof, label: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            constraint_labels: &[(CODEC, label)],
+            ..Fault::NONE
+        },
+    );
+}
+
+fn assert_bus_alone_rejects(honest: &Proof, forged: &Proof, bus: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            buses: &[bus],
+            ..Fault::NONE
+        },
+    );
+}
+
+fn assert_fault(honest: &Proof, forged: &Proof, fault: Fault<'_>) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        fault,
+        &Config::prod(),
+    );
+}
+
+fn malformed(case: &DsaCase, enc: &DsaEncoding) -> (ColumnTrace, Statement) {
     let mut words = enc.words(case);
 
     assert!(
@@ -459,34 +535,7 @@ fn assert_malformed_breaks_only(case: &DsaCase, enc: &DsaEncoding, label: &str) 
 
     let st = case.accomplice(&words, &values, &trace);
 
-    assert_breaks_only(&case.chiplet, trace, &st, label);
-}
-
-fn assert_breaks_only(chiplet: &CodecChiplet<F>, trace: ColumnTrace, st: &Statement, label: &str) {
-    let proof = Proof::new(chiplet, trace, st);
-    let report = proof.report();
-
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.constraint_violations.is_empty());
-
-    for v in &report.constraint_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.label, Some(label));
-    }
-
-    assert!(proof.rejected());
-}
-
-fn assert_bus_alone_rejects(chiplet: &CodecChiplet<F>, trace: ColumnTrace, st: &Statement) {
-    let proof = Proof::new(chiplet, trace, st);
-    let report = proof.report();
-
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(proof.rejected());
+    (trace, st)
 }
 
 fn host_program(chiplet: &CodecChiplet<F>, st: &Statement, rows: usize) -> CircuitProgram<F> {
@@ -833,7 +882,11 @@ fn z_lifted_by_q_breaks_only_z_range() {
 
     let st = case.accomplice(&words, &values, &trace);
 
-    assert_breaks_only(&case.chiplet, trace, &st, "codec_z_range");
+    assert_breaks_only(
+        &case.honest(&case.encoding),
+        &Proof::new(&case.chiplet, trace, &st),
+        "codec_z_range",
+    );
 }
 
 #[test]
@@ -888,9 +941,14 @@ fn malformed_hint_breaks_only_its_constraint() {
     for (enc, label) in [
         (repeated, "codec_hint_order"),
         (across, "codec_hint_order"),
+        (unused, "codec_hint_unused"),
+    ] {
+        assert_unsatisfiable_breaks_only(&case, &enc, label);
+    }
+
+    for (enc, label) in [
         (increasing(&decreasing), "codec_hint_counts"),
         (increasing(&beyond), "codec_hint_bound"),
-        (unused, "codec_hint_unused"),
         (padded, "codec_hint_pad"),
     ] {
         assert_malformed_breaks_only(&case, &enc, label);
@@ -925,8 +983,13 @@ fn count_moved_on_index_row_breaks_only_codec_hint_cont() {
         .unwrap();
 
     let st = case.accomplice(&words, &values, &trace);
+    let honest = case.twin(&trace);
 
-    assert_breaks_only(&case.chiplet, trace, &st, "codec_hint_cont");
+    assert_breaks_only(
+        &honest,
+        &Proof::new(&case.chiplet, trace, &st),
+        "codec_hint_cont",
+    );
 }
 
 #[test]
@@ -960,8 +1023,13 @@ fn count_held_off_its_byte_breaks_only_codec_hint_count() {
         .unwrap();
 
     let st = case.accomplice(&words, &values, &trace);
+    let honest = case.twin(&trace);
 
-    assert_breaks_only(&case.chiplet, trace, &st, "codec_hint_count");
+    assert_breaks_only(
+        &honest,
+        &Proof::new(&case.chiplet, trace, &st),
+        "codec_hint_count",
+    );
 }
 
 #[test]
@@ -972,6 +1040,7 @@ fn forged_coefficient_breaks_only_its_link() {
     let ly = case.chiplet.layout();
 
     let t1_rows = CodecStep::t1(case.streams[0], case.t1.clone()).rows();
+    let honest = case.honest(&case.encoding);
 
     for (poly, row, j, label) in [
         (case.t1[0], 0, 3, "codec_t1"),
@@ -992,7 +1061,7 @@ fn forged_coefficient_breaks_only_its_link() {
 
         read.2 = forged;
 
-        assert_breaks_only(&case.chiplet, trace, &st, label);
+        assert_breaks_only(&honest, &Proof::new(&case.chiplet, trace, &st), label);
     }
 }
 
@@ -1006,10 +1075,12 @@ fn host_supplying_different_word_is_caught_by_bus_alone() {
         .trace(&mut words, &mut PolyValues::default())
         .unwrap();
 
+    let honest = Proof::new(&case.chiplet, trace.clone(), &case.statement());
+
     let mut st = case.statement();
     st.words[3].2 ^= 1 << 9;
 
-    assert_bus_alone_rejects(&case.chiplet, trace, &st);
+    assert_bus_alone_rejects(&honest, &Proof::new(&case.chiplet, trace, &st), WORD_BUS_ID);
 }
 
 #[test]
@@ -1025,15 +1096,39 @@ fn hint_key_without_its_bit_is_caught_by_bus_alone() {
     let unset = case.hints[0].iter().position(|&h| !h).unwrap();
 
     let mut st = case.statement();
+    let set = st.hints[0].1 as usize;
+
     st.hints[0] = (1, unset as u16);
 
-    assert_bus_alone_rejects(&case.chiplet, trace, &st);
+    let forged = Proof::new(&case.chiplet, trace, &st);
+
+    let mut twin = DsaCase::new(MlDsaParams::ML_DSA_65);
+    twin.hints[0][set] = false;
+    twin.hints[0][unset] = true;
+    twin.encoding.hint = hint_bit_pack(&twin.params, &twin.hints);
+
+    let mut twin_words = twin.encoding.words(&twin);
+
+    let (twin_trace, _) = twin
+        .chiplet
+        .trace(&mut twin_words, &mut PolyValues::default())
+        .unwrap();
+
+    let twin_st = Statement {
+        hints: st.hints,
+        ..twin.statement()
+    };
+
+    assert_bus_alone_rejects(
+        &Proof::new(&twin.chiplet, twin_trace, &twin_st),
+        &forged,
+        HINT_BUS_ID,
+    );
 }
 
 #[test]
 fn non_canonical_kem_coefficients_are_refused() {
     let case = KemCase::new(MlKemParams::ML_KEM_768);
-
     for index in [0, 2, 6] {
         let mut parts = case.parts.clone();
         parts[index].values[5] = mlkem::Q;
@@ -1061,7 +1156,11 @@ fn ek_coefficient_at_or_above_q_breaks_only_modulus_check() {
 
         let st = kem_accomplice(&parts, &words, &values);
 
-        assert_breaks_only(&case.chiplet, trace, &st, "codec_kem_modulus");
+        assert_breaks_only(
+            &case.honest(),
+            &Proof::new(&case.chiplet, trace, &st),
+            "codec_kem_modulus",
+        );
     }
 }
 
@@ -1086,7 +1185,11 @@ fn unreduced_12_bit_field_breaks_only_kem_range() {
 
         let st = kem_accomplice(parts, &words, &values);
 
-        assert_breaks_only(&case.chiplet, trace, &st, "codec_kem_range");
+        assert_breaks_only(
+            &case.honest(),
+            &Proof::new(&case.chiplet, trace, &st),
+            "codec_kem_range",
+        );
     }
 }
 
@@ -1110,13 +1213,18 @@ fn compress_one_quotient_short_breaks_only_compress_range() {
 
     let st = kem_accomplice(&case.parts, &words, &values);
 
-    assert_breaks_only(&case.chiplet, trace, &st, "codec_compress_range");
+    assert_breaks_only(
+        &case.honest(),
+        &Proof::new(&case.chiplet, trace, &st),
+        "codec_compress_range",
+    );
 }
 
 #[test]
 fn forged_kem_output_breaks_only_its_link() {
     let case = KemCase::new(MlKemParams::ML_KEM_768);
     let ly = case.chiplet.layout();
+    let honest = case.honest();
 
     for (index, cell, label) in [
         (1, Cell::Coef(3), "codec_kem_byte12"),
@@ -1157,7 +1265,7 @@ fn forged_kem_output_breaks_only_its_link() {
             }
         }
 
-        assert_breaks_only(&case.chiplet, trace, &st, label);
+        assert_breaks_only(&honest, &Proof::new(&case.chiplet, trace, &st), label);
     }
 }
 
@@ -1165,11 +1273,15 @@ fn forged_kem_output_breaks_only_its_link() {
 fn host_disagreeing_on_kem_tokens_is_caught_by_bus_alone() {
     let case = KemCase::new(MlKemParams::ML_KEM_768);
 
-    for (index, cell) in [(6, Cell::Coef(0)), (3, Cell::Word)] {
+    for (index, cell, bus) in [
+        (6, Cell::Coef(0), COEF_BUS_ID),
+        (3, Cell::Word, WORD_BUS_ID),
+    ] {
         let (mut words, mut values) = kem_inputs(&case.parts);
 
         let (trace, _) = case.chiplet.trace(&mut words, &mut values).unwrap();
 
+        let honest = Proof::new(&case.chiplet, trace.clone(), &kem_statement(&case.parts));
         let part = &case.parts[index];
 
         let mut st = kem_statement(&case.parts);
@@ -1195,7 +1307,7 @@ fn host_disagreeing_on_kem_tokens_is_caught_by_bus_alone() {
             }
         }
 
-        assert_bus_alone_rejects(&case.chiplet, trace, &st);
+        assert_bus_alone_rejects(&honest, &Proof::new(&case.chiplet, trace, &st), bus);
     }
 }
 
@@ -1243,9 +1355,11 @@ fn twinned_compress1_feeds_decompress1_and_proves() {
 
     let proof = Proof::new(&chiplet, trace, &st);
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 #[test]

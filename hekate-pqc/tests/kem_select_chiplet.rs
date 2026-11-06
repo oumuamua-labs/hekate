@@ -5,25 +5,23 @@
 use hekate_core::config::Config;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block16, Block32, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block16, Block32, Block256, HardwareField, TowerField};
 use hekate_pqc::kem_select::{CipherPart, KemSelectChiplet, KemSelectStep};
 use hekate_pqc::wiring::{PolyLabels, Stream, WORD_BUS_ID, WordValues, word_spec};
 use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 const WORDS: usize = 272;
 const C1_WORDS: usize = 240;
 const KEY_WORDS: usize = 8;
+
+const KEM_SELECT: TableId = TableId::Chiplet(0);
 
 const HOST_LAYOUT: [ColumnType; 4] = [
     ColumnType::B16,
@@ -116,6 +114,14 @@ impl Case {
         (trace, words)
     }
 
+    fn honest(&self) -> Proof {
+        let (trace, words) = self.run();
+        let key = words.get(self.step.k).unwrap().to_vec();
+        let valid = words.get(self.step.valid).unwrap()[0];
+
+        self.proof(trace, &self.tokens(&key, valid))
+    }
+
     fn tokens(&self, key: &[u32], valid: u32) -> Vec<(u16, u16, u32)> {
         let s = &self.step;
         let valid = [valid];
@@ -185,60 +191,17 @@ impl Case {
     }
 }
 
-impl Proof {
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"KemSelectChiplet",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"KemSelectChiplet");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
-
-    fn rejected(&self) -> bool {
-        !self.accepted(false) && !self.accepted(true)
-    }
-}
-
-fn assert_breaks_only(proof: &Proof, label: &str) {
-    let report = proof.report();
-
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.constraint_violations.is_empty());
-
-    for v in &report.constraint_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.label, Some(label));
-    }
-
-    assert!(proof.rejected());
+fn assert_breaks_only(honest: &Proof, forged: &Proof, label: &str) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        Fault {
+            constraint_labels: &[(KEM_SELECT, label)],
+            ..Fault::NONE
+        },
+        &Config::prod(),
+    );
 }
 
 fn set_word(trace: &mut ColumnTrace, col: usize, row: usize, value: u32) {
@@ -271,9 +234,11 @@ fn equal_ciphertexts_select_k_prime_and_prove() {
 
     let proof = case.proof(trace, &case.tokens(&case.k_prime, 1));
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 #[test]
@@ -286,9 +251,11 @@ fn differing_ciphertexts_select_k_bar_and_prove() {
 
     let proof = case.proof(trace, &case.tokens(&case.k_bar, 0));
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 #[test]
@@ -310,9 +277,9 @@ fn hidden_difference_breaks_only_kem_select_zero() {
 
     set_word(&mut trace, ly.physical(ly.word_c), WORDS + KEY_WORDS, 1);
 
-    let proof = case.proof(trace, &case.tokens(&case.k_prime, 1));
+    let forged = case.proof(trace, &case.tokens(&case.k_prime, 1));
 
-    assert_breaks_only(&proof, "kem_select_zero");
+    assert_breaks_only(&case.honest(), &forged, "kem_select_zero");
 }
 
 #[test]
@@ -331,9 +298,9 @@ fn ignored_difference_breaks_only_kem_select_flag() {
 
     set_word(&mut trace, ly.physical(ly.word_c), WORDS + KEY_WORDS, 1);
 
-    let proof = case.proof(trace, &case.tokens(&case.k_prime, 1));
+    let forged = case.proof(trace, &case.tokens(&case.k_prime, 1));
 
-    assert_breaks_only(&proof, "kem_select_flag");
+    assert_breaks_only(&case.honest(), &forged, "kem_select_flag");
 }
 
 #[test]
@@ -347,9 +314,9 @@ fn k_prime_released_on_reported_difference_breaks_only_kem_select_out() {
         set_word(&mut trace, ly.physical(ly.word_c), WORDS + j, k);
     }
 
-    let proof = case.proof(trace, &case.tokens(&case.k_prime, 0));
+    let forged = case.proof(trace, &case.tokens(&case.k_prime, 0));
 
-    assert_breaks_only(&proof, "kem_select_out");
+    assert_breaks_only(&case.honest(), &forged, "kem_select_out");
 }
 
 #[test]
@@ -373,9 +340,9 @@ fn phantom_difference_breaks_only_kem_select_nonzero() {
 
     set_word(&mut trace, ly.physical(ly.word_c), WORDS + KEY_WORDS, 0);
 
-    let proof = case.proof(trace, &case.tokens(&case.k_bar, 0));
+    let forged = case.proof(trace, &case.tokens(&case.k_bar, 0));
 
-    assert_breaks_only(&proof, "kem_select_nonzero");
+    assert_breaks_only(&case.honest(), &forged, "kem_select_nonzero");
 }
 
 #[test]
@@ -386,9 +353,9 @@ fn relay_other_than_compared_c_breaks_only_kem_select_out() {
     let ly = case.chiplet.layout();
 
     let row = 5;
-    let forged = case.c[row] ^ 1;
+    let word = case.c[row] ^ 1;
 
-    set_word(&mut trace, ly.physical(ly.word_c), row, forged);
+    set_word(&mut trace, ly.physical(ly.word_c), row, word);
 
     let relay = case.step.parts[0].relay.id();
 
@@ -398,11 +365,11 @@ fn relay_other_than_compared_c_breaks_only_kem_select_out() {
         .find(|t| t.0 == relay && t.1 == row as u16)
         .unwrap();
 
-    token.2 = forged;
+    token.2 = word;
 
-    let proof = case.proof(trace, &tokens);
+    let forged = case.proof(trace, &tokens);
 
-    assert_breaks_only(&proof, "kem_select_out");
+    assert_breaks_only(&case.honest(), &forged, "kem_select_out");
 }
 
 #[test]
@@ -422,9 +389,9 @@ fn flag_set_on_first_row_breaks_only_kem_select_first() {
 
     set_word(&mut trace, ly.physical(ly.word_c), WORDS + KEY_WORDS, 0);
 
-    let proof = case.proof(trace, &case.tokens(&case.k_bar, 0));
+    let forged = case.proof(trace, &case.tokens(&case.k_bar, 0));
 
-    assert_breaks_only(&proof, "kem_select_first");
+    assert_breaks_only(&case.honest(), &forged, "kem_select_first");
 }
 
 #[test]
@@ -454,9 +421,9 @@ fn key_split_on_equal_ciphertexts_breaks_only_kem_select_nz_gate() {
 
     set_word(&mut trace, ly.physical(ly.word_c), WORDS + KEY_WORDS, 0);
 
-    let proof = case.proof(trace, &case.tokens(&key, 0));
+    let forged = case.proof(trace, &case.tokens(&key, 0));
 
-    assert_breaks_only(&proof, "kem_select_nz_gate");
+    assert_breaks_only(&case.honest(), &forged, "kem_select_nz_gate");
 }
 
 #[test]

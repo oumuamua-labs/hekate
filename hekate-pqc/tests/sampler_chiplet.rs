@@ -5,10 +5,8 @@
 use hekate_core::config::Config;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
 use hekate_keccak::{KeccakChiplet, generate_keccak_trace, shake128, shake256};
-use hekate_math::{Bit, Block16, Block32, Block64, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block16, Block32, Block64, Block256, HardwareField, TowerField};
 use hekate_pqc::mldsa::MlDsaParams;
 use hekate_pqc::sampler::{SamplerChiplet, SamplerForgery, SamplerStep};
 use hekate_pqc::wiring::{
@@ -18,19 +16,19 @@ use hekate_pqc::wiring::{
 use hekate_pqc::{mldsa, mlkem};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 use zeroize::Zeroizing;
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 const RATE: usize = 168;
 const SIGN_BYTES: usize = 8;
+
+const SAMPLER: TableId = TableId::Chiplet(0);
 
 const HOST_LAYOUT: [ColumnType; 8] = [
     ColumnType::B16,
@@ -192,6 +190,13 @@ impl Case {
         st
     }
 
+    fn honest(&self) -> Proof {
+        let mut values = PolyValues::default();
+        let (trace, calls) = self.chiplet.trace(&self.seeds(), &mut values).unwrap();
+
+        self.proof(trace, &calls, &self.statement(&values))
+    }
+
     fn proof(&self, trace: ColumnTrace, calls: &[[u64; 25]], st: &Statement) -> Proof {
         let host_rows = st.coefs.len().max(st.lanes.len()).next_power_of_two();
         let keccak_rows = (KeccakChiplet::BLOCK_ROWS * calls.len()).next_power_of_two();
@@ -273,46 +278,6 @@ impl Case {
     }
 }
 
-impl Proof {
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"SamplerChiplet",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"SamplerChiplet");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
-
-    fn rejected(&self) -> bool {
-        !self.accepted(false) && !self.accepted(true)
-    }
-}
-
 fn dsa_case() -> Case {
     Case::new(&[
         (0, Draw::ExpandA { r: 0, s: 0 }),
@@ -367,25 +332,32 @@ fn honest_case(case: Case) {
 
     let proof = case.proof(trace, &calls, &case.statement(&values));
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
-fn assert_breaks_only(proof: &Proof, label: &str) {
-    let report = proof.report();
+fn assert_breaks_only(honest: &Proof, forged: &Proof, label: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            constraint_labels: &[(SAMPLER, label)],
+            ..Fault::NONE
+        },
+    );
+}
 
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.constraint_violations.is_empty());
-
-    for v in &report.constraint_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.label, Some(label));
-    }
-
-    assert!(proof.rejected());
+fn assert_fault(honest: &Proof, forged: &Proof, fault: Fault<'_>) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        fault,
+        &Config::prod(),
+    );
 }
 
 fn forge_word(trace: &mut ColumnTrace, col: usize, row: usize) -> u32 {
@@ -591,6 +563,8 @@ fn flipped_acceptance_breaks_only_its_constraint() {
     let rejected = (0..100).find(|&c| value(c) >= mlkem::Q).unwrap();
     let accepted = (0..100).find(|&c| value(c) < mlkem::Q).unwrap();
 
+    let honest = case.honest();
+
     for c in [rejected, accepted] {
         let mut values = PolyValues::default();
 
@@ -606,9 +580,9 @@ fn flipped_acceptance_breaks_only_its_constraint() {
             )
             .unwrap();
 
-        let proof = case.proof(trace, &calls, &case.statement(&values));
+        let forged = case.proof(trace, &calls, &case.statement(&values));
 
-        assert_breaks_only(&proof, "sampler_accept");
+        assert_breaks_only(&honest, &forged, "sampler_accept");
     }
 }
 
@@ -640,9 +614,9 @@ fn swapped_positions_break_only_sampler_count() {
         )
         .unwrap();
 
-    let proof = case.proof(trace, &calls, &case.statement(&values));
+    let forged = case.proof(trace, &calls, &case.statement(&values));
 
-    assert_breaks_only(&proof, "sampler_count");
+    assert_breaks_only(&case.honest(), &forged, "sampler_count");
 }
 
 #[test]
@@ -659,9 +633,9 @@ fn reversed_suffix_breaks_only_sampler_absorb() {
         )
         .unwrap();
 
-    let proof = case.proof(trace, &calls, &case.statement(&values));
+    let forged = case.proof(trace, &calls, &case.statement(&values));
 
-    assert_breaks_only(&proof, "sampler_absorb");
+    assert_breaks_only(&case.honest(), &forged, "sampler_absorb");
 }
 
 #[test]
@@ -678,9 +652,9 @@ fn window_read_one_lane_on_breaks_only_sampler_window() {
         )
         .unwrap();
 
-    let proof = case.proof(trace, &calls, &case.statement(&values));
+    let forged = case.proof(trace, &calls, &case.statement(&values));
 
-    assert_breaks_only(&proof, "sampler_window");
+    assert_breaks_only(&case.honest(), &forged, "sampler_window");
 }
 
 #[test]
@@ -697,9 +671,9 @@ fn ball_accesses_out_of_time_order_break_only_sampler_sib_order() {
         )
         .unwrap();
 
-    let proof = case.proof(trace, &calls, &case.statement(&values));
+    let forged = case.proof(trace, &calls, &case.statement(&values));
 
-    assert_breaks_only(&proof, "sampler_sib_order");
+    assert_breaks_only(&case.honest(), &forged, "sampler_sib_order");
 }
 
 #[test]
@@ -717,7 +691,11 @@ fn forged_coefficient_breaks_only_sampler_value() {
     let mut st = case.statement(&values);
     st.coefs[0].2 = forged;
 
-    assert_breaks_only(&case.proof(trace, &calls, &st), "sampler_value");
+    assert_breaks_only(
+        &case.honest(),
+        &case.proof(trace, &calls, &st),
+        "sampler_value",
+    );
 }
 
 #[test]
@@ -737,7 +715,11 @@ fn forged_cbd_value_breaks_only_sampler_cbd() {
     let mut st = case.statement(&values);
     st.coefs[0].2 = forged;
 
-    assert_breaks_only(&case.proof(trace, &calls, &st), "sampler_cbd");
+    assert_breaks_only(
+        &case.honest(),
+        &case.proof(trace, &calls, &st),
+        "sampler_cbd",
+    );
 }
 
 #[test]
@@ -825,9 +807,9 @@ fn tail_from_second_out_breaks_only_sampler_tail() {
         )
         .unwrap();
 
-    let proof = case.proof(trace, &calls, &case.statement(&values));
+    let forged = case.proof(trace, &calls, &case.statement(&values));
 
-    assert_breaks_only(&proof, "sampler_tail");
+    assert_breaks_only(&case.honest(), &forged, "sampler_tail");
 }
 
 #[test]
@@ -840,6 +822,8 @@ fn flipped_ball_candidate_breaks_only_its_constraint() {
 
     let rejected = decisions.iter().position(|&taken| !taken).unwrap();
     let accepted = decisions.iter().position(|&taken| taken).unwrap();
+
+    let honest = case.honest();
 
     for c in [rejected, accepted] {
         let mut values = PolyValues::default();
@@ -856,9 +840,9 @@ fn flipped_ball_candidate_breaks_only_its_constraint() {
             )
             .unwrap();
 
-        let proof = case.proof(trace, &calls, &case.statement(&values));
+        let forged = case.proof(trace, &calls, &case.statement(&values));
 
-        assert_breaks_only(&proof, "sampler_ball_accept");
+        assert_breaks_only(&honest, &forged, "sampler_ball_accept");
     }
 }
 
@@ -920,11 +904,15 @@ fn flipped_sign_breaks_only_sampler_sign() {
     let mut st = case.statement(&values);
     st.coefs[N + j].2 = flipped;
 
-    assert_breaks_only(&case.proof(trace, &calls, &st), "sampler_sign");
+    assert_breaks_only(
+        &case.honest(),
+        &case.proof(trace, &calls, &st),
+        "sampler_sign",
+    );
 }
 
 #[test]
-fn forged_ball_readout_breaks_only_the_memory_check() {
+fn forged_ball_readout_breaks_only_sampler_sib_read() {
     let params = MlDsaParams::ML_DSA_44;
     let case = ball_case(params);
     let mut values = PolyValues::default();
@@ -961,7 +949,11 @@ fn forged_ball_readout_breaks_only_the_memory_check() {
     let mut st = case.statement(&values);
     st.coefs[N + cell].2 = forged;
 
-    assert_breaks_only(&case.proof(trace, &calls, &st), "sampler_sib_read");
+    assert_breaks_only(
+        &case.honest(),
+        &case.proof(trace, &calls, &st),
+        "sampler_sib_read",
+    );
 }
 
 #[test]
@@ -1015,20 +1007,12 @@ fn ball_steps_cannot_trade_memory_accesses() {
         st.coefs[e * N + cell].2 = 0;
     }
 
-    let proof = case.proof(trace, &calls, &st);
-    let report = proof.report();
+    let fault = Fault {
+        buses: &["sampler_sib"],
+        ..Fault::NONE
+    };
 
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.boundary_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(
-        report
-            .bus_diagnostics
-            .iter()
-            .all(|d| d.bus_id == "sampler_sib")
-    );
-    assert!(proof.rejected());
+    assert_fault(&case.honest(), &case.proof(trace, &calls, &st), fault);
 }
 
 #[test]
@@ -1041,12 +1025,12 @@ fn host_supplying_different_seed_is_caught_by_bus_alone() {
     let mut st = case.statement(&values);
     st.lanes[1].2 ^= 1 << 13;
 
-    let proof = case.proof(trace, &calls, &st);
-    let report = proof.report();
+    let fault = Fault {
+        buses: &[LANE_BUS_ID],
+        ..Fault::NONE
+    };
 
-    assert!(report.constraint_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(proof.rejected());
+    assert_fault(&case.honest(), &case.proof(trace, &calls, &st), fault);
 }
 
 #[test]

@@ -3,28 +3,32 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! A block that starts on a bare round row never
-//! announces its input, and its state is free.
-//! Only the cadence pins stop it.
+//! announces its input, and its state is free. No round
+//! constraint fires; the cadence pins reject it first.
 
+mod common;
+
+use common::keccak_f;
 use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakWitness, PhysKeccakColumns};
-use hekate_math::{Bit, Block32, Block64, Block128, TowerField};
+use hekate_keccak::{
+    CpuKeccakColumns, KeccakChiplet, KeccakColumns, KeccakWitness, PhysKeccakColumns,
+};
+use hekate_math::{Bit, Block32, Block64, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{Air, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::fault::{Check, Fault};
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 const ROUNDS: usize = 24;
 const CPU_ROWS: usize = 32;
 const KECCAK_ROWS: usize = 64;
+
+const KECCAK: TableId = TableId::Chiplet(0);
 
 struct Row {
     state: [u64; 25],
@@ -58,14 +62,6 @@ fn build_program() -> CircuitProgram<F> {
 
 fn test_input() -> [u64; 25] {
     core::array::from_fn(|i| (i as u64).wrapping_mul(0x9E37_79B9) | 1)
-}
-
-fn keccak_f(mut state: [u64; 25]) -> [u64; 25] {
-    for rc in KeccakChiplet::ROUND_CONSTANTS {
-        state = KeccakWitness::keccak_f_round(state, rc);
-    }
-
-    state
 }
 
 fn cpu_trace(input: [u64; 25], output: [u64; 25]) -> ColumnTrace {
@@ -163,58 +159,62 @@ fn stub(seed: [u64; 25], out: &mut Vec<Row>) -> [u64; 25] {
     image
 }
 
-fn run(cpu_input: [u64; 25], cpu_output: [u64; 25], chiplet: ColumnTrace) -> bool {
-    let air = build_program();
-    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
-    let witness =
-        ProgramWitness::new(cpu_trace(cpu_input, cpu_output)).with_chiplets(vec![chiplet]);
+fn witness(cpu_input: [u64; 25], cpu_output: [u64; 25], rows: &[Row]) -> ProgramWitness<F> {
+    ProgramWitness::new(cpu_trace(cpu_input, cpu_output)).with_chiplets(vec![write_rows(rows)])
+}
 
-    let config = Config {
+fn honest_witness() -> ProgramWitness<F> {
+    let input = test_input();
+
+    let mut rows = Vec::new();
+    block(input, true, &mut rows);
+
+    witness(input, keccak_f(input), &rows)
+}
+
+fn config() -> Config {
+    Config {
         num_queries: 2,
         fold_arity_log: 1,
         early_stop_vars: 1,
-        zero_knowledge: true,
         ..Config::dev()
+    }
+}
+
+fn schedule_pins() -> Vec<(TableId, usize)> {
+    let selectors = [KeccakColumns::S_ROUND, KeccakColumns::S_IN_OUT];
+
+    (0..ROUNDS)
+        .map(|round| (KECCAK, KeccakColumns::ROUND_BITS + round))
+        .chain(selectors.map(|col| (KECCAK, col)))
+        .collect()
+}
+
+fn assert_phantom_rejected(forged: &ProgramWitness<F>) {
+    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
+    let pins = schedule_pins();
+    let fault = Fault {
+        pin_columns: &pins,
+        buses: &[KeccakChiplet::BUS_ID],
+        first_check: Some(Check::FixedColumn),
+        ..Fault::NONE
     };
 
-    let proof = match prove(
-        b"Keccak_Phantom",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        [0xA5u8; 32],
-        None,
-    ) {
-        Ok(proof) => proof,
-        Err(e) => {
-            println!("prover refused: {e:?}");
-            return false;
-        }
-    };
-
-    let mut vt = Transcript::<H>::new(b"Keccak_Phantom");
-    let pinned_id = program_id(&air).unwrap();
-
-    HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-        .unwrap_or_else(|e| {
-            println!("verifier error: {e:?}");
-            false
-        })
+    assert_rejected(
+        &build_program(),
+        (&instance, &honest_witness()),
+        (&instance, forged),
+        fault,
+        &config(),
+    );
 }
 
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn announced_block_verifies() {
-    let input = test_input();
-    let mut rows = Vec::new();
+    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
 
-    block(input, true, &mut rows);
-
-    assert!(
-        run(input, keccak_f(input), write_rows(&rows)),
-        "the harness itself is broken, every rejection below is unattributable"
-    );
+    assert_verifies(&build_program(), (&instance, &honest_witness()), &config());
 }
 
 /// Emits the honest output twice. The second block
@@ -228,7 +228,7 @@ fn unannounced_block_rejected() {
     block(input, true, &mut rows);
     block(input, false, &mut rows);
 
-    assert!(!run(input, keccak_f(input), write_rows(&rows)));
+    assert_phantom_rejected(&witness(input, keccak_f(input), &rows));
 }
 
 /// A two-row block reaching round 23 from a free
@@ -249,5 +249,5 @@ fn phantom_output_rejected() {
     assert_ne!(forged, honest);
     assert!(rows.len() <= KECCAK_ROWS);
 
-    assert!(!run(input, forged, write_rows(&rows)));
+    assert_phantom_rejected(&witness(input, forged, &rows));
 }

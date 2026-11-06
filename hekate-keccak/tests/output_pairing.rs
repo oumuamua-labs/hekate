@@ -2,21 +2,20 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod common;
+
+use common::keccak_f;
 use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakWitness, generate_keccak_trace};
-use hekate_math::{Bit, Block64, Block128, TowerField};
+use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, generate_keccak_trace};
+use hekate_math::{Bit, Block64, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_verifier::HekateVerifier;
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 type Request = ([u64; 25], [u64; 25]);
 
 const CALLS: usize = 2;
@@ -55,14 +54,6 @@ fn build_program() -> CircuitProgram<F> {
     cx.attach(ChipletDef::from_air(&KeccakChiplet::new(ROWS, CALLS)).unwrap());
 
     cx.compile().unwrap()
-}
-
-fn permute(mut state: [u64; 25]) -> [u64; 25] {
-    for rc in KeccakChiplet::ROUND_CONSTANTS {
-        state = KeccakWitness::keccak_f_round(state, rc);
-    }
-
-    state
 }
 
 fn inputs() -> [[u64; 25]; CALLS] {
@@ -105,9 +96,12 @@ fn public_inputs(requests: &[Request]) -> Vec<F> {
         .collect()
 }
 
-fn verdicts(digest_of: [usize; CALLS], block_order: [usize; CALLS]) -> [bool; 2] {
+fn statement(
+    digest_of: [usize; CALLS],
+    block_order: [usize; CALLS],
+) -> (ProgramInstance<F>, ProgramWitness<F>) {
     let inputs = inputs();
-    let outputs = inputs.map(permute);
+    let outputs = inputs.map(keccak_f);
 
     let requests: Vec<Request> = (0..CALLS)
         .map(|k| (inputs[k], outputs[digest_of[k]]))
@@ -118,60 +112,50 @@ fn verdicts(digest_of: [usize; CALLS], block_order: [usize; CALLS]) -> [bool; 2]
         .map(|&k| inputs[k].map(Block64))
         .collect();
 
-    let air = build_program();
+    (
+        ProgramInstance::new(ROWS, public_inputs(&requests)),
+        ProgramWitness::new(cpu_trace(&requests))
+            .with_chiplets(vec![generate_keccak_trace(&blocks, ROWS).unwrap()]),
+    )
+}
 
-    let instance = ProgramInstance::new(ROWS, public_inputs(&requests));
-    let witness = ProgramWitness::new(cpu_trace(&requests))
-        .with_chiplets(vec![generate_keccak_trace(&blocks, ROWS).unwrap()]);
-
-    [false, true].map(|zero_knowledge| {
-        let config = Config {
-            num_queries: 2,
-            fold_arity_log: 1,
-            early_stop_vars: 1,
-            zero_knowledge,
-            ..Config::dev()
-        };
-
-        let proof = prove(
-            b"Keccak_Pairing",
-            &air,
-            &instance,
-            &witness,
-            &config,
-            [0xA5u8; 32],
-            None,
-        )
-        .expect("the prover proves the witness it is handed");
-
-        let mut vt = Transcript::<H>::new(b"Keccak_Pairing");
-        let pinned_id = program_id(&air).unwrap();
-
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-            .unwrap_or(false)
-    })
+fn config() -> Config {
+    Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
+        ..Config::dev()
+    }
 }
 
 #[test]
 fn honest_pairing_verifies() {
-    assert_eq!(
-        verdicts([0, 1], [0, 1]),
-        [true, true],
-        "the harness itself is broken, the rejections below are unattributable"
-    );
+    let (instance, witness) = statement([0, 1], [0, 1]);
+
+    assert_verifies(&build_program(), (&instance, &witness), &config());
 }
 
 #[test]
 fn traded_outputs_rejected() {
-    let outputs = inputs().map(permute);
+    let outputs = inputs().map(keccak_f);
 
     assert_ne!(outputs[0][0], outputs[1][0]);
 
+    let (honest_instance, honest) = statement([0, 1], [0, 1]);
+    let fault = Fault {
+        buses: &[KeccakChiplet::BUS_ID],
+        ..Fault::NONE
+    };
+
     for block_order in BLOCK_ORDERS {
-        assert_eq!(
-            verdicts([1, 0], block_order),
-            [false, false],
-            "block order {block_order:?}"
+        let (instance, witness) = statement([1, 0], block_order);
+
+        assert_rejected(
+            &build_program(),
+            (&honest_instance, &honest),
+            (&instance, &witness),
+            fault,
+            &config(),
         );
     }
 }

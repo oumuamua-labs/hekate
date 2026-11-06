@@ -8,7 +8,7 @@ use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::Modexp;
 use hekate_gadgets::chiplets::bignum::modexp::LIMBS32;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::ProgramWitness;
 use hekate_program::digest::program_id;
 use hekate_prover_sys::prove;
@@ -19,7 +19,7 @@ use hekate_sdk::preflight;
 use hekate_sha2::sha256_words;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const NUM_BLOCKS: usize = 4;

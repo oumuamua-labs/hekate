@@ -5,21 +5,19 @@
 use hekate_core::config::Config;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block16, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block16, Block32, Block256, TowerField};
 use hekate_pqc::ntt::{Mac, NttChiplet, NttForgery, NttParams, NttSchedule, NttStep, Transform};
 use hekate_pqc::wiring::{COEF_BUS_ID, N, Poly, PolyLabels, PolyValues, coef_spec};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{CadenceSegment, FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::{TableId, preflight};
+use hekate_testkit::fault::{Check, Fault};
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
+
+const NTT: TableId = TableId::Chiplet(0);
 
 const HOST_LAYOUT: [ColumnType; 4] = [
     ColumnType::B16,
@@ -147,6 +145,12 @@ impl Case {
         (trace, values)
     }
 
+    fn honest(&self) -> Proof {
+        let (trace, values) = self.run();
+
+        self.proof(trace, &values)
+    }
+
     fn proof(&self, ntt_trace: ColumnTrace, values: &PolyValues) -> Proof {
         let tokens = self.tokens();
         let rows = (tokens.len() * N).next_power_of_two();
@@ -252,46 +256,6 @@ impl Case {
     }
 }
 
-impl Proof {
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"NttChiplet",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"NttChiplet");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
-
-    fn rejected(&self) -> bool {
-        !self.accepted(false) && !self.accepted(true)
-    }
-}
-
 fn k_pke_v_case() -> Case {
     let params = NttParams::ML_KEM;
 
@@ -322,38 +286,47 @@ fn k_pke_v_case() -> Case {
 
 fn assert_forgery_breaks_only(honest: &Case, forged: &Case, col: Col) {
     let (trace, values) = forged.run();
+    let own = forged.proof(trace.clone(), &values);
 
-    assert!(forged.proof(trace.clone(), &values).report().is_clean());
+    assert!(
+        preflight(&own.program, &own.instance, &own.witness)
+            .unwrap()
+            .is_clean()
+    );
 
-    let proof = honest.proof(trace, &values);
-    let report = proof.report();
+    let pins = [(NTT, col.index())];
 
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.fixed_column_violations.is_empty());
-
-    for v in &report.fixed_column_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.col_idx, col.index());
-    }
-
-    assert!(proof.rejected());
+    assert_fault(
+        &honest.honest(),
+        &honest.proof(trace, &values),
+        Fault {
+            constraint_tables: &[NTT],
+            pin_columns: &pins,
+            first_check: Some(Check::FixedColumn),
+            ..Fault::NONE
+        },
+    );
 }
 
-fn assert_breaks_only(proof: &Proof, label: &str) {
-    let report = proof.report();
+fn assert_breaks_only(honest: &Proof, forged: &Proof, label: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            constraint_labels: &[(NTT, label)],
+            ..Fault::NONE
+        },
+    );
+}
 
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.constraint_violations.is_empty());
-
-    for v in &report.constraint_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.label, Some(label));
-    }
-
-    assert!(proof.rejected());
+fn assert_fault(honest: &Proof, forged: &Proof, fault: Fault<'_>) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        fault,
+        &Config::prod(),
+    );
 }
 
 fn host_trace(tokens: &[Poly], values: &PolyValues, rows: usize) -> ColumnTrace {
@@ -390,9 +363,11 @@ fn ml_kem_transforms_match_fips_and_prove() {
 
     let proof = case.proof(trace, &values);
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 #[test]
@@ -404,9 +379,11 @@ fn ml_dsa_transforms_and_mac_match_fips_and_prove() {
 
     let proof = case.proof(trace, &values);
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 #[test]
@@ -426,9 +403,11 @@ fn add_step_computes_k_pke_v_and_proves() {
 
     let proof = case.proof(trace, &values);
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 #[test]
@@ -484,7 +463,7 @@ fn forged_accumulator_breaks_only_ntt_register() {
 
     let trace = case.chiplet.trace_forged(&mut values, &[forgery]).unwrap();
 
-    assert_breaks_only(&case.proof(trace, &values), "ntt_register");
+    assert_breaks_only(&case.honest(), &case.proof(trace, &values), "ntt_register");
 }
 
 #[test]
@@ -500,7 +479,7 @@ fn forged_copied_operand_breaks_only_ntt_copy() {
 
     let trace = case.chiplet.trace_forged(&mut values, &[forgery]).unwrap();
 
-    assert_breaks_only(&case.proof(trace, &values), "ntt_copy");
+    assert_breaks_only(&case.honest(), &case.proof(trace, &values), "ntt_copy");
 }
 
 #[test]
@@ -516,7 +495,7 @@ fn accumulator_started_off_zero_breaks_only_ntt_acc() {
 
     let trace = case.chiplet.trace_forged(&mut values, &[forgery]).unwrap();
 
-    assert_breaks_only(&case.proof(trace, &values), "ntt_acc");
+    assert_breaks_only(&case.honest(), &case.proof(trace, &values), "ntt_acc");
 }
 
 #[test]
@@ -532,7 +511,11 @@ fn addend_on_inverse_without_one_breaks_only_ntt_scale_zero() {
 
     let trace = case.chiplet.trace_forged(&mut values, &[forgery]).unwrap();
 
-    assert_breaks_only(&case.proof(trace, &values), "ntt_scale_zero");
+    assert_breaks_only(
+        &case.honest(),
+        &case.proof(trace, &values),
+        "ntt_scale_zero",
+    );
 }
 
 #[test]
@@ -614,13 +597,12 @@ fn host_reading_different_output_is_caught_by_bus_alone() {
         tampered.insert(poly, coeffs).unwrap();
     }
 
-    let proof = case.proof(trace, &tampered);
-    let report = proof.report();
+    let fault = Fault {
+        buses: &[COEF_BUS_ID],
+        ..Fault::NONE
+    };
 
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(proof.rejected());
+    assert_fault(&case.honest(), &case.proof(trace, &tampered), fault);
 }
 
 #[test]

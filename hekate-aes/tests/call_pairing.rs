@@ -8,31 +8,26 @@
 mod common;
 
 use common::{
-    CPU_ROWS, F, FIPS128_KEY, FIPS128_PLAIN, FIPS256_KEY, FIPS256_PLAIN, H, b8_at,
-    make_program_128, make_program_256,
+    CPU_ROWS, F, FIPS128_KEY, FIPS128_PLAIN, FIPS256_KEY, FIPS256_PLAIN, assert_rejected,
+    assert_verifies, make_program_128, make_program_256,
 };
 use hekate_aes::trace::{Aes128Call, Aes256Call, expand_key, expand_key_256};
 use hekate_aes::{
     AesRound128Air, AesRound256Air, CpuAes128Columns, CpuAes256Columns, PhysAes128Columns,
 };
-use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate_crypto::transcript::Transcript;
 use hekate_math::{Bit, Block8, TowerField};
 use hekate_program::circuit::CircuitProgram;
-use hekate_program::digest::program_id;
-use hekate_program::{ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_verifier::HekateVerifier;
+use hekate_testkit::cell::b8_at;
+use hekate_testkit::fault::Fault;
 
-const LABEL: &[u8] = b"AES_Call_Pairing";
 const AES_ROWS: usize = 32;
-const BLOCK_ORDERS: [[usize; 2]; 2] = [[0, 1], [1, 0]];
 
 struct Level {
-    name: &'static str,
     program: CircuitProgram<F>,
     host: Host,
+    link: &'static str,
+    key: &'static str,
     keys: [Vec<u8>; 2],
     whitened: [[u8; 16]; 2],
     ciphers: [[u8; 16]; 2],
@@ -79,7 +74,6 @@ fn aes128() -> Level {
     let served = calls.clone();
 
     Level {
-        name: "aes128",
         program: air.program,
         host: Host {
             layout: CpuAes128Columns::build_layout(),
@@ -88,6 +82,8 @@ fn aes128() -> Level {
             data: CpuAes128Columns::DATA,
             selector: CpuAes128Columns::SELECTOR,
         },
+        link: AesRound128Air::LINK_BUS_ID,
+        key: AesRound128Air::KEY_BUS_ID,
         keys: calls.map(|call| call.key.to_vec()),
         whitened,
         ciphers,
@@ -123,7 +119,6 @@ fn aes256() -> Level {
     let served = calls.clone();
 
     Level {
-        name: "aes256",
         program: air.program,
         host: Host {
             layout: CpuAes256Columns::build_layout(),
@@ -132,6 +127,8 @@ fn aes256() -> Level {
             data: CpuAes256Columns::DATA,
             selector: CpuAes256Columns::SELECTOR,
         },
+        link: AesRound256Air::LINK_BUS_ID,
+        key: AesRound256Air::KEY_BUS_ID,
         keys: calls.map(|call| call.key.to_vec()),
         whitened,
         ciphers,
@@ -190,44 +187,11 @@ fn host_trace(level: &Level, claims: [Claim; 2]) -> ColumnTrace {
     tb.build()
 }
 
-fn verdicts(level: &Level, claims: [Claim; 2], block_order: [usize; 2]) -> [bool; 2] {
-    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
-    let witness =
-        ProgramWitness::new(host_trace(level, claims)).with_chiplets((level.blocks)(block_order));
-
-    [false, true].map(|zero_knowledge| {
-        let config = Config {
-            num_queries: 2,
-            fold_arity_log: 1,
-            early_stop_vars: 1,
-            zero_knowledge,
-            ..Config::dev()
-        };
-
-        let proof = prove(
-            LABEL,
-            &level.program,
-            &instance,
-            &witness,
-            &config,
-            [0x3Cu8; 32],
-            None,
-        )
-        .expect("the prover proves the witness it is handed");
-
-        let mut vt = Transcript::<H>::new(LABEL);
-        let pinned_id = program_id(&level.program).unwrap();
-
-        HekateVerifier::<F, H>::verify(
-            &pinned_id,
-            &level.program,
-            &instance,
-            &proof,
-            &mut vt,
-            &config,
-        )
-        .unwrap_or(false)
-    })
+fn honest(level: &Level) -> (ColumnTrace, Vec<ColumnTrace>) {
+    (
+        host_trace(level, claims([0, 1], [0, 1], [0, 1])),
+        (level.blocks)([0, 1]),
+    )
 }
 
 fn claims(inputs: [usize; 2], outputs: [usize; 2], keys: [usize; 2]) -> [Claim; 2] {
@@ -242,12 +206,9 @@ fn claims(inputs: [usize; 2], outputs: [usize; 2], keys: [usize; 2]) -> [Claim; 
 #[cfg_attr(debug_assertions, ignore)]
 fn honest_calls_verify() {
     for level in [aes128(), aes256()] {
-        assert_eq!(
-            verdicts(&level, claims([0, 1], [0, 1], [0, 1]), [0, 1]),
-            [true, true],
-            "{}: the harness itself is broken, the rejections below are unattributable",
-            level.name
-        );
+        let (cpu, blocks) = honest(&level);
+
+        assert_verifies(&level.program, cpu, blocks);
     }
 }
 
@@ -257,32 +218,43 @@ fn traded_ciphertexts_rejected() {
     for level in [aes128(), aes256()] {
         assert_ne!(level.ciphers[0], level.ciphers[1]);
 
-        for block_order in BLOCK_ORDERS {
-            assert_eq!(
-                verdicts(&level, claims([0, 1], [1, 0], [0, 1]), block_order),
-                [false, false],
-                "{} block order {block_order:?}",
-                level.name
+        assert_eq!(level.whitened[0], level.whitened[1]);
+
+        for (block_order, bus) in [([0, 1], level.link), ([1, 0], level.key)] {
+            let forged = (
+                host_trace(&level, claims([0, 1], [1, 0], [0, 1])),
+                (level.blocks)(block_order),
             );
+            let fault = Fault {
+                buses: &[bus],
+                ..Fault::NONE
+            };
+
+            assert_rejected(&level.program, honest(&level), forged, fault);
         }
     }
 }
 
 /// The host's key emits hold the blocks' multiset;
-/// rank 0 carries the other call's key.
+/// rank 0 carries the other call's key, or in the
+/// reversed block order the other call's data.
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn traded_keys_rejected() {
     for level in [aes128(), aes256()] {
         assert_ne!(level.keys[0], level.keys[1]);
 
-        for block_order in BLOCK_ORDERS {
-            assert_eq!(
-                verdicts(&level, claims([0, 1], [0, 1], [1, 0]), block_order),
-                [false, false],
-                "{} block order {block_order:?}",
-                level.name
+        for (block_order, bus) in [([0, 1], level.key), ([1, 0], level.link)] {
+            let forged = (
+                host_trace(&level, claims([0, 1], [0, 1], [1, 0])),
+                (level.blocks)(block_order),
             );
+            let fault = Fault {
+                buses: &[bus],
+                ..Fault::NONE
+            };
+
+            assert_rejected(&level.program, honest(&level), forged, fault);
         }
     }
 }
