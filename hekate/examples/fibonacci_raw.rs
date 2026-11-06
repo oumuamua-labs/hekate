@@ -8,7 +8,7 @@ mod common;
 use clap::Parser;
 use hekate::core::trace::{ColumnTrace, ColumnType};
 use hekate::crypto::DefaultHasher;
-use hekate::math::{Block32, Block128, TowerField};
+use hekate::math::{Block32, Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::{Trace, TraceBuilder};
 use hekate_crypto::transcript::Transcript;
@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 // 1. CONFIGURATION
 // =================================================================
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 #[derive(Parser)]

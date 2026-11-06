@@ -8,7 +8,7 @@ mod common;
 use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block8, Block128, TowerField};
+use hekate::math::{Bit, Block8, Block256, TowerField};
 use hekate_aes::{
     Aes128Chiplet, Aes256Chiplet, AesRound128Air, AesRound256Air, CpuAes128Columns,
     CpuAes256Columns, PhysAes128Columns, PhysAes256Columns, host_key_selector_shape,
@@ -24,7 +24,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // =================================================================

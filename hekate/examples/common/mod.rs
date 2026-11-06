@@ -4,9 +4,10 @@
 
 use hekate_core::config::{CodeRate, Config};
 use hekate_core::proofs::InnerProof;
+use hekate_crypto::Digest;
 use hekate_math::TowerField;
 use hekate_program::Program;
-use hekate_program::digest::{program_id, program_id_hex};
+use hekate_program::digest::{ProgramId, program_id, program_id_hex};
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -25,10 +26,10 @@ pub struct RunArgs {
     #[arg(long)]
     no_zk: bool,
 
-    /// The audited program_id a deployment pins, 64 lowercase hex chars.
+    /// The audited program_id a deployment pins, in lowercase hex.
     /// Unset, the run derives its own and the verifier's drift check cannot fire.
     #[arg(long, value_parser = parse_id)]
-    program_id: Option<[u8; 32]>,
+    program_id: Option<ProgramId>,
 }
 
 impl RunArgs {
@@ -41,7 +42,7 @@ impl RunArgs {
     }
 
     /// The `program_id` the verifier pins this run to.
-    pub fn audited_id<F: TowerField, P: Program<F>>(&self, program: &P) -> [u8; 32] {
+    pub fn audited_id<F: TowerField, P: Program<F>>(&self, program: &P) -> ProgramId {
         match self.program_id {
             Some(pinned) => pinned,
             None => {
@@ -314,20 +315,20 @@ fn parse_rate(s: &str) -> Result<CodeRate, String> {
     }
 }
 
-fn parse_id(s: &str) -> Result<[u8; 32], String> {
-    decode_id(s).ok_or_else(|| "expected 64 lowercase hex chars".to_string())
+fn parse_id(s: &str) -> Result<ProgramId, String> {
+    decode_id(s).ok_or_else(|| format!("expected {} lowercase hex chars", 2 * ProgramId::BYTES))
 }
 
-fn decode_id(s: &str) -> Option<[u8; 32]> {
+fn decode_id(s: &str) -> Option<ProgramId> {
     let hex = s.trim().as_bytes();
-    if hex.len() != 64 {
+    if hex.len() != 2 * ProgramId::BYTES {
         return None;
     }
 
-    let mut out = [0u8; 32];
-    for (i, pair) in hex.as_chunks::<2>().0.iter().enumerate() {
+    let mut out = ProgramId::ZERO;
+    for (byte, pair) in out.as_mut().iter_mut().zip(hex.as_chunks::<2>().0) {
         let text = core::str::from_utf8(pair).ok()?;
-        out[i] = u8::from_str_radix(text, 16).ok()?;
+        *byte = u8::from_str_radix(text, 16).ok()?;
     }
 
     Some(out)

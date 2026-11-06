@@ -8,7 +8,7 @@ mod common;
 use clap::Parser;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block128, TowerField};
+use hekate::math::{Bit, Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_program::circuit::{Circuit, CircuitProgram};
@@ -22,7 +22,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const CPU_ACTIVE: usize = CpuSha256Block::COLUMNS;

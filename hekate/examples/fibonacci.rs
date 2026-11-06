@@ -9,7 +9,7 @@ use clap::Parser;
 use hekate::core::trace::{ColumnTrace, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block32, Block128, HardwareField, TowerField};
+use hekate::math::{Block32, Block256, HardwareField, TowerField};
 use hekate_core::errors;
 use hekate_gadgets::{
     ArithmeticOpcode, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
@@ -23,7 +23,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // =================================================================
