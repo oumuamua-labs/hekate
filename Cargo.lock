@@ -805,6 +805,7 @@ dependencies = [
  "hekate-scribble",
  "hekate-sdk",
  "hekate-sha2",
+ "hekate-testkit",
  "hekate-verifier",
  "keccak",
  "ml-dsa",
@@ -829,6 +830,7 @@ dependencies = [
  "hekate-prover-sys",
  "hekate-scribble",
  "hekate-sdk",
+ "hekate-testkit",
  "hekate-verifier",
  "once_cell",
  "rand 0.9.5",
@@ -878,6 +880,7 @@ dependencies = [
  "hekate-prover-sys",
  "hekate-scribble",
  "hekate-sdk",
+ "hekate-testkit",
  "hekate-verifier",
  "once_cell",
  "rayon",
@@ -897,6 +900,7 @@ dependencies = [
  "hekate-prover-sys",
  "hekate-scribble",
  "hekate-sdk",
+ "hekate-testkit",
  "hekate-verifier",
  "keccak",
  "once_cell",
@@ -906,9 +910,9 @@ dependencies = [
 
 [[package]]
 name = "hekate-math"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e2781efc292f30511d5e2fa1210ef49f9688d4ad5b7bf7032fb285f3ba8d775"
+checksum = "41d7364594b9aa3cc5fc67429c71bea7ea20828ca7164b1c5bf72170fcb4aa38"
 dependencies = [
  "rayon",
  "serde",
@@ -929,6 +933,7 @@ dependencies = [
  "hekate-prover-sys",
  "hekate-scribble",
  "hekate-sdk",
+ "hekate-testkit",
  "hekate-verifier",
  "ml-dsa",
  "ml-kem",
@@ -1028,6 +1033,21 @@ dependencies = [
  "rand 0.10.3",
  "sha2 0.11.1",
  "zeroize",
+]
+
+[[package]]
+name = "hekate-testkit"
+version = "0.38.0"
+dependencies = [
+ "hekate-core",
+ "hekate-crypto",
+ "hekate-math",
+ "hekate-program",
+ "hekate-prover-sys",
+ "hekate-sdk",
+ "hekate-verifier",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1929,7 +1949,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

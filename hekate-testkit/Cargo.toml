@@ -1,0 +1,55 @@
+[package]
+name = "hekate-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Verdict oracles and trace-cell helpers shared by the Hekate test suites."
+publish = false
+
+[features]
+default = ["blake3", "public"]
+blake3 = [
+    "hekate-core/blake3",
+    "hekate-sdk/blake3",
+    "hekate-verifier/blake3",
+    "hekate-prover-sys/blake3",
+]
+sha2 = [
+    "hekate-core/sha2",
+    "hekate-sdk/sha2",
+    "hekate-verifier/sha2",
+    "hekate-prover-sys/sha2",
+]
+sha3 = [
+    "hekate-core/sha3",
+    "hekate-sdk/sha3",
+    "hekate-verifier/sha3",
+    "hekate-prover-sys/sha3",
+]
+shake256 = [
+    "hekate-core/shake256",
+    "hekate-sdk/shake256",
+    "hekate-verifier/shake256",
+    "hekate-prover-sys/shake256",
+]
+ct = ["hekate-prover-sys/ct"]
+public = ["hekate-prover-sys/public"]
+
+[dependencies]
+hekate-math = { workspace = true, features = ["std"] }
+hekate-crypto = { workspace = true, features = ["std"] }
+hekate-core = { workspace = true, features = ["std"] }
+hekate-program = { workspace = true, features = ["std"] }
+hekate-sdk = { workspace = true, features = ["std"] }
+hekate-verifier = { workspace = true, features = ["std"] }
+hekate-prover-sys = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+[lib]
+name = "hekate_testkit"
+path = "src/lib.rs"
