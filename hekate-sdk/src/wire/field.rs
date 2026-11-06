@@ -7,24 +7,32 @@ use hekate_math::TowerField;
 
 use super::wire_err;
 
-pub(crate) fn field_to_lo_hi<F: TowerField>(f: &F) -> (u64, u64) {
-    const { assert!(F::BITS <= 128, "wire scalar holds at most GF(2^128)") };
+const WORDS: usize = 4;
+
+pub(crate) fn field_to_words<F: TowerField>(f: &F) -> [u64; WORDS] {
+    const { assert!(F::BITS <= 64 * WORDS, "wire scalar holds at most GF(2^256)") };
 
     let bytes = f.to_bytes();
 
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 8 * WORDS];
     buf[..bytes.len()].copy_from_slice(&bytes);
 
-    (
-        u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-        u64::from_le_bytes(buf[8..16].try_into().unwrap()),
-    )
+    let (chunks, _) = buf.as_chunks::<8>();
+
+    core::array::from_fn(|w| u64::from_le_bytes(chunks[w]))
 }
 
-pub(crate) fn lo_hi_to_field<F: TowerField>(lo: u64, hi: u64) -> Result<F> {
-    let mut buf = [0u8; 16];
-    buf[0..8].copy_from_slice(&lo.to_le_bytes());
-    buf[8..16].copy_from_slice(&hi.to_le_bytes());
+pub(crate) fn words_to_field<F: TowerField>(words: [u64; WORDS]) -> Result<F> {
+    let mut buf = [0u8; 8 * WORDS];
+    for (w, word) in words.iter().enumerate() {
+        buf[8 * w..8 * (w + 1)].copy_from_slice(&word.to_le_bytes());
+    }
 
-    F::deserialize(&buf).map_err(|_| wire_err("invalid field element bytes"))
+    let width = F::ZERO.serialized_size();
+
+    if buf[width..].iter().any(|&b| b != 0) {
+        return Err(wire_err("field element wider than the field"));
+    }
+
+    F::deserialize(&buf[..width]).map_err(|_| wire_err("invalid field element bytes"))
 }

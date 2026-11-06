@@ -240,7 +240,12 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
             let mut inputs = Vec::with_capacity(pis.len());
             for i in 0..pis.len() {
                 let block = pis.get(i);
-                inputs.push(super::field::lo_hi_to_field(block.lo(), block.hi())?);
+                inputs.push(super::field::words_to_field([
+                    block.w0(),
+                    block.w1(),
+                    block.w2(),
+                    block.w3(),
+                ])?);
             }
 
             inputs
@@ -347,12 +352,13 @@ where
     let inline_chiplet_kernels =
         chiplet::serialize_kernel_hints(&mut fbb, &<P as Air<F>>::inline_chiplet_kernels(program));
 
-    let public_inputs_blocks: Vec<fb::Block128> = instance
+    let public_inputs_blocks: Vec<fb::Block256> = instance
         .public_inputs()
         .iter()
         .map(|f| {
-            let (lo, hi) = super::field::field_to_lo_hi(f);
-            fb::Block128::new(lo, hi)
+            let [w0, w1, w2, w3] = super::field::field_to_words(f);
+
+            fb::Block256::new(w0, w1, w2, w3)
         })
         .collect();
     let public_inputs = fbb.create_vector(&public_inputs_blocks);
