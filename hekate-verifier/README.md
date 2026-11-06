@@ -44,17 +44,18 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::Block128;
+use hekate_math::Block256;
+use hekate_program::digest::ProgramId;
 use hekate_program::{Program, ProgramInstance};
 use hekate_sdk::deserialize_proof;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 
 /// `audited_id` is a constant of this build, printed
 /// once with `digest::program_id_hex` at audit time.
 fn verify_one<P: Program<F> + Sync>(
-    audited_id: &[u8; 32],
+    audited_id: &ProgramId,
     program: &P,
     instance: &ProgramInstance<F>,
     proof_bytes: &[u8],
