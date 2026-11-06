@@ -15,7 +15,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block256, TowerField};
 use hekate_core::errors::Error;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
@@ -27,9 +27,11 @@ use hekate_program::{
     Air, CadenceSegment, FixedColumn, FixedShape, ProgramInstance, ProgramWitness, fix,
 };
 use hekate_prover_sys::prove;
+use hekate_testkit::site::{OUTER_LINEAR, ZEROCHECK};
+use hekate_testkit::verdict::{rejected_at, verify_logged};
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const DOMAIN: &[u8] = b"generator_corpus";
@@ -303,12 +305,19 @@ fn run_seed(seed: u64) {
     let delta = F::from(((rng.next() as u32) | 1) as u128);
     let forged = ProgramInstance::new(num_rows, vec![public_value + delta]);
 
-    let mut t = Transcript::<H>::new(DOMAIN);
-    let outcome = HekateVerifier::<F, H>::verify(&pinned, &air, &forged, &proof, &mut t, &config);
+    let forged_proof = prove(DOMAIN, &air, &forged, &witness, &config, seed_bytes, None)
+        .unwrap_or_else(|e| panic!("seed {seed}: forged prove failed: {e:?}"));
+
+    let (outcome, log) = verify_logged(&air, &forged, &config, &forged_proof, DOMAIN);
+
+    let site = match s.zk {
+        true => OUTER_LINEAR,
+        false => ZEROCHECK,
+    };
 
     assert!(
-        !matches!(outcome, Ok(true)),
-        "seed {seed}: forged public input accepted",
+        rejected_at(&outcome, &log, site),
+        "seed {seed}: got {outcome:?}\n{log}",
     );
 
     let mut drifted = pinned;

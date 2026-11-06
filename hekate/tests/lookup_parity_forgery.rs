@@ -6,7 +6,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::Block128;
+use hekate::math::Block256;
 use hekate_math::{Bit, Block32, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
@@ -17,7 +17,7 @@ use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness}
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const BUS_ID: &str = "parity_forgery_bus";

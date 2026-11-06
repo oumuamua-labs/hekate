@@ -7,7 +7,7 @@
 use hekate_aes::{Aes128Chiplet, Aes256Chiplet};
 use hekate_gadgets::{IntArithmeticChiplet, ModexpChiplet, RamChiplet, RomChiplet};
 use hekate_keccak::KeccakChiplet;
-use hekate_math::{Block128, Flat, TowerField};
+use hekate_math::{Block256, Flat, TowerField};
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
@@ -15,7 +15,7 @@ use hekate_program::constraint::BoundaryTarget;
 use hekate_program::{Air, FixedShape};
 use hekate_sha2::Sha256Chiplet;
 
-type F = Block128;
+type F = Block256;
 
 const PROBE_ROWS: usize = 256;
 const PROBE_BLOCKS: usize = 4;

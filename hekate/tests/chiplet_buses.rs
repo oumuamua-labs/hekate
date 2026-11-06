@@ -6,7 +6,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
@@ -19,9 +19,11 @@ use hekate_program::digest::program_id;
 use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::site::OUTER_LINEAR;
+use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const TEST_NUM_VARS: usize = 6;
@@ -69,25 +71,37 @@ fn prove_and_verify<P: Program<F>>(
         .unwrap_or(false)
 }
 
-fn try_prove_and_verify<P: Program<F>>(
+fn verify_both_modes<P: Program<F> + Sync>(
     air: &P,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F, ColumnTrace>,
-    config: &Config,
-) -> Result<bool, errors::Error> {
-    let seed = [0xCCu8; 32];
-    let proof =
-        prove(b"ChipletBuses", air, instance, witness, config, seed, None).map_err(|_| {
-            errors::Error::Protocol {
-                protocol: "ffi",
-                message: "prove failed",
-            }
-        })?;
+) -> [(errors::Result<bool>, String); 2] {
+    [true, false].map(|zero_knowledge| {
+        let config = Config {
+            zero_knowledge,
+            ..test_config()
+        };
 
-    let mut vt = Transcript::<H>::new(b"ChipletBuses");
-    let pinned_id = program_id(air).unwrap();
+        let proof = prove(
+            b"ChipletBuses",
+            air,
+            instance,
+            witness,
+            &config,
+            [0xCCu8; 32],
+            None,
+        )
+        .expect("chiplet buses prove");
 
-    HekateVerifier::<F, H>::verify(&pinned_id, air, instance, &proof, &mut vt, config)
+        verify_logged(air, instance, &config, &proof, b"ChipletBuses")
+    })
+}
+
+fn bus_sum_rejects(outcomes: &[(errors::Result<bool>, String); 2]) -> bool {
+    let [(zk, zk_log), (base, _)] = outcomes;
+
+    rejected_at(zk, zk_log, OUTER_LINEAR)
+        && rejected_with(base, "bus endpoint sums do not cancel to zero")
 }
 
 // ==========================================================
@@ -192,16 +206,12 @@ fn chiplet_to_chiplet_bus_product_mismatch() {
     let witness =
         ProgramWitness::new(dummy_main_trace(TEST_NUM_VARS)).with_chiplets(vec![trace1, trace2]);
 
-    let result = try_prove_and_verify(&air, &instance, &witness, &test_config());
-    assert!(
-        result.is_err() || result == Ok(false),
-        "mismatched chiplet bus products must fail verification"
-    );
+    let outcomes = verify_both_modes(&air, &instance, &witness);
+
+    assert!(bus_sum_rejects(&outcomes), "got {outcomes:?}");
 }
 
-/// Chiplet declares bus_id with no
-/// counterpart anywhere. Verify
-/// rejects with "dangling endpoint".
+/// Chiplet declares bus_id with no counterpart anywhere. Verify rejects.
 #[test]
 fn dangling_chiplet_bus() {
     let num_rows = 1 << TEST_NUM_VARS;
@@ -220,45 +230,46 @@ fn dangling_chiplet_bus() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(dummy_main_trace(TEST_NUM_VARS)).with_chiplets(vec![trace]);
 
-    let result = try_prove_and_verify(&air, &instance, &witness, &test_config());
-    assert!(
-        result.is_err() || result == Ok(false),
-        "dangling chiplet bus must fail verification"
-    );
+    let outcomes = verify_both_modes(&air, &instance, &witness);
+
+    assert!(bus_sum_rejects(&outcomes), "got {outcomes:?}");
 }
 
-/// Three specs share a bus_id. Third
-/// triggers "more than 2 endpoints" error.
+/// Three specs share a bus_id.
 #[test]
-fn three_endpoint_bus_rejected() {
+fn odd_endpoint_multiplicity_rejected() {
     let num_rows = 1 << TEST_NUM_VARS;
     let instructions = test_instructions(num_rows);
+    let instance = ProgramInstance::new(num_rows, vec![]);
 
-    let rom1 = RomChiplet::new(num_rows, num_rows);
-    let rom2 = RomChiplet::new(num_rows, num_rows);
-    let rom3 = RomChiplet::new(num_rows, num_rows);
+    let three = |third: &[Instruction]| {
+        let air = BareMainAir {
+            defs: vec![
+                ChipletDef::from_air(&RomChiplet::new(num_rows, num_rows)).unwrap(),
+                ChipletDef::from_air(&RomChiplet::new(num_rows, num_rows)).unwrap(),
+                ChipletDef::from_air(&RomChiplet::new(num_rows, third.len())).unwrap(),
+            ],
+        };
 
-    let air = BareMainAir {
-        defs: vec![
-            ChipletDef::from_air(&rom1).unwrap(),
-            ChipletDef::from_air(&rom2).unwrap(),
-            ChipletDef::from_air(&rom3).unwrap(),
-        ],
+        let witness = ProgramWitness::new(dummy_main_trace(TEST_NUM_VARS)).with_chiplets(vec![
+            generate_rom_trace(&instructions, num_rows).unwrap(),
+            generate_rom_trace(&instructions, num_rows).unwrap(),
+            generate_rom_trace(third, num_rows).unwrap(),
+        ]);
+
+        verify_both_modes(&air, &instance, &witness)
     };
 
-    let t1 = generate_rom_trace(&instructions, num_rows).unwrap();
-    let t2 = generate_rom_trace(&instructions, num_rows).unwrap();
-    let t3 = generate_rom_trace(&instructions, num_rows).unwrap();
-
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness =
-        ProgramWitness::new(dummy_main_trace(TEST_NUM_VARS)).with_chiplets(vec![t1, t2, t3]);
-
-    let result = try_prove_and_verify(&air, &instance, &witness, &test_config());
+    let balanced = three(&[]);
     assert!(
-        result.is_err() || result == Ok(false),
-        "3-endpoint bus must fail verification"
+        balanced
+            .iter()
+            .all(|(outcome, _)| matches!(outcome, Ok(true))),
+        "got {balanced:?}"
     );
+
+    let odd = three(&instructions);
+    assert!(bus_sum_rejects(&odd), "got {odd:?}");
 }
 
 /// Existing main<>chiplet pattern

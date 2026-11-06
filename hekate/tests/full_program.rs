@@ -6,7 +6,7 @@ use hekate::core::config::{CodeRate, Config};
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::errors::Error;
 use hekate_core::trace::{IntoTraceColumn, Trace};
 use hekate_math::{Bit, Block32};
@@ -14,21 +14,15 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::site::ZEROCHECK;
+use hekate_testkit::verdict::{rejected_at, verify_logged};
 use hekate_verifier::HekateVerifier;
 use hekate_verifier::prepared::{PreparedProgram, VerifierScratch};
 use proptest::prelude::*;
 use rand::{TryRngCore, rngs::OsRng};
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
-
-#[allow(dead_code)]
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_test_writer()
-        .with_max_level(tracing::Level::DEBUG)
-        .try_init();
-}
 
 fn test_config() -> Config {
     Config {
@@ -202,21 +196,17 @@ fn transcript_binding_security_trace_root_changes_challenges() {
         "Sanity: different configs must yield different trace roots"
     );
 
-    let alpha_a = {
-        let mut t = Transcript::<H>::new(b"BindingTest");
-        t.append_message(b"trace_root", &proof_a.trace_root);
-        t.challenge_field::<F>(b"alpha").unwrap()
-    };
+    let (honest, _) = verify_logged(&air, &instance, &config_a, &proof_a, b"BindingTest");
+    assert!(matches!(honest, Ok(true)), "got {honest:?}");
 
-    let alpha_b = {
-        let mut t = Transcript::<H>::new(b"BindingTest");
-        t.append_message(b"trace_root", &proof_b.trace_root);
-        t.challenge_field::<F>(b"alpha").unwrap()
-    };
+    let mut swapped = proof_a.clone();
+    swapped.trace_root = proof_b.trace_root.clone();
 
-    assert_ne!(
-        alpha_a, alpha_b,
-        "CRITICAL SECURITY FAIL: Transcript challenge did not change when trace root changed"
+    let (outcome, log) = verify_logged(&air, &instance, &config_a, &swapped, b"BindingTest");
+
+    assert!(
+        rejected_at(&outcome, &log, ZEROCHECK),
+        "got {outcome:?}\n{log}"
     );
 }
 
@@ -480,7 +470,7 @@ fn quarter_rate_proof_verifies_at_derived_count() {
 
     let quarter = Config::prod_at(CodeRate::Quarter);
 
-    assert_eq!(quarter.num_queries, 148);
+    assert_eq!(quarter.num_queries, 189);
 
     let proof = prove(
         b"FibAir_Quarter",
@@ -505,7 +495,6 @@ fn quarter_rate_proof_verifies_at_derived_count() {
     };
 
     assert!(matches!(verify(&quarter), Ok(true)));
-    assert!(!matches!(verify(&Config::prod()), Ok(true)));
 
     let half_rate = Config {
         code_rate: CodeRate::Half,
@@ -513,5 +502,12 @@ fn quarter_rate_proof_verifies_at_derived_count() {
         ..quarter
     };
 
-    assert!(matches!(verify(&half_rate), Ok(false)));
+    for drifted in [Config::prod(), half_rate] {
+        let (outcome, log) = verify_logged(&air, &instance, &drifted, &proof, b"FibAir_Quarter");
+
+        assert!(
+            rejected_at(&outcome, &log, ZEROCHECK),
+            "got {outcome:?}\n{log}"
+        );
+    }
 }

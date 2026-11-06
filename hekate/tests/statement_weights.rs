@@ -7,27 +7,26 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_gadgets::{IntArithmeticChiplet, ModexpChiplet, RamChiplet, RomChiplet};
 use hekate_keccak::KeccakChiplet;
-use hekate_math::{Block128, Flat, HardwareField, TowerField};
+use hekate_math::{Block256, Flat, HardwareField, TowerField};
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::expander::RingSwitchPlan;
 use hekate_program::fold_pool::FoldPool;
-use hekate_program::linearized::{self, RingGadget};
+use hekate_program::linearized::RingGadget;
 use hekate_program::outer::{
     BusColumnRow, ConsistencyInputs, EvalRecord, OuterLayout, OuterStatement, TableRecord,
     TableShape, assemble, linear_tensor_vars, linear_weights, linear_weights_of_rows,
     statement_rows, table_plan,
 };
-use hekate_program::permutation::{BUS_LIMBS, BusFraction, BusKind, BusValue, Slot, bus_columns};
+use hekate_program::permutation::{BusFraction, BusKind, Slot, bus_columns, h_planes, plane_basis};
 use hekate_program::predicate::Unknown;
 use hekate_sha2::Sha256Chiplet;
 
 const NUM_ROWS: usize = 256;
 const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
-const KARATSUBA_WIRES: u32 = 3;
 
-type F = Block128;
+type F = Block256;
 type Snapshot = (&'static str, errors::Result<Vec<ChipletDef<F>>>);
 
 fn mix(seed: u128) -> Flat<F> {
@@ -106,16 +105,11 @@ fn record(
 
     let half = shape.eval_claims() as u32;
     let columns = shape.num_columns as u32;
-    let limbs = shape.h_columns() as u32;
+    let planes = h_planes::<F>();
 
     let h_pad = base + 2 * half;
-    let sums_pad = h_pad + limbs;
-    let mask_pad = sums_pad + limbs;
-
-    let wide = |s: u128| BusValue {
-        lo: mix(s),
-        hi: mix(s + 7),
-    };
+    let sums_pad = h_pad + shape.h_columns() as u32;
+    let mask_pad = sums_pad + shape.bus_columns as u32;
 
     let fraction = |k: usize| {
         let spec = &statics.specs[k].1;
@@ -125,11 +119,11 @@ fn record(
                 .slots()
                 .enumerate()
                 .filter_map(|(j, slot)| match slot {
-                    Slot::Column(c) => Some((c as u32, wide(seed + 1000 * k as u128 + j as u128))),
+                    Slot::Column(c) => Some((c as u32, mix(seed + 1000 * k as u128 + j as u128))),
                     _ => None,
                 })
                 .collect(),
-            constant: wide(seed + 30 + k as u128),
+            constant: mix(seed + 30 + k as u128),
             selector: spec.selector.map(|s| s as u32),
             recv_selector: spec.recv_selector.map(|s| s as u32),
         }
@@ -144,33 +138,28 @@ fn record(
         .enumerate()
     {
         let group = column.group(statics.specs);
-        let limb = |j: usize| (BUS_LIMBS * c + j) as u32;
+        let plane = |j: usize| (planes * c + j) as u32;
 
-        for j in 0..BUS_LIMBS {
-            claimed_sums.push((
-                group.clone(),
-                j,
-                sums_pad + limb(j),
-                mix(seed + 90 + limb(j) as u128),
-            ));
-        }
+        claimed_sums.push((group, sums_pad + c as u32, mix(seed + 90 + c as u128)));
 
         let second = column.second.map(fraction);
 
         let wires = match &second {
-            None => KARATSUBA_WIRES,
-            Some(f) if f.selector_claimed() => 2 * KARATSUBA_WIRES + BUS_LIMBS as u32,
-            Some(_) => 2 * KARATSUBA_WIRES,
+            None => 1,
+            Some(f) if f.selector_claimed() => 3,
+            Some(_) => 2,
         };
 
         buses.push(BusColumnRow {
-            h_pads: core::array::from_fn(|j| h_pad + limb(j)),
-            h_masked: core::array::from_fn(|j| mix(seed + 10 + limb(j) as u128)),
+            h_pads: (0..planes).map(|j| h_pad + plane(j)).collect(),
+            h_masked: (0..planes)
+                .map(|j| mix(seed + 10 + plane(j) as u128))
+                .collect(),
             first: fraction(column.first),
             second,
             eq_lookup: match column.kind {
-                BusKind::Permutation => BusValue::one(),
-                BusKind::Lookup => wide(seed + 20 + c as u128),
+                BusKind::Permutation => Flat::from_raw(F::ONE),
+                BusKind::Lookup => mix(seed + 20 + c as u128),
             },
             first_wire,
         });
@@ -187,7 +176,7 @@ fn record(
             pad_first: base,
             eq_zc: mix(seed + 1),
             alpha: mix(seed + 2),
-            tau: F::EXTENSION_TAU.to_hardware(),
+            planes: plane_basis::<F>().unwrap(),
             boundary: statics
                 .boundary
                 .iter()
@@ -244,7 +233,7 @@ fn eval(subfield_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32
 
         let mu = (0..2u128)
             .map(|k| {
-                (0..linearized::BITS as u128)
+                (0..F::BITS as u128)
                     .map(|j| mix(seed + 100 + 200 * k + j))
                     .collect()
             })
@@ -310,7 +299,7 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
         let (eval, next) = eval(subfield_units, base, table_wires as u32);
 
         let gadget_wires = match subfield_units {
-            true => linearized::BITS - 1,
+            true => F::BITS - 1,
             false => 0,
         };
 

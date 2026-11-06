@@ -2,28 +2,31 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The `bound` tests mutate one proof field: transcript
-//! or Merkle binding rejects them, no outer row is reached.
-//! `violating_witnesses_are_rejected` runs an honest prover
-//! on a broken witness, which only an outer row can reject.
+//! The `bound` tests mutate one proof field:
+//! no outer row is reached. `violating_witnesses_are_rejected` runs an
+//! honest prover on a broken witness, which only an outer row can reject.
 
 use hekate::core::config::Config;
 use hekate::core::proofs::InnerProof;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block256, TowerField};
 use hekate_core::trace::{IntoTraceColumn, TraceBuilder};
 use hekate_gadgets::{CpuMemColumns, MemoryEvent, RamChiplet, generate_ram_trace};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
-use hekate_program::permutation::BUS_LIMBS;
-use hekate_program::{FixedShape, Program, ProgramInstance, ProgramWitness};
+use hekate_program::outer::{TableShape, TableStatics, table_plan};
+use hekate_program::{Air, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::site::{
+    CHIPLET_ZEROCHECK, EVAL_SUMCHECK, OUTER_COVERAGE, OUTER_LINEAR, OUTER_OPENING, ZEROCHECK,
+};
+use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 fn pinned_air(num_rows: usize) -> CircuitProgram<F> {
@@ -200,14 +203,54 @@ fn accepted<P: Program<F> + Sync>(
     )
 }
 
+fn fails_at<P: Program<F> + Sync>(
+    label: &'static [u8],
+    program: &P,
+    instance: &ProgramInstance<F>,
+    proof: &InnerProof<F>,
+    site: &str,
+) -> bool {
+    let (outcome, log) = verify_logged(program, instance, &config(), proof, label);
+
+    rejected_at(&outcome, &log, site)
+}
+
+fn fails_with<P: Program<F> + Sync>(
+    label: &'static [u8],
+    program: &P,
+    instance: &ProgramInstance<F>,
+    proof: &InnerProof<F>,
+    error: &str,
+) -> bool {
+    let (outcome, _) = verify_logged(program, instance, &config(), proof, label);
+
+    rejected_with(&outcome, error)
+}
+
 fn bump(value: &mut F) {
     *value += F::ONE;
 }
 
-fn h_claim(evaluation: &mut (Vec<F>, Vec<F>), h_limbs: usize, limb: usize) -> &mut F {
+fn h_claim(
+    evaluation: &mut (Vec<F>, Vec<F>),
+    h_planes: usize,
+    h_blinds: usize,
+    plane: usize,
+) -> &mut F {
     let half = evaluation.1.len() / 2;
 
-    &mut evaluation.1[half - h_limbs + limb]
+    &mut evaluation.1[half - h_planes - h_blinds + plane]
+}
+
+fn h_blinds(air: &impl Air<F>, statics: &TableStatics<'_, F>) -> usize {
+    let shape = TableShape::from_air(air, statics).unwrap();
+    let plan = table_plan(air, &shape, &config()).unwrap();
+
+    TableShape {
+        whole_blinds: plan.whole_blinds(),
+        ..shape
+    }
+    .h_blinds()
 }
 
 #[test]
@@ -229,7 +272,7 @@ fn absorbed_claims_are_transcript_bound() {
         bump(&mut mutant.main_point_evaluation.1[idx]);
 
         assert!(
-            !accepted(b"Tamper_Pinned", &air, &instance, &mutant),
+            fails_at(b"Tamper_Pinned", &air, &instance, &mutant, EVAL_SUMCHECK),
             "claim {idx}"
         );
     }
@@ -242,71 +285,111 @@ fn absorbed_sumcheck_stream_is_transcript_bound() {
     let mut mutant = proof.clone();
     bump(&mut mutant.zerocheck_proof.round_polys[0].evals[0]);
 
-    assert!(!accepted(b"Tamper_Pinned", &air, &instance, &mutant));
+    assert!(fails_at(
+        b"Tamper_Pinned",
+        &air,
+        &instance,
+        &mutant,
+        ZEROCHECK
+    ));
 
     let mut mutant = proof.clone();
     bump(&mut mutant.zerocheck_proof.claimed_evaluation);
 
-    assert!(!accepted(b"Tamper_Pinned", &air, &instance, &mutant));
+    assert!(fails_at(
+        b"Tamper_Pinned",
+        &air,
+        &instance,
+        &mutant,
+        ZEROCHECK
+    ));
 
     let mut mutant = proof.clone();
     bump(&mut mutant.eval_proof.sumcheck_proof.round_polys[0].evals[0]);
 
-    assert!(!accepted(b"Tamper_Pinned", &air, &instance, &mutant));
+    assert!(fails_at(
+        b"Tamper_Pinned",
+        &air,
+        &instance,
+        &mutant,
+        EVAL_SUMCHECK
+    ));
 
     let mut mutant = proof.clone();
     bump(&mut mutant.eval_proof.sumcheck_proof.claimed_evaluation);
 
-    assert!(!accepted(b"Tamper_Pinned", &air, &instance, &mutant));
+    assert!(fails_at(
+        b"Tamper_Pinned",
+        &air,
+        &instance,
+        &mutant,
+        EVAL_SUMCHECK
+    ));
 }
 
 #[test]
 fn absorbed_bus_values_are_transcript_bound() {
     let (air, instance, proof) = ram_case();
+    let chiplets = air.chiplet_defs().unwrap();
+    let main_h_blinds = h_blinds(&air, &air.statics());
+    let chiplet_h_blinds = h_blinds(&chiplets[0], &chiplets[0].statics());
 
-    for limb in 0..BUS_LIMBS {
+    for column in 0..proof.main_logup_aux.claimed_sums.len() {
         let mut mutant = proof.clone();
-        bump(&mut mutant.main_logup_aux.claimed_sums[limb]);
+        bump(&mut mutant.main_logup_aux.claimed_sums[column]);
 
         assert!(
-            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-            "main claimed_sum limb {limb}"
+            fails_at(b"Tamper_Ram", &air, &instance, &mutant, ZEROCHECK),
+            "main claimed_sum column {column}"
         );
+    }
 
+    for column in 0..proof.chiplet_logup_aux[0].claimed_sums.len() {
         let mut mutant = proof.clone();
-        bump(&mut mutant.chiplet_logup_aux[0].claimed_sums[limb]);
+        bump(&mut mutant.chiplet_logup_aux[0].claimed_sums[column]);
 
         assert!(
-            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-            "chiplet claimed_sum limb {limb}"
+            fails_with(b"Tamper_Ram", &air, &instance, &mutant, CHIPLET_ZEROCHECK),
+            "chiplet claimed_sum column {column}"
         );
+    }
 
-        // Moving the h_eval and its base h claim together
-        // keeps the pin row, and the h opening rejects.
+    let main_planes = proof.main_logup_aux.h_evals.len();
+
+    // The h_eval and its base h claim move together, as their pin row ties them
+    for plane in 0..main_planes {
         let mut mutant = proof.clone();
-        let h_limbs = mutant.main_logup_aux.h_evals.len();
 
-        bump(&mut mutant.main_logup_aux.h_evals[limb]);
-        bump(h_claim(&mut mutant.main_point_evaluation, h_limbs, limb));
-
-        assert!(
-            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-            "main h_eval limb {limb}"
-        );
-
-        let mut mutant = proof.clone();
-        let h_limbs = mutant.chiplet_logup_aux[0].h_evals.len();
-
-        bump(&mut mutant.chiplet_logup_aux[0].h_evals[limb]);
+        bump(&mut mutant.main_logup_aux.h_evals[plane]);
         bump(h_claim(
-            &mut mutant.chiplet_point_evaluations[0],
-            h_limbs,
-            limb,
+            &mut mutant.main_point_evaluation,
+            main_planes,
+            main_h_blinds,
+            plane,
         ));
 
         assert!(
-            !accepted(b"Tamper_Ram", &air, &instance, &mutant),
-            "chiplet h_eval limb {limb}"
+            fails_at(b"Tamper_Ram", &air, &instance, &mutant, EVAL_SUMCHECK),
+            "main h_eval plane {plane}"
+        );
+    }
+
+    let chiplet_planes = proof.chiplet_logup_aux[0].h_evals.len();
+
+    for plane in 0..chiplet_planes {
+        let mut mutant = proof.clone();
+
+        bump(&mut mutant.chiplet_logup_aux[0].h_evals[plane]);
+        bump(h_claim(
+            &mut mutant.chiplet_point_evaluations[0],
+            chiplet_planes,
+            chiplet_h_blinds,
+            plane,
+        ));
+
+        assert!(
+            fails_at(b"Tamper_Ram", &air, &instance, &mutant, ZEROCHECK),
+            "chiplet h_eval plane {plane}"
         );
     }
 
@@ -314,7 +397,7 @@ fn absorbed_bus_values_are_transcript_bound() {
     bump(&mut mutant.chiplet_point_evaluations[0].1[0]);
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, ZEROCHECK),
         "chiplet ring claim"
     );
 }
@@ -327,20 +410,23 @@ fn outer_segment_fields_are_bound() {
     bump(&mut mutant.outer.as_mut().unwrap().interleaved[0]);
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_COVERAGE),
         "interleaved"
     );
 
     let mut mutant = proof.clone();
     bump(&mut mutant.outer.as_mut().unwrap().linear[0]);
 
-    assert!(!accepted(b"Tamper_Ram", &air, &instance, &mutant), "linear");
+    assert!(
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_COVERAGE),
+        "linear"
+    );
 
     let mut mutant = proof.clone();
     bump(&mut mutant.outer.as_mut().unwrap().quadratic[0]);
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_COVERAGE),
         "quadratic"
     );
 
@@ -348,7 +434,7 @@ fn outer_segment_fields_are_bound() {
     bump(&mut mutant.outer.as_mut().unwrap().pad_opening.values[0]);
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_OPENING),
         "pad opening"
     );
 
@@ -356,7 +442,7 @@ fn outer_segment_fields_are_bound() {
     bump(&mut mutant.outer.as_mut().unwrap().aux_opening.values[0]);
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_OPENING),
         "aux opening"
     );
 
@@ -364,7 +450,7 @@ fn outer_segment_fields_are_bound() {
     mutant.outer.as_mut().unwrap().aux_root[0] ^= 1;
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_COVERAGE),
         "aux root"
     );
 
@@ -372,7 +458,7 @@ fn outer_segment_fields_are_bound() {
     mutant.pad_root.as_mut().unwrap()[0] ^= 1;
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_with(b"Tamper_Ram", &air, &instance, &mutant, CHIPLET_ZEROCHECK),
         "pad root"
     );
 
@@ -380,7 +466,13 @@ fn outer_segment_fields_are_bound() {
     mutant.outer = None;
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_with(
+            b"Tamper_Ram",
+            &air,
+            &instance,
+            &mutant,
+            "pad_root and outer presence must match zero_knowledge"
+        ),
         "missing outer"
     );
 }
@@ -394,14 +486,14 @@ fn violating_witnesses_are_rejected() {
     });
 
     assert!(
-        !accepted(b"Tamper_Pinned", &air, &instance, &proof),
+        fails_at(b"Tamper_Pinned", &air, &instance, &proof, OUTER_LINEAR),
         "broken transition"
     );
 
     let (air, instance, proof) = pinned_case_with(11, |_, _| {});
 
     assert!(
-        !accepted(b"Tamper_Pinned", &air, &instance, &proof),
+        fails_at(b"Tamper_Pinned", &air, &instance, &proof, OUTER_LINEAR),
         "wrong boundary value"
     );
 
@@ -411,7 +503,7 @@ fn violating_witnesses_are_rejected() {
     });
 
     assert!(
-        !accepted(b"Tamper_Pinned", &air, &instance, &proof),
+        fails_at(b"Tamper_Pinned", &air, &instance, &proof, OUTER_LINEAR),
         "fixed selector violated"
     );
 
@@ -424,7 +516,7 @@ fn violating_witnesses_are_rejected() {
     let (air, instance, proof) = ram_case_with(&cpu, &ram);
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &proof),
+        fails_at(b"Tamper_Ram", &air, &instance, &proof, OUTER_LINEAR),
         "bus multisets diverge"
     );
 }
@@ -440,10 +532,10 @@ fn outer_multiproof_sections_are_bound() {
         .unwrap()
         .pad_opening
         .multiproof
-        .unreached[0][0] ^= 1;
+        .unreached[0] ^= 1;
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_OPENING),
         "pad unreached node"
     );
 
@@ -454,10 +546,10 @@ fn outer_multiproof_sections_are_bound() {
         .unwrap()
         .pad_opening
         .multiproof
-        .siblings[0][0] ^= 1;
+        .siblings[0] ^= 1;
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_OPENING),
         "pad sibling"
     );
 
@@ -468,10 +560,10 @@ fn outer_multiproof_sections_are_bound() {
         .unwrap()
         .aux_opening
         .multiproof
-        .siblings[0][0] ^= 1;
+        .siblings[0] ^= 1;
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_OPENING),
         "aux sibling"
     );
 
@@ -486,7 +578,7 @@ fn outer_multiproof_sections_are_bound() {
         .pop();
 
     assert!(
-        !accepted(b"Tamper_Ram", &air, &instance, &mutant),
+        fails_at(b"Tamper_Ram", &air, &instance, &mutant, OUTER_OPENING),
         "aux unreached count"
     );
 }

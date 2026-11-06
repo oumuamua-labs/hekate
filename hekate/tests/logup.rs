@@ -2,28 +2,36 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod multibus;
+
 use hekate::core::config::Config;
-use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
+use hekate::core::trace::{ColumnTrace, ColumnType, IntoTraceColumn, TraceBuilder, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::Block128;
-use hekate_core::errors::Error;
+use hekate::math::{Block256, Flat};
+use hekate_core::errors::{self, Error};
 use hekate_math::{Bit, Block32, TowerField};
 use hekate_program::chiplet::ChipletDef;
+use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
 use hekate_program::permutation::{
     ChallengeLabel, PermutationCheckSpec, Source, bus_columns, bus_tag,
 };
-use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
+use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
+use hekate_testkit::site::{
+    BUS_SUM, CHIPLET_ZEROCHECK, FIXED_COLUMN, H_EVAL_BINDING, MULTIPROOF, OUTER_LINEAR,
+};
+use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
 use hekate_verifier::HekateVerifier;
+use multibus::{LABEL, cfg, multibus_proof};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const BUS_ID: &str = "ghost_activation_bus";
@@ -32,9 +40,12 @@ const COL_KEY: usize = 0;
 const COL_SELECTOR: usize = 1;
 const COL_REQUEST_IDX: usize = 2;
 
+const ZERO_KEY: Block32 = Block32(0);
+
 #[derive(Clone)]
 struct Endpoint {
     lookup: bool,
+    active: usize,
 }
 
 fn layout() -> Vec<ColumnType> {
@@ -72,7 +83,7 @@ impl Air<F> for Endpoint {
     }
 
     fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
-        vec![FixedColumn::prefix(COL_SELECTOR, 2)]
+        vec![FixedColumn::prefix(COL_SELECTOR, self.active)]
     }
 
     fn constraint_ast(&self) -> ConstraintAst<F> {
@@ -109,7 +120,7 @@ impl Air<F> for GhostProgram {
 }
 
 impl Program<F> for GhostProgram {
-    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
         Ok(vec![ChipletDef::from_air(&self.table)?])
     }
 }
@@ -130,7 +141,11 @@ fn build_trace(rows: &[(Block32, Bit)], num_rows: usize) -> ColumnTrace {
     tb.build()
 }
 
-fn run(program: &GhostProgram, cpu: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
+fn run(
+    program: &GhostProgram,
+    cpu: &[(Block32, Bit)],
+    table: &[(Block32, Bit)],
+) -> (errors::Result<bool>, String) {
     let num_rows = 4;
     let seed = [0xC3u8; 32];
 
@@ -148,7 +163,7 @@ fn run(program: &GhostProgram, cpu: &[(Block32, Bit)], table: &[(Block32, Bit)])
         ..Config::default()
     };
 
-    let proof = match prove(
+    let proof = prove(
         b"GHOST_ACTIVATION",
         program,
         &instance,
@@ -156,26 +171,11 @@ fn run(program: &GhostProgram, cpu: &[(Block32, Bit)], table: &[(Block32, Bit)])
         &config,
         seed,
         None,
-    ) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    let mut verifier_ts = Transcript::<H>::new(b"GHOST_ACTIVATION");
-    let pinned_id = program_id(program).unwrap();
-
-    HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        program,
-        &instance,
-        &proof,
-        &mut verifier_ts,
-        &config,
     )
-    .unwrap_or(false)
-}
+    .expect("ghost activation prove");
 
-const ZERO_KEY: Block32 = Block32(0);
+    verify_logged(program, &instance, &config, &proof, b"GHOST_ACTIVATION")
+}
 
 fn honest_cpu() -> Vec<(Block32, Bit)> {
     vec![
@@ -198,15 +198,19 @@ fn honest_table() -> Vec<(Block32, Bit)> {
 #[test]
 fn ghost_activation_honest_accepts() {
     let program = GhostProgram {
-        cpu: Endpoint { lookup: false },
-        table: Endpoint { lookup: false },
+        cpu: Endpoint {
+            lookup: false,
+            active: 2,
+        },
+        table: Endpoint {
+            lookup: false,
+            active: 2,
+        },
     };
 
-    let accepted = run(&program, &honest_cpu(), &honest_table());
-    assert!(
-        accepted,
-        "honest aligned witness with zero-keyed padding must verify"
-    );
+    let (outcome, _) = run(&program, &honest_cpu(), &honest_table());
+
+    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
 }
 
 #[test]
@@ -224,17 +228,38 @@ fn exploit_ghost_activation_partial_zero_key_permutation() {
         (ZERO_KEY, Bit::ZERO),
     ];
 
-    let program = GhostProgram {
-        cpu: Endpoint { lookup: false },
-        table: Endpoint { lookup: false },
+    let pinned = GhostProgram {
+        cpu: Endpoint {
+            lookup: false,
+            active: 2,
+        },
+        table: Endpoint {
+            lookup: false,
+            active: 2,
+        },
     };
 
-    let accepted = run(&program, &cpu, &table);
+    let (outcome, log) = run(&pinned, &cpu, &table);
+
     assert!(
-        !accepted,
-        "Permutation-kind bus must reject double ghost activation \
-         on zero-key rows (CPU forges two reads with no chiplet match)"
+        rejected_at(&outcome, &log, FIXED_COLUMN),
+        "got {outcome:?}\n{log}"
     );
+
+    let admitted = GhostProgram {
+        cpu: Endpoint {
+            lookup: false,
+            active: 4,
+        },
+        table: Endpoint {
+            lookup: false,
+            active: 2,
+        },
+    };
+
+    let (outcome, _) = run(&admitted, &cpu, &table);
+
+    assert!(rejected_with(&outcome, BUS_SUM), "got {outcome:?}");
 }
 
 #[test]
@@ -252,18 +277,44 @@ fn preflight_flags_partial_zero_key_permutation() {
         (ZERO_KEY, Bit::ZERO),
     ];
 
+    let pinned = GhostProgram {
+        cpu: Endpoint {
+            lookup: false,
+            active: 2,
+        },
+        table: Endpoint {
+            lookup: false,
+            active: 2,
+        },
+    };
+
     let program = GhostProgram {
-        cpu: Endpoint { lookup: false },
-        table: Endpoint { lookup: false },
+        cpu: Endpoint {
+            lookup: false,
+            active: 4,
+        },
+        ..pinned.clone()
     };
 
     let num_rows = 4;
+    let instance = ProgramInstance::new(num_rows, vec![]);
+
+    let honest = ProgramWitness::new(build_trace(&honest_cpu(), num_rows))
+        .with_chiplets(vec![build_trace(&honest_table(), num_rows)]);
+    let control = preflight(&pinned, &instance, &honest).unwrap();
+
+    assert!(control.is_clean(), "{control}");
+
     let cpu_trace = build_trace(&cpu, num_rows);
     let table_trace = build_trace(&table, num_rows);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![table_trace]);
-    let instance = ProgramInstance::new(num_rows, vec![]);
 
     let report = preflight(&program, &instance, &witness).unwrap();
+
+    assert!(
+        report.constraint_violations.is_empty() && report.fixed_column_violations.is_empty(),
+        "{report}"
+    );
 
     let bus = report
         .bus_diagnostics
@@ -274,6 +325,8 @@ fn preflight_flags_partial_zero_key_permutation() {
              a clean report on this witness would mean preflight uses a weaker \
              oracle than the runtime LogUp algebra",
         );
+
+    assert!(bus.bus_imbalance, "{report}");
 
     let cpu_product = bus
         .endpoints
@@ -302,7 +355,10 @@ fn preflight_flags_partial_zero_key_permutation() {
 const MT_BUS: &str = "audit_multi_table_bus";
 
 #[derive(Clone)]
-struct MultiTableLookupAir;
+struct MultiTableLookupAir {
+    origin: usize,
+    count: usize,
+}
 
 impl Air<F> for MultiTableLookupAir {
     fn num_columns(&self) -> usize {
@@ -321,7 +377,15 @@ impl Air<F> for MultiTableLookupAir {
     }
 
     fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
-        vec![FixedColumn::prefix(1, 1)]
+        vec![FixedColumn {
+            col_idx: 1,
+            shape: FixedShape::Cadence {
+                stride: 1,
+                count: self.count,
+                origin: self.origin,
+                values: vec![F::ONE],
+            },
+        }]
     }
 
     fn constraint_ast(&self) -> ConstraintAst<F> {
@@ -330,18 +394,26 @@ impl Air<F> for MultiTableLookupAir {
 }
 
 impl Program<F> for MultiTableLookupAir {
-    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
         Ok(vec![
-            ChipletDef::from_air(&MultiTableLookupAir)?,
-            ChipletDef::from_air(&MultiTableLookupAir)?,
+            ChipletDef::from_air(&MultiTableLookupAir {
+                origin: 0,
+                count: 1,
+            })?,
+            ChipletDef::from_air(&MultiTableLookupAir {
+                origin: 1,
+                count: 1,
+            })?,
         ])
     }
 }
 
-fn mt_lookup_trace(num_vars: usize, key: u32) -> ColumnTrace {
+fn mt_lookup_trace(num_vars: usize, rows: &[(usize, u32)]) -> ColumnTrace {
     let mut tb = TraceBuilder::new(&[ColumnType::B32, ColumnType::Bit], num_vars).unwrap();
-    tb.set_b32(0, 0, Block32::from(key)).unwrap();
-    tb.set_bit(1, 0, Bit::ONE).unwrap();
+    for &(row, key) in rows {
+        tb.set_b32(0, row, Block32::from(key)).unwrap();
+        tb.set_bit(1, row, Bit::ONE).unwrap();
+    }
 
     tb.build()
 }
@@ -351,14 +423,12 @@ fn lookup_bus_two_tables_mismatched_content_rejected() {
     let num_vars = 2;
     let num_rows = 1 << num_vars;
 
-    let air = MultiTableLookupAir;
-
-    let reader = mt_lookup_trace(num_vars, 0xA1A1_A1A1);
-    let table_a = mt_lookup_trace(num_vars, 0xA1A1_A1A1);
-    let table_b = mt_lookup_trace(num_vars, 0xB2B2_B2B2);
+    let air = MultiTableLookupAir {
+        origin: 0,
+        count: 2,
+    };
 
     let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(reader).with_chiplets(vec![table_a, table_b]);
 
     let config = Config {
         num_queries: 4,
@@ -369,117 +439,30 @@ fn lookup_bus_two_tables_mismatched_content_rejected() {
         ..Config::default()
     };
 
-    let proof_res = prove(
-        b"BUS_MT", &air, &instance, &witness, &config, [0x5A; 32], None,
-    );
+    let run = |table_b_key: u32| {
+        let reader = mt_lookup_trace(num_vars, &[(0, 0xA1A1_A1A1), (1, 0xB2B2_B2B2)]);
+        let table_a = mt_lookup_trace(num_vars, &[(0, 0xA1A1_A1A1)]);
+        let table_b = mt_lookup_trace(num_vars, &[(1, table_b_key)]);
+        let witness = ProgramWitness::new(reader).with_chiplets(vec![table_a, table_b]);
 
-    let accepted = match proof_res {
-        Ok(proof) => {
-            let mut vt = Transcript::<H>::new(b"BUS_MT");
-            let pinned_id = program_id(&air).unwrap();
+        let proof = prove(
+            b"BUS_MT", &air, &instance, &witness, &config, [0x5A; 32], None,
+        )
+        .expect("two-table lookup prove");
 
-            HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-                .unwrap_or(false)
-        }
-        Err(_) => false,
+        verify_logged(&air, &instance, &config, &proof, b"BUS_MT")
     };
 
-    assert!(
-        !accepted,
-        "SECURITY FAILURE: mismatched two-table Lookup accepted"
-    );
+    let (matched, _) = run(0xB2B2_B2B2);
+    assert!(matches!(matched, Ok(true)), "got {matched:?}");
+
+    let (outcome, _) = run(0xC3C3_C3C3);
+    assert!(rejected_with(&outcome, BUS_SUM), "got {outcome:?}");
 }
 
 // =====================================================
-// Multi-bus chiplet fixtures (h_evals tests)
+// Bus-free fixture (h_evals tests)
 // =====================================================
-
-const MULTI_BUS_0: &str = "audit_bus_0";
-const MULTI_BUS_1: &str = "audit_bus_1";
-const MULTI_BUS_2: &str = "audit_bus_2";
-const MULTI_BUS_VARS: usize = 5;
-
-#[derive(Clone)]
-struct MultiBusChiplet {
-    num_rows: usize,
-}
-
-impl Air<F> for MultiBusChiplet {
-    fn name(&self) -> String {
-        "audit_multibus".to_string()
-    }
-
-    fn num_columns(&self) -> usize {
-        2
-    }
-
-    fn column_layout(&self) -> &[ColumnType] {
-        &[ColumnType::B32, ColumnType::Bit]
-    }
-
-    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        let spec = || {
-            PermutationCheckSpec::new(
-                vec![
-                    (Source::Column(0), b"audit_v" as ChallengeLabel),
-                    (Source::RowIndexLeBytes(4), b"audit_clk" as ChallengeLabel),
-                ],
-                Some(1),
-            )
-        };
-
-        vec![
-            (MULTI_BUS_0.into(), spec()),
-            (MULTI_BUS_1.into(), spec()),
-            (MULTI_BUS_2.into(), spec()),
-        ]
-    }
-
-    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
-        vec![FixedColumn::prefix(1, self.num_rows - 1)]
-    }
-
-    fn constraint_ast(&self) -> ConstraintAst<F> {
-        ConstraintSystem::<F>::new().build()
-    }
-}
-
-#[derive(Clone)]
-struct MultiBusProgram;
-
-impl Air<F> for MultiBusProgram {
-    fn name(&self) -> String {
-        "audit_multibus_main".to_string()
-    }
-
-    fn num_columns(&self) -> usize {
-        1
-    }
-
-    fn column_layout(&self) -> &[ColumnType] {
-        &[ColumnType::Bit]
-    }
-
-    fn constraint_ast(&self) -> ConstraintAst<F> {
-        let cs = ConstraintSystem::<F>::new();
-        cs.assert_boolean(cs.col(0));
-
-        cs.build()
-    }
-}
-
-impl Program<F> for MultiBusProgram {
-    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
-        Ok(vec![
-            ChipletDef::from_air(&MultiBusChiplet {
-                num_rows: 1 << MULTI_BUS_VARS,
-            })?,
-            ChipletDef::from_air(&MultiBusChiplet {
-                num_rows: 1 << MULTI_BUS_VARS,
-            })?,
-        ])
-    }
-}
 
 #[derive(Clone)]
 struct BusFreeProgram;
@@ -507,74 +490,6 @@ impl Air<F> for BusFreeProgram {
 
 impl Program<F> for BusFreeProgram {}
 
-fn multibus_trace(num_vars: usize) -> ColumnTrace {
-    let mut tb = TraceBuilder::new(&[ColumnType::B32, ColumnType::Bit], num_vars).unwrap();
-    let num_rows = tb.num_rows();
-
-    tb.set_b32(0, 0, Block32::from(0xCAFE_F00Du32)).unwrap();
-    tb.fill_selector(1, num_rows - 1).unwrap();
-
-    tb.build()
-}
-
-fn cfg() -> Config {
-    Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        zero_knowledge: true,
-        fold_arity_log: 1,
-        early_stop_vars: 1,
-        ..Config::default()
-    }
-}
-
-/// Five draws on an eight-node layer
-/// leave three or more nodes unreached.
-fn layer_gap_cfg() -> Config {
-    Config {
-        num_queries: 5,
-        ..cfg()
-    }
-}
-
-fn multibus_proof(
-    config: Config,
-) -> (
-    MultiBusProgram,
-    ProgramInstance<F>,
-    Config,
-    hekate_core::proofs::InnerProof<F>,
-) {
-    let num_vars = MULTI_BUS_VARS;
-    let num_rows = 1 << num_vars;
-
-    let air = MultiBusProgram;
-    let main_trace = TraceBuilder::new(&[ColumnType::Bit], num_vars)
-        .unwrap()
-        .build();
-    let chiplet_a = multibus_trace(num_vars);
-    let chiplet_b = multibus_trace(num_vars);
-
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(main_trace).with_chiplets(vec![chiplet_a, chiplet_b]);
-
-    let proof = prove(
-        b"AuditP0", &air, &instance, &witness, &config, [0xA5; 32], None,
-    )
-    .expect("multibus baseline prove");
-
-    let mut vt = Transcript::<H>::new(b"AuditP0");
-    let pinned_id = program_id(&air).unwrap();
-
-    assert!(
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-            .unwrap(),
-        "multibus baseline must verify"
-    );
-
-    (air, instance, config, proof)
-}
-
 fn bus_free_proof() -> (
     BusFreeProgram,
     ProgramInstance<F>,
@@ -596,38 +511,19 @@ fn bus_free_proof() -> (
         ..cfg()
     };
 
-    let proof = prove(
-        b"AuditP0", &air, &instance, &witness, &config, [0x5A; 32], None,
-    )
-    .expect("bus-free baseline prove");
+    let proof = prove(LABEL, &air, &instance, &witness, &config, [0x5A; 32], None)
+        .expect("bus-free baseline prove");
 
-    assert!(
-        !verify_rejects(&air, &instance, &config, &proof),
-        "bus-free baseline must verify"
+    assert_eq!(
+        verify_logged(&air, &instance, &config, &proof, LABEL).0,
+        Ok(true)
     );
 
     (air, instance, config, proof)
 }
 
-fn verify_result(
-    air: &impl Program<F>,
-    instance: &ProgramInstance<F>,
-    config: &Config,
-    proof: &hekate_core::proofs::InnerProof<F>,
-) -> hekate_core::errors::Result<bool> {
-    let mut vt = Transcript::<H>::new(b"AuditP0");
-    let pinned_id = program_id(air).unwrap();
-
-    HekateVerifier::<F, H>::verify(&pinned_id, air, instance, proof, &mut vt, config)
-}
-
-fn verify_rejects(
-    air: &impl Program<F>,
-    instance: &ProgramInstance<F>,
-    config: &Config,
-    proof: &hekate_core::proofs::InnerProof<F>,
-) -> bool {
-    !matches!(verify_result(air, instance, config, proof), Ok(true))
+fn h_eval_rejected(zero_knowledge: bool, outcome: &errors::Result<bool>, log: &str) -> bool {
+    rejected_with(outcome, CHIPLET_ZEROCHECK) && (zero_knowledge || log.contains(H_EVAL_BINDING))
 }
 
 // =====================================================
@@ -636,17 +532,24 @@ fn verify_rejects(
 
 #[test]
 fn logup_h_evals_reordered_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof(cfg());
+    for zero_knowledge in [true, false] {
+        let (air, instance, config, mut proof) = multibus_proof(Config {
+            zero_knowledge,
+            ..cfg()
+        });
 
-    let aux = &mut proof.chiplet_logup_aux[0];
-    assert!(aux.h_evals.len() >= 2);
+        let aux = &mut proof.chiplet_logup_aux[0];
+        assert!(aux.h_evals.len() >= 2);
 
-    aux.h_evals.swap(0, 1);
+        aux.h_evals.swap(0, 1);
 
-    assert!(
-        verify_rejects(&air, &instance, &config, &proof),
-        "SECURITY FAILURE: reordered h_evals accepted"
-    );
+        let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+
+        assert!(
+            h_eval_rejected(zero_knowledge, &outcome, &log),
+            "zero_knowledge={zero_knowledge}: got {outcome:?}\n{log}"
+        );
+    }
 }
 
 // =====================================================
@@ -655,17 +558,24 @@ fn logup_h_evals_reordered_rejected() {
 
 #[test]
 fn h_eval_corruption_after_sumcheck_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof(cfg());
+    for zero_knowledge in [true, false] {
+        let (air, instance, config, mut proof) = multibus_proof(Config {
+            zero_knowledge,
+            ..cfg()
+        });
 
-    let aux = &mut proof.chiplet_logup_aux[0];
-    assert!(!aux.h_evals.is_empty());
+        let aux = &mut proof.chiplet_logup_aux[0];
+        assert!(!aux.h_evals.is_empty());
 
-    aux.h_evals[0] += F::ONE;
+        aux.h_evals[0] += F::ONE;
 
-    assert!(
-        verify_rejects(&air, &instance, &config, &proof),
-        "SECURITY FAILURE: corrupted h_evals accepted"
-    );
+        let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+
+        assert!(
+            h_eval_rejected(zero_knowledge, &outcome, &log),
+            "zero_knowledge={zero_knowledge}: got {outcome:?}\n{log}"
+        );
+    }
 }
 
 // =====================================================
@@ -681,7 +591,7 @@ fn h_opening_omitted_on_bused_table_rejected() {
     // Keep h_root, the transcript stays synced
     proof.eval_proof.openings.remove(1);
 
-    let result = verify_result(&air, &instance, &config, &proof);
+    let result = verify_logged(&air, &instance, &config, &proof, LABEL).0;
 
     assert!(
         matches!(
@@ -703,7 +613,7 @@ fn h_root_omitted_on_bused_proof_rejected() {
 
     proof.h_root = None;
 
-    let result = verify_result(&air, &instance, &config, &proof);
+    let result = verify_logged(&air, &instance, &config, &proof, LABEL).0;
 
     assert!(
         matches!(
@@ -794,7 +704,7 @@ impl Air<F> for LabelFlipHost {
 }
 
 impl Program<F> for LabelFlipHost {
-    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
         Ok(vec![
             ChipletDef::from_air(&LabelFlipChiplet {
                 honest_bus_id: "honest_bus_a".to_string(),
@@ -851,14 +761,17 @@ fn proof_under_other_bus_ids_rejected() {
 
     assert!(preflight(&air, &instance, &witness).unwrap().is_clean());
 
+    let (fake, _) = verify_logged(&air, &instance, &config, &proof, b"BusLabelFlip");
+    assert!(matches!(fake, Ok(true)), "got {fake:?}");
+
     mode_honest.store(true, Ordering::SeqCst);
 
-    let mut vt = Transcript::<H>::new(b"BusLabelFlip");
-    let pinned_id = program_id(&air).unwrap();
+    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"BusLabelFlip");
 
-    let res = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
-
-    assert!(res.is_err() || !res.unwrap());
+    assert!(
+        rejected_with(&outcome, CHIPLET_ZEROCHECK),
+        "got {outcome:?}"
+    );
 }
 
 // =====================================================
@@ -892,23 +805,13 @@ fn zero_bus_main_injected_claimed_sum_rejected() {
 
     proof.main_logup_aux.claimed_sums.push(F::ONE);
 
-    let mut vt = Transcript::<H>::new(b"AuditP0");
-    let pinned_id = program_id(&air).unwrap();
-
-    match HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config) {
-        Err(e) => {
-            let msg = format!("{e:?}");
-            assert!(
-                msg.contains("claimed_sums length"),
-                "expected the empty-bus_specs claimed_sums length guard, got: {msg}"
-            );
-        }
-        Ok(v) => panic!(
-            "SECURITY FAILURE: a zero-bus table presented a non-empty \
-             claimed_sum and verify returned Ok({v}); an unbound endpoint \
-             would enter cross-bus matching"
-        ),
-    }
+    assert_eq!(
+        verify_logged(&air, &instance, &config, &proof, LABEL).0,
+        Err(Error::Protocol {
+            protocol: "verifier",
+            message: "logup_aux claimed_sums length mismatch with the h columns",
+        })
+    );
 }
 
 // =====================================================
@@ -926,7 +829,7 @@ fn h_binding_on_bus_free_proof_rejected() {
     let mut with_root = proof.clone();
     with_root.h_root = bused.h_root;
 
-    let result = verify_result(&air, &instance, &config, &with_root);
+    let (result, _) = verify_logged(&air, &instance, &config, &with_root, LABEL);
 
     assert!(
         matches!(
@@ -945,7 +848,7 @@ fn h_binding_on_bus_free_proof_rejected() {
         .openings
         .insert(1, bused.eval_proof.openings[1].clone());
 
-    let result = verify_result(&air, &instance, &config, &with_opening);
+    let (result, _) = verify_logged(&air, &instance, &config, &with_opening, LABEL);
 
     assert!(
         matches!(
@@ -960,7 +863,7 @@ fn h_binding_on_bus_free_proof_rejected() {
 }
 
 // =====================================================
-// Corrupted Merkle path on the h and trace openings
+// Corrupted Merkle path on the h opening
 // =====================================================
 
 #[test]
@@ -971,169 +874,11 @@ fn h_opening_sibling_tamper_rejected() {
 
     assert!(!opening.multiproof.siblings.is_empty());
 
-    opening.multiproof.siblings[0][0] ^= 1;
+    opening.multiproof.siblings[0] ^= 1;
 
-    assert!(verify_rejects(&air, &instance, &config, &proof));
-}
+    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
 
-#[test]
-fn trace_opening_sibling_tamper_rejected() {
-    let (air, instance, config, mut proof) = multibus_proof(cfg());
-
-    let opening = &mut proof.eval_proof.openings[0];
-
-    assert!(!opening.multiproof.siblings.is_empty());
-
-    opening.multiproof.siblings[0][0] ^= 1;
-
-    assert!(verify_rejects(&air, &instance, &config, &proof));
-}
-
-#[test]
-fn opened_column_off_part_layout_rejected() {
-    let (air, instance, config, proof) = multibus_proof(cfg());
-
-    let mut long_h = proof.clone();
-    long_h.eval_proof.openings[1].leaves.extend([0u8; 16]);
-
-    let mut short_trace = proof;
-    short_trace.eval_proof.openings[0].leaves.pop();
-
-    for forged in [long_h, short_trace] {
-        let result = verify_result(&air, &instance, &config, &forged);
-
-        assert!(
-            matches!(
-                result,
-                Err(Error::Protocol {
-                    protocol: "fold",
-                    message: "opened leaves do not match the tree's leaf width",
-                })
-            ),
-            "{result:?}"
-        );
-    }
-}
-
-#[test]
-fn master_count_mismatch_rejected() {
-    let (air, instance, config, proof) = multibus_proof(cfg());
-
-    let mut short = proof.clone();
-    short.eval_proof.masters.pop();
-
-    let mut long = proof.clone();
-    long.eval_proof.masters.push(F::ONE);
-
-    let mut short_mask = proof.clone();
-    short_mask.eval_proof.mask_masters.pop();
-
-    let mut long_mask = proof;
-    long_mask.eval_proof.mask_masters.push(F::ONE);
-
-    for forged in [short, long, short_mask, long_mask] {
-        let result = verify_result(&air, &instance, &config, &forged);
-
-        assert!(
-            matches!(
-                result,
-                Err(Error::Protocol {
-                    protocol: "evaluator_verifier",
-                    message: "one master evaluation per committed polynomial is required",
-                })
-            ),
-            "{result:?}"
-        );
-    }
-}
-
-#[test]
-fn master_or_fold_vector_tamper_rejected() {
-    let (air, instance, config, proof) = multibus_proof(cfg());
-
-    for k in 0..proof.eval_proof.masters.len() {
-        let mut forged = proof.clone();
-        forged.eval_proof.masters[k] += F::ONE;
-
-        let result = verify_result(&air, &instance, &config, &forged);
-
-        assert!(matches!(result, Ok(false)), "master {k}: {result:?}");
-    }
-
-    for k in 0..proof.eval_proof.mask_masters.len() {
-        let mut forged = proof.clone();
-        forged.eval_proof.mask_masters[k] += F::ONE;
-
-        let result = verify_result(&air, &instance, &config, &forged);
-
-        assert!(matches!(result, Ok(false)), "mask master {k}: {result:?}");
-    }
-
-    let mut bumped = proof.clone();
-    bumped.eval_proof.fold_rounds[0] += F::ONE;
-
-    let result = verify_result(&air, &instance, &config, &bumped);
-
-    assert!(matches!(result, Ok(false)), "{result:?}");
-
-    let mut truncated = proof;
-    truncated.eval_proof.fold_rounds.pop();
-
-    let result = verify_result(&air, &instance, &config, &truncated);
-
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "fold",
-                message: "fold proof does not match its layout",
-            })
-        ),
-        "{result:?}"
-    );
-}
-
-#[test]
-fn unreached_layer_node_tamper_rejected() {
-    let (air, instance, config, proof) = multibus_proof(layer_gap_cfg());
-
-    let mut trace = proof.clone();
-    let unreached = &mut trace.eval_proof.openings[0].multiproof.unreached;
-
-    assert!(!unreached.is_empty());
-
-    unreached[0][0] ^= 1;
-
-    let mut h = proof;
-    let unreached = &mut h.eval_proof.openings[1].multiproof.unreached;
-
-    assert!(!unreached.is_empty());
-
-    unreached[0][0] ^= 1;
-
-    for forged in [trace, h] {
-        assert!(verify_rejects(&air, &instance, &config, &forged));
-    }
-}
-
-#[test]
-fn unreached_section_off_derived_count_rejected() {
-    let (air, instance, config, proof) = multibus_proof(layer_gap_cfg());
-
-    assert!(!proof.eval_proof.openings[0].multiproof.unreached.is_empty());
-
-    let mut extra = proof.clone();
-    extra.eval_proof.openings[0]
-        .multiproof
-        .unreached
-        .push([0u8; 32]);
-
-    let mut short = proof;
-    short.eval_proof.openings[0].multiproof.unreached.pop();
-
-    for forged in [extra, short] {
-        assert!(verify_rejects(&air, &instance, &config, &forged));
-    }
+    assert!(rejected_with(&outcome, MULTIPROOF), "{outcome:?}\n{log}");
 }
 
 // =====================================================
@@ -1144,8 +889,7 @@ const TAG_BUS_A: &str = "tag_bus_a";
 const TAG_BUS_B: &str = "tag_bus_b";
 const TAG_VARS: usize = 5;
 
-const TAG_WAIVER: &str =
-    "see hekate/tests/bus_security.rs: keys are distinct row values by construction";
+const TAG_WAIVER: &str = "see hekate/tests/logup.rs: keys are distinct row values by construction";
 
 #[derive(Clone)]
 struct TwoBuses {
@@ -1209,7 +953,7 @@ fn tag_trace() -> ColumnTrace {
     tb.build()
 }
 
-fn tag_outcome(air: &TwoBuses, zero_knowledge: bool) -> hekate_core::errors::Result<bool> {
+fn tag_outcome(air: &TwoBuses, zero_knowledge: bool) -> errors::Result<bool> {
     let instance = ProgramInstance::new(1 << TAG_VARS, vec![]);
     let witness = ProgramWitness::new(tag_trace());
 
@@ -1218,22 +962,10 @@ fn tag_outcome(air: &TwoBuses, zero_knowledge: bool) -> hekate_core::errors::Res
         ..cfg()
     };
 
-    let proof = prove(
-        b"AuditP0", air, &instance, &witness, &config, [0x7A; 32], None,
-    )
-    .expect("tag fixture prove");
+    let proof = prove(LABEL, air, &instance, &witness, &config, [0x7A; 32], None)
+        .expect("tag fixture prove");
 
-    verify_result(air, &instance, &config, &proof)
-}
-
-fn rejected_at_bus_matching(outcome: &hekate_core::errors::Result<bool>) -> bool {
-    matches!(
-        outcome,
-        Err(Error::Protocol {
-            protocol: "LogUp",
-            message: "bus endpoint sums do not cancel to zero",
-        })
-    )
+    verify_logged(air, &instance, &config, &proof, LABEL).0
 }
 
 #[test]
@@ -1257,7 +989,7 @@ fn crossed_buses_of_one_tuple_shape_rejected() {
     assert!(report.bus_diagnostics.iter().all(|d| d.bus_imbalance));
 
     let raw = tag_outcome(&air, false);
-    assert!(rejected_at_bus_matching(&raw), "{raw:?}");
+    assert!(rejected_with(&raw, BUS_SUM), "{raw:?}");
 
     let zk = tag_outcome(&air, true);
     assert!(matches!(zk, Ok(false)), "{zk:?}");
@@ -1265,7 +997,7 @@ fn crossed_buses_of_one_tuple_shape_rejected() {
 
 #[test]
 fn slot_zero_const_does_not_merge_two_buses() {
-    let lo = |bus_id: &str| bus_tag(bus_id).split().0;
+    let lo = |bus_id: &str| bus_tag::<F>(bus_id).split().0;
     let offset = (lo(TAG_BUS_A) + lo(TAG_BUS_B)).0;
 
     let keyed = |constant: u128| {
@@ -1284,7 +1016,7 @@ fn slot_zero_const_does_not_merge_two_buses() {
     };
 
     let raw = tag_outcome(&air, false);
-    assert!(rejected_at_bus_matching(&raw), "{raw:?}");
+    assert!(rejected_with(&raw, BUS_SUM), "{raw:?}");
 
     let zk = tag_outcome(&air, true);
     assert!(matches!(zk, Ok(false)), "{zk:?}");
@@ -1313,7 +1045,7 @@ fn buses_crossed_inside_pair_columns_rejected() {
     }));
 
     let raw = tag_outcome(&air, false);
-    assert!(rejected_at_bus_matching(&raw), "{raw:?}");
+    assert!(rejected_with(&raw, BUS_SUM), "{raw:?}");
 
     let zk = tag_outcome(&air, true);
     assert!(matches!(zk, Ok(false)), "{zk:?}");
@@ -1366,4 +1098,172 @@ fn balanced_twins_of_tag_fixtures_verify() {
             );
         }
     }
+}
+
+// =====================================================
+// Intra-table permutation bus
+// =====================================================
+
+/// Intra-table LogUp bus:
+/// two specs on the same `bus_id`, one reading column 0,
+/// the other reading column 1. Endpoint sums cancel iff the
+/// two columns carry the same multiset under the shared selector.
+fn same_bus_permutation_air(num_rows: usize) -> CircuitProgram<F> {
+    let waiver = "see hekate/tests/logup.rs: synthetic intra-table reverse-permutation \
+                  test, both endpoints positional on same trace; not a production \
+                  bus shape, exercises LogUp algebra only";
+
+    let mut cx = Circuit::<F>::new("SameBusPermutation", num_rows).unwrap();
+
+    let data = cx.columns(2, ColumnType::B32);
+    let selector = cx.column(ColumnType::Bit);
+
+    cx.fix(
+        selector,
+        FixedShape::Cadence {
+            stride: 1,
+            count: num_rows,
+            origin: 0,
+            values: vec![F::ONE],
+        },
+    );
+
+    for col in data.iter() {
+        let spec = PermutationCheckSpec::new(
+            vec![(Source::Column(col.index()), b"kappa_data" as &[u8])],
+            Some(selector.index()),
+        )
+        .with_clock_waiver(waiver);
+
+        cx.bus("same_bus", spec);
+    }
+
+    cx.compile().unwrap()
+}
+
+fn generate_permutation_trace(num_vars: usize) -> ColumnTrace {
+    let num_rows = 1 << num_vars;
+
+    let mut col_a: Vec<Block32> = Vec::with_capacity(num_rows);
+    let mut col_b: Vec<Block32> = Vec::with_capacity(num_rows);
+    let mut selector: Vec<Bit> = Vec::with_capacity(num_rows);
+
+    // Col A:
+    // [0, 1, ..., N-1]
+    // Col B:
+    // [N-1, ..., 1, 0]  (permutation of A)
+    for i in 0..num_rows {
+        col_a.push(Block32::from(i as u32));
+        col_b.push(Block32::from((num_rows - 1 - i) as u32));
+        selector.push(Bit::ONE);
+    }
+
+    let mut trace = ColumnTrace::new(num_vars).unwrap();
+    trace.add_column(col_a.into_trace_column()).unwrap();
+    trace.add_column(col_b.into_trace_column()).unwrap();
+    trace.add_column(TraceColumn::Bit(selector)).unwrap();
+
+    trace
+}
+
+/// Happy path:
+/// identical multisets -> paired logUp sums cancel -> verify passes.
+#[test]
+fn logup_bus_happy_path() {
+    let num_vars = 8;
+    let num_rows = 1 << num_vars;
+    let seed = [0xAAu8; 32];
+
+    let air = same_bus_permutation_air(num_rows);
+    let trace = generate_permutation_trace(num_vars);
+    let witness = ProgramWitness::new(trace);
+    let instance = ProgramInstance::new(num_rows, vec![]);
+
+    let config = Config {
+        num_queries: 4,
+        min_security_bits: 0,
+        zero_knowledge: true,
+        ..Config::default()
+    };
+
+    let proof = prove(
+        b"LogUp_Happy",
+        &air,
+        &instance,
+        &witness,
+        &config,
+        seed,
+        None,
+    )
+    .expect("Proving failed");
+
+    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2);
+
+    let mut verifier_transcript = Transcript::<H>::new(b"LogUp_Happy");
+    let pinned_id = program_id(&air).unwrap();
+
+    let ok = HekateVerifier::<F, H>::verify(
+        &pinned_id,
+        &air,
+        &instance,
+        &proof,
+        &mut verifier_transcript,
+        &config,
+    )
+    .expect("Verifier returned error");
+
+    assert!(ok, "Verifier rejected a valid permutation proof");
+}
+
+/// Divergent multisets -> paired logUp
+/// sums do NOT cancel -> verifier rejects.
+#[test]
+fn logup_bus_divergence_rejected() {
+    let num_vars = 4;
+    let num_rows = 1 << num_vars;
+    let seed = [0xAAu8; 32];
+
+    let air = same_bus_permutation_air(num_rows);
+
+    let instance = ProgramInstance::new(num_rows, vec![]);
+    let config = Config {
+        num_queries: 2,
+        min_security_bits: 0,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
+        ..Config::default()
+    };
+
+    let run = |corrupt: bool| {
+        let mut trace = generate_permutation_trace(num_vars);
+
+        // Corrupt column B: its multiset differs from column A
+        if corrupt && let TraceColumn::B32(ref mut vals) = trace.columns[1] {
+            vals[num_rows - 1] = Flat::from_raw(Block32::from(999u32));
+        }
+
+        let witness = ProgramWitness::new(trace);
+
+        let proof = prove(
+            b"LogUp_Divergence",
+            &air,
+            &instance,
+            &witness,
+            &config,
+            seed,
+            None,
+        )
+        .expect("Prover generates an honest proof of a non-permutation");
+
+        verify_logged(&air, &instance, &config, &proof, b"LogUp_Divergence")
+    };
+
+    let (honest, _) = run(false);
+    assert!(matches!(honest, Ok(true)), "got {honest:?}");
+
+    let (outcome, log) = run(true);
+    assert!(
+        rejected_at(&outcome, &log, OUTER_LINEAR),
+        "got {outcome:?}\n{log}"
+    );
 }

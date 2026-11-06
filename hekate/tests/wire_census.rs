@@ -14,19 +14,21 @@ use hekate::core::proofs::{
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block64, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block64, Block256, TowerField};
 use hekate_core::trace::{IntoTraceColumn, TraceBuilder};
 use hekate_gadgets::{CpuMemColumns, MemoryEvent, RamChiplet, generate_ram_trace};
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakWitness, generate_keccak_trace};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
-use hekate_program::outer::OuterStatement;
+use hekate_program::expander::RingSwitchPlan;
+use hekate_program::fold_pool::FoldPool;
+use hekate_program::outer::{OuterStatement, TableParts, TableShape, table_plan};
 use hekate_program::{FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const NUM_VARS: usize = 5;
@@ -116,9 +118,12 @@ fn config() -> Config {
 
 fn sumcheck(proof: &SumcheckProof<F>, census: &mut Census) -> usize {
     let SumcheckProof {
+        skip,
         round_polys,
         claimed_evaluation: _,
     } = proof;
+
+    census.padded += skip.len();
 
     for UnivariatePoly { evals } in round_polys {
         census.padded += evals.len();
@@ -252,6 +257,34 @@ fn pad_budget<P: Program<F> + Sync>(program: &P, chiplet_num_vars: &[usize]) -> 
     statement.masked_scalars
 }
 
+fn pool_polys<P: Program<F>>(program: &P, chiplet_num_vars: &[usize]) -> usize {
+    let config = config();
+    let defs = program.chiplet_defs().unwrap();
+
+    let mut plans = Vec::with_capacity(defs.len() + 1);
+    for def in &defs {
+        let shape = TableShape::from_air(def, &def.statics()).unwrap();
+        plans.push(table_plan(def, &shape, &config).unwrap());
+    }
+
+    let parts = TableParts::of(program);
+    let shape = TableShape::from_air(program, &parts.statics()).unwrap();
+
+    plans.push(table_plan(program, &shape, &config).unwrap());
+
+    let heights: Vec<(&RingSwitchPlan, usize)> = plans
+        .iter()
+        .zip(chiplet_num_vars.iter().chain([&NUM_VARS]))
+        .map(|(plan, &num_vars)| (plan, num_vars))
+        .collect();
+
+    FoldPool::new(&heights, &config)
+        .unwrap()
+        .layout()
+        .polys()
+        .len()
+}
+
 #[test]
 fn every_scalar_of_bus_free_proof_is_accounted() {
     let num_rows = 1 << NUM_VARS;
@@ -297,7 +330,10 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
 
     assert_eq!(counted.padded, pad_budget(&air, &[]));
     assert_eq!(counted.running_claim, 2);
-    assert_eq!(counted.master_evals, 1);
+    assert_eq!(
+        counted.master_evals + counted.mask_masters,
+        pool_polys(&air, &[])
+    );
     assert_eq!(counted.mask_masters, 2);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
@@ -373,7 +409,10 @@ fn every_scalar_of_bus_proof_is_accounted() {
     assert_eq!(counted.running_claim, 3);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
-    assert_eq!(counted.master_evals, 4);
+    assert_eq!(
+        counted.master_evals + counted.mask_masters,
+        pool_polys(&air, &[NUM_VARS])
+    );
     assert_eq!(counted.mask_masters, 2);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
@@ -451,7 +490,10 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
     assert_eq!(counted.running_claim, 3);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
-    assert_eq!(counted.master_evals, 4);
+    assert_eq!(
+        counted.master_evals + counted.mask_masters,
+        pool_polys(&air, &[CHIPLET_VARS])
+    );
     assert_eq!(counted.mask_masters, 2);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);

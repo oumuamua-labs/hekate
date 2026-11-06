@@ -12,7 +12,7 @@ use hekate_core::trace::ColumnType;
 use hekate_gadgets::IntArithmeticChiplet;
 use hekate_gadgets::atoms::int_arith;
 use hekate_keccak::{CpuKeccakColumns, KECCAK_LANE_LABELS, KeccakChiplet, KeccakColumns};
-use hekate_math::{Block128, TowerField};
+use hekate_math::{Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::constraint::ConstraintAst;
@@ -22,7 +22,7 @@ use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{EMIT_RANK_LABEL, PermutationCheckSpec, Side, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, InlineKernelHint, Program, fix};
 
-type F = Block128;
+type F = Block256;
 
 const KECCAK_OFFSET: usize = CpuKeccakColumns::NUM_COLUMNS;
 const NUM_ROWS: usize = 256;

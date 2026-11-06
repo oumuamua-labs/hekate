@@ -6,7 +6,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, Flat, HardwareField, TowerField};
+use hekate::math::{Block256, Flat, HardwareField, TowerField};
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{IntoTraceColumn, Trace, TraceBuilder};
 use hekate_math::{Bit, Block32};
@@ -20,12 +20,14 @@ use hekate_program::outer::{TableParts, TableShape, table_plan};
 use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::site::{CONSTRAINTS, EVAL_SUMCHECK, MULTIPROOF, ZEROCHECK};
+use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
 use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 fn fib_air(num_rows: usize) -> CircuitProgram<F> {
@@ -332,6 +334,9 @@ fn noise_integrity_check() {
     )
     .unwrap();
 
+    let (honest, _) = verify_logged(&air, &instance, &config, &proof, b"ZK_Integrity");
+    assert!(matches!(honest, Ok(true)), "got {honest:?}");
+
     let leaf_bytes = fold_pool(&air, num_vars, &config).layout().trees()[0].leaf_bytes;
 
     // ATTACK:
@@ -341,21 +346,9 @@ fn noise_integrity_check() {
         *b = 0;
     }
 
-    let mut verifier_transcript = Transcript::<H>::new(b"ZK_Integrity");
-    let result = HekateVerifier::<F, H>::verify(
-        &program_id(&air).unwrap(),
-        &air,
-        &instance,
-        &proof,
-        &mut verifier_transcript,
-        &config,
-    );
+    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ZK_Integrity");
 
-    match result {
-        Ok(true) => panic!("SECURITY FAILURE: Verifier accepted modified noise!"),
-        Ok(false) => { /* Logic rejection (Good) */ }
-        Err(_) => { /* Protocol rejection / Merkle mismatch (Good) */ }
-    }
+    assert!(rejected_with(&outcome, MULTIPROOF), "got {outcome:?}");
 }
 
 /// Malicious AIR that bypasses degree checks
@@ -469,21 +462,12 @@ fn trust_me_bro_knowledge() {
     // Switch to Verifier mode
     air.is_prover.store(false, Ordering::SeqCst);
 
-    let mut verifier_transcript = Transcript::<H>::new(b"Exploit");
-    let result_zk = HekateVerifier::<F, H>::verify(
-        &program_id(&air).unwrap(),
-        &air,
-        &instance,
-        &proof_zk,
-        &mut verifier_transcript,
-        &config_zk,
-    );
+    let (outcome, log) = verify_logged(&air, &instance, &config_zk, &proof_zk, b"Exploit");
 
-    // TThe verifier must reject the proof
-    let is_valid_zk = result_zk.unwrap_or(false);
+    // The verifier must reject the proof
     assert!(
-        !is_valid_zk,
-        "SECURITY FAILURE: Verifier blindly accepted the masking_bias"
+        rejected_at(&outcome, &log, ZEROCHECK),
+        "got {outcome:?}\n{log}"
     );
 
     // ==========================================
@@ -511,20 +495,11 @@ fn trust_me_bro_knowledge() {
 
     air.is_prover.store(false, Ordering::SeqCst);
 
-    let mut verifier_transcript2 = Transcript::<H>::new(b"Exploit2");
-    let result_no_zk = HekateVerifier::<F, H>::verify(
-        &program_id(&air).unwrap(),
-        &air,
-        &instance,
-        &proof_no_zk,
-        &mut verifier_transcript2,
-        &config_no_zk,
-    );
+    let (outcome, log) = verify_logged(&air, &instance, &config_no_zk, &proof_no_zk, b"Exploit2");
 
-    let is_valid_no_zk = result_no_zk.unwrap_or(false);
     assert!(
-        !is_valid_no_zk,
-        "Without ZK, the Verifier should correctly reject the forgery"
+        rejected_at(&outcome, &log, CONSTRAINTS),
+        "got {outcome:?}\n{log}"
     );
 }
 
@@ -900,7 +875,7 @@ fn true_zk_memory_isolation() {
 }
 
 #[test]
-fn truncation_overflow_injection() {
+fn opened_symbol_top_byte_tamper_rejected() {
     // OBJECTIVE:
     // Ensure that the Verifier strictly rejects an opened
     // code symbol whose top byte an attacker set to `0xFE`.
@@ -952,36 +927,17 @@ fn truncation_overflow_injection() {
     };
 
     // 2. Verify the corrupted proof
-    let mut verifier_transcript = Transcript::<H>::new(b"ZK_Truncation");
-    let result = HekateVerifier::<F, H>::verify(
-        &program_id(&air).unwrap(),
-        &air,
-        &instance,
-        &proof,
-        &mut verifier_transcript,
-        &config,
-    );
+    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ZK_Truncation");
 
     // 3. Guarantee rejection
-    match result {
-        Ok(true) => panic!("Verifier accepted an opened symbol with a forged top byte"),
-        Ok(false) => {
-            // Rejected due to evaluation mismatch (Good)
-        }
-        Err(_) => {
-            // Rejected due to Merkle mismatch / Protocol Error (Good)
-        }
-    }
+    assert!(rejected_with(&outcome, MULTIPROOF), "got {outcome:?}");
 }
 
 #[test]
 fn noise_shift_sign_forgery() {
     // OBJECTIVE:
-    // Ensure that the Verifier detects if the Prover
-    // swaps or modifies the base/shifted noise values
-    // (B(r) vs B(x_next)). Even if the AIR check passes
-    // logically, the PCS binding must fail because
-    // the claimed values won't match the committed data.
+    // Ensure that the Verifier detects if the prover swaps or
+    // modifies the base/shifted noise values (B(r) vs B(x_next)).
 
     let num_vars = 5;
     let num_rows = 1usize << num_vars;
@@ -1033,28 +989,13 @@ fn noise_shift_sign_forgery() {
     proof.main_point_evaluation.1[expected_trace_len + noise_col_idx] = base_noise;
 
     // 2. Verify the forged proof
-    let mut verifier_transcript = Transcript::<H>::new(b"ZK_NoiseShift");
-    let result = HekateVerifier::<F, H>::verify(
-        &program_id(&air).unwrap(),
-        &air,
-        &instance,
-        &proof,
-        &mut verifier_transcript,
-        &config,
-    );
+    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, b"ZK_NoiseShift");
 
     // 3. Guarantee rejection
-    match result {
-        Ok(true) => panic!(
-            "Verifier accepted swapped noise values! The PCS failed to bind trace_values to the root"
-        ),
-        Ok(false) => {
-            // Success: Rejected by the pool eval
-        }
-        Err(_) => {
-            // Success: Protocol/Merkle mismatch detected
-        }
-    }
+    assert!(
+        rejected_at(&outcome, &log, EVAL_SUMCHECK),
+        "got {outcome:?}\n{log}"
+    );
 }
 
 #[test]
