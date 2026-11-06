@@ -18,6 +18,10 @@ use hekate_math::TowerField;
 /// the byte stream, hence the digest, is independent of it.
 const FLUSH_BYTES: usize = 64 * 1024;
 
+/// A program's structural id, as wide as the build's policy hash.
+pub type ProgramId = <DefaultHasher as Hasher>::Digest;
+
+/// Hashes with the build's policy hash, as the transcript does.
 struct Absorb {
     hasher: DefaultHasher,
     buf: Vec<u8>,
@@ -54,16 +58,16 @@ impl Absorb {
         }
     }
 
-    fn finalize(mut self) -> [u8; 32] {
+    fn finalize(mut self) -> ProgramId {
         self.hasher.update(&self.buf);
 
         self.hasher.finalize()
     }
 }
 
-/// Deterministic 32-byte structural ID. Witness-independent,
+/// Deterministic structural ID. Witness-independent,
 /// num_rows-independent. Same program shape -> same ID.
-pub fn program_id<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<[u8; 32]> {
+pub fn program_id<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<ProgramId> {
     Ok(program_id_of(
         program,
         &program.chiplet_defs()?,
@@ -71,14 +75,15 @@ pub fn program_id<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<[
     ))
 }
 
-/// Hex-encoded `program_id` (64 lowercase chars, no prefix).
+/// Hex-encoded `program_id` (two lowercase chars per byte, no prefix).
 pub fn program_id_hex<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
-    let bytes = program_id::<F, P>(program)?;
+    let id = program_id::<F, P>(program)?;
+    let bytes = id.as_ref();
 
-    let mut s = String::with_capacity(64);
-    for &b in bytes.iter() {
+    let mut s = String::with_capacity(2 * bytes.len());
+    for &b in bytes {
         s.push(HEX[(b >> 4) as usize] as char);
         s.push(HEX[(b & 0xf) as usize] as char);
     }
@@ -90,7 +95,7 @@ pub fn program_id_of<F: TowerField, P: Program<F>>(
     program: &P,
     chiplet_defs: &[ChipletDef<F>],
     inline_chiplets: &[ChipletDef<F>],
-) -> [u8; 32] {
+) -> ProgramId {
     program_id_from_parts(
         &ChipletDef::from_main_table(program),
         program.num_public_inputs(),
@@ -106,7 +111,7 @@ pub fn program_id_from_parts<F: TowerField>(
     chiplet_defs: &[ChipletDef<F>],
     inline_chiplets: &[ChipletDef<F>],
     inline_kernels: &[InlineKernelHint],
-) -> [u8; 32] {
+) -> ProgramId {
     let mut h = Absorb::new();
     h.update(b"hekate-program-id-v2");
 

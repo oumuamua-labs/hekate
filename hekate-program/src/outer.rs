@@ -11,8 +11,8 @@ use crate::expander::{
 use crate::fold_pool::{FoldPool, PoolTable};
 use crate::linearized::{self, RingGadget, linearized_coeffs};
 use crate::permutation::{
-    BUS_LIMBS, BusColumn, BusElement, BusField, BusFraction, BusGroup, BusValue,
-    PermutationCheckSpec, RankClock, bus_alpha_weights, bus_columns, bus_draw_events,
+    BusColumn, BusFraction, BusGroup, PermutationCheckSpec, RankClock, bus_alpha_weights,
+    bus_columns, bus_draw_events, h_planes, plane_basis,
 };
 use crate::predicate::{AffineRow, ClaimLayout, Form, Unknown, WireRole, compile};
 use crate::{Air, FixedColumn, ProgramInstance, ShapeEvaluator};
@@ -25,12 +25,15 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::outer::{OUTER_MASK_ROWS, OuterGeometry};
 use hekate_core::poly::univariate::{MAX_POINTS, UnivariatePoly};
-use hekate_core::tensor::TensorProduct;
+use hekate_core::skip::{SkipDomain, SkipLanes, SkipPlan, SkipPoint};
 use hekate_core::trace::ColumnType;
-use hekate_math::{Block128, Flat, HardwareField, TowerField};
+use hekate_math::{Block8, Block16, Flat, FlatPromote, HardwareField, TowerField};
 
-/// Hadamard wires of one GF(2^256) product.
-const KARATSUBA_WIRES: usize = 3;
+const SKIP_MIN_VARS: usize = 9;
+const SKIP_MIN_VARS_HIGH_DEGREE: usize = 12;
+const SKIP_HIGH_DEGREE: usize = 5;
+const SKIP_BLOCK8_VARS: usize = 6;
+const SKIP_BLOCK16_VARS: usize = 7;
 
 pub struct LinearBatch<F> {
     pub weights: Vec<Vec<Flat<F>>>,
@@ -38,17 +41,17 @@ pub struct LinearBatch<F> {
     pub target: Flat<F>,
 }
 
-/// Claimed-sum endpoints `(pad, masked limb)` per group and limb.
-type BusSums<'r, F> = BTreeMap<(&'r BusGroup, usize), Vec<(u32, Flat<F>)>>;
+/// Claimed-sum endpoints `(pad, masked sum)` per group.
+type BusSums<'r, F> = BTreeMap<&'r BusGroup, Vec<(u32, Flat<F>)>>;
 
-/// One `h` column in the outer statement: its limb pads and masked
-/// limbs, its fractions, its row weight and its table-local first wire.
+/// One `h` column in the outer statement: its plane pads and masked
+/// planes, its fractions, its row weight and its table-local first wire.
 pub struct BusColumnRow<F> {
-    pub h_pads: [u32; BUS_LIMBS],
-    pub h_masked: [Flat<F>; BUS_LIMBS],
+    pub h_pads: Vec<u32>,
+    pub h_masked: Vec<Flat<F>>,
     pub first: BusFraction<F>,
     pub second: Option<BusFraction<F>>,
-    pub eq_lookup: BusValue<F>,
+    pub eq_lookup: Flat<F>,
     pub first_wire: u32,
 }
 
@@ -59,8 +62,8 @@ pub struct ConsistencyInputs<F> {
     pub eq_zc: Flat<F>,
     pub alpha: Flat<F>,
 
-    /// `τ` of the bus field, `y² = y + τ`.
-    pub tau: Flat<F>,
+    /// The element behind each B128 plane of an `h` value.
+    pub planes: Vec<Flat<F>>,
 
     /// `(claim index, public value, eq(r_final, row))`.
     pub boundary: Vec<(u32, Flat<F>, Flat<F>)>,
@@ -132,8 +135,10 @@ pub struct TableShape {
 
     pub sumcheck_degree: usize,
 
-    /// Packed `h` columns, [`BUS_LIMBS`] limbs each.
+    /// Packed `h` columns, `h_planes` B128 planes each.
     pub bus_columns: usize,
+
+    pub h_planes: usize,
 
     /// Hadamard wires of the LogUp terms.
     pub bus_wires: usize,
@@ -142,6 +147,11 @@ pub struct TableShape {
     pub expands_bits: bool,
     pub subfield_units: bool,
     pub whole_blinds: usize,
+
+    /// The lane field a skip may run the constraints in:
+    /// GF(2^8) when the AST reads bit columns and
+    /// byte constants only, GF(2^16) otherwise.
+    pub skip_lanes: SkipLanes,
 }
 
 impl TableShape {
@@ -152,6 +162,14 @@ impl TableShape {
         let ast = statics.ast;
 
         ast.validate_order()?;
+
+        let layout = air.virtual_column_layout();
+
+        let byte_lanes = (0..ast.arena.len() as u32).all(|id| match ast.arena.get(ExprId(id)) {
+            ConstraintExpr::Cell(cell) => layout.get(cell.col_idx) == Some(&ColumnType::Bit),
+            ConstraintExpr::Const(c) | ConstraintExpr::Scale(c, _) => in_byte_field(c),
+            _ => true,
+        });
 
         let mut sumcheck_degree = ast.max_degree() + 1;
 
@@ -191,17 +209,56 @@ impl TableShape {
             num_columns: air.num_columns(),
             sumcheck_degree,
             bus_columns: columns.len(),
+            h_planes: h_planes::<F>(),
             bus_wires,
             mul_nodes: mul_node_count(ast),
             expands_bits: plan.expands_bits(),
             subfield_units: plan.has_subfield_units(),
             whole_blinds: 0,
+            skip_lanes: match byte_lanes {
+                true => SkipLanes::Block8,
+                false => SkipLanes::Block16,
+            },
         })
     }
 
-    /// Counts the committed `h` limb columns.
+    /// Counts the committed `h` planes.
     pub fn h_columns(&self) -> usize {
-        BUS_LIMBS * self.bus_columns
+        self.h_planes * self.bus_columns
+    }
+
+    /// Derives the table's skip over GF(2^8) lanes for a bit
+    /// table whose degree fits the field, GF(2^16) otherwise.
+    pub fn skip(&self) -> SkipPlan {
+        let min_vars = match self.sumcheck_degree >= SKIP_HIGH_DEGREE {
+            true => SKIP_MIN_VARS_HIGH_DEGREE,
+            false => SKIP_MIN_VARS,
+        };
+
+        if self.num_vars < min_vars {
+            return SkipPlan::NONE;
+        }
+
+        let byte = SkipPlan {
+            vars: SKIP_BLOCK8_VARS.min(self.num_vars / 2),
+            lanes: SkipLanes::Block8,
+            cosets: self.sumcheck_degree,
+        };
+
+        if self.skip_lanes == SkipLanes::Block8 && byte.check().is_ok() {
+            return byte;
+        }
+
+        let wide = SkipPlan {
+            vars: SKIP_BLOCK16_VARS.min(self.num_vars / 2),
+            lanes: SkipLanes::Block16,
+            cosets: self.sumcheck_degree,
+        };
+
+        match wide.check() {
+            Ok(()) => wide,
+            Err(_) => SkipPlan::NONE,
+        }
     }
 
     pub fn at(self, table: &PoolTable) -> Self {
@@ -224,7 +281,7 @@ impl TableShape {
     }
 
     /// Eval claims per half: virtual columns, whole blind units,
-    /// the ring blind unit's planes, every `h` limb, `h`'s blinds.
+    /// the ring blind unit's planes, every `h` plane, `h`'s blinds.
     pub fn eval_claims(&self) -> usize {
         let ring_blind = match self.expands_bits && self.whole_blinds > 0 {
             true => RING_BLIND_BITS,
@@ -237,10 +294,11 @@ impl TableShape {
     /// Final sumcheck values are the masked running
     /// claims themselves and consume no pad entry.
     pub fn masked_scalars(&self) -> usize {
-        let zerocheck = self.num_vars * self.sumcheck_degree;
+        let skip = self.skip();
+        let zerocheck = skip.sent_scalars() + (self.num_vars - skip.vars) * self.sumcheck_degree;
         let claims = 2 * self.eval_claims();
 
-        2 * self.h_columns() + zerocheck + claims
+        self.bus_columns + self.h_columns() + zerocheck + claims
     }
 
     /// Counts the table's Hadamard wires, AST and bus products.
@@ -255,6 +313,7 @@ impl TableShape {
 pub struct DrawBits {
     pub bus: usize,
     pub zerocheck: usize,
+    pub skip: Option<usize>,
     pub sumcheck: usize,
     pub eval_batch: usize,
     pub eval_round: usize,
@@ -264,14 +323,17 @@ pub struct DrawBits {
 impl DrawBits {
     pub fn weakest(&self) -> usize {
         [
-            self.bus,
-            self.zerocheck,
-            self.sumcheck,
-            self.eval_batch,
-            self.eval_round,
+            Some(self.bus),
+            Some(self.zerocheck),
+            self.skip,
+            Some(self.sumcheck),
+            Some(self.eval_batch),
+            Some(self.eval_round),
+            self.outer,
         ]
         .into_iter()
-        .fold(self.outer.unwrap_or(usize::MAX), usize::min)
+        .flatten()
+        .fold(usize::MAX, usize::min)
     }
 }
 
@@ -282,12 +344,12 @@ pub struct OuterStatement {
 }
 
 impl OuterStatement {
-    pub fn new(shapes: &[TableShape], pool_vars: usize) -> Self {
+    pub fn new<F: TowerField>(shapes: &[TableShape], pool_vars: usize) -> Self {
         let tables: usize = shapes.iter().map(TableShape::masked_scalars).sum();
         let wires: usize = shapes.iter().map(TableShape::mul_wires).sum();
 
         let gadget = match shapes.iter().any(|s| s.subfield_units) {
-            true => linearized::BITS - 1,
+            true => F::BITS - 1,
             false => 0,
         };
 
@@ -343,7 +405,7 @@ impl OuterStatement {
             .map(|(shape, table)| shape.at(table))
             .collect();
 
-        Ok(Self::new(&shapes, pool.layout().num_vars()))
+        Ok(Self::new::<F>(&shapes, pool.layout().num_vars()))
     }
 }
 
@@ -434,6 +496,15 @@ impl OuterLayout {
     }
 }
 
+/// A sumcheck round as the outer statement masks it: the pads
+/// of its sent values, its Lagrange weights at the challenge
+/// and the leading pads that rebuild the derived point.
+pub struct RoundForm<F> {
+    pub pads: Vec<u32>,
+    pub weights: Vec<Flat<F>>,
+    pub derived_from: usize,
+}
+
 pub struct EvalRecord<F> {
     pub mask_form: Vec<(Unknown, Flat<F>)>,
     pub claim_masked: Flat<F>,
@@ -450,8 +521,8 @@ pub struct TableRecord<'s, F> {
     /// `(pad, claim, public value)` per fixed column.
     pub fixed: Vec<(u32, u32, Flat<F>)>,
 
-    /// `(group, limb, pad, masked limb)` per claimed-sum limb.
-    pub claimed_sums: Vec<(BusGroup, usize, u32, Flat<F>)>,
+    /// `(group, pad, masked sum)` per `h` column.
+    pub claimed_sums: Vec<(BusGroup, u32, Flat<F>)>,
 
     pub bindings: Vec<ClaimBinding>,
 
@@ -476,7 +547,7 @@ impl<F: TowerField + HardwareField> TableRecord<'_, F> {
         f(consistency_row(self.ast.roots.len(), consistency));
 
         for column in &consistency.buses {
-            column_terms(column, pad_first, consistency.tau, &mut f);
+            column_terms(column, pad_first, &consistency.planes, &mut f);
         }
 
         for &(pad, claim, public) in &self.fixed {
@@ -485,10 +556,11 @@ impl<F: TowerField + HardwareField> TableRecord<'_, F> {
 
         let half = (self.claims_masked.len() / 2) as u32;
         let first_h = half - (self.shape.h_columns() + self.shape.h_blinds()) as u32;
+        let planes = self.shape.h_planes;
 
         for (c, column) in consistency.buses.iter().enumerate() {
-            for j in 0..BUS_LIMBS {
-                let claim = first_h + (BUS_LIMBS * c + j) as u32;
+            for j in 0..planes {
+                let claim = first_h + (planes * c + j) as u32;
 
                 f(h_claim_pin_row(
                     column.h_pads[j],
@@ -540,7 +612,7 @@ pub struct EvalInputs<'a, F> {
     pub pool: &'a FoldPool,
     pub eta: F,
     pub rho: &'a [F],
-    pub r_mix: &'a [Block128],
+    pub r_mix: &'a [F],
     pub shifted_claims: bool,
     pub challenges: &'a [Flat<F>],
     pub claim_masked: Flat<F>,
@@ -559,11 +631,11 @@ pub struct TableInputs<'a, 's, F: TowerField> {
     pub blinding_columns: usize,
 
     pub alpha: Flat<F>,
-    pub gamma: BusElement,
-    pub beta: BusElement,
+    pub gamma: F,
+    pub beta: F,
     pub r_zerocheck: &'a [Flat<F>],
     pub r_final: &'a [Flat<F>],
-    pub lookup_bus_points: &'a BTreeMap<String, Vec<BusElement>>,
+    pub lookup_bus_points: &'a BTreeMap<String, Vec<F>>,
     pub clocks: &'a [Option<RankClock>],
 
     pub claimed_sums_masked: &'a [F],
@@ -761,22 +833,20 @@ impl<F: TowerField + HardwareField> Sweep<F> {
     }
 }
 
-pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
+pub fn eval_initial_form<F: TowerField + HardwareField + From<u128>>(
     pool: &FoldPool,
     eta: F,
     rho: &[F],
-    r_mix: &[Block128],
+    r_mix: &[F],
     shifted_claims: bool,
     claim_pads: &[u32],
     first_wire: u32,
 ) -> errors::Result<InitialForm<F>> {
-    let flat = |x: F| Into::<Block128>::into(x).to_hardware();
-
-    let rho: Vec<Flat<Block128>> = rho.iter().map(|&r| flat(r)).collect();
+    let rho: Vec<Flat<F>> = rho.iter().map(|r| r.to_hardware()).collect();
 
     let mut weights = Vec::with_capacity(claim_pads.len());
     for (i, table) in pool.tables().iter().enumerate() {
-        let unit_weights = pool.unit_weights(i, flat(eta), &rho)?;
+        let unit_weights = pool.unit_weights(i, eta.to_hardware(), &rho)?;
 
         weights.extend(claim_weights(&table.plan, &unit_weights, shifted_claims));
     }
@@ -793,7 +863,7 @@ pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
     let mut fields: Vec<ColumnType> = Vec::new();
 
     for (&(field, weight), &pad) in weights.iter().zip(claim_pads) {
-        let a: Flat<F> = F::from(weight.0).to_hardware();
+        let a = weight.to_hardware();
 
         if field == ColumnType::B128 {
             form.push((Unknown::Pad(pad), a));
@@ -815,21 +885,12 @@ pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
         return Ok(InitialForm { form, gadget: None });
     }
 
-    let maps: Vec<(Vec<Block128>, usize)> = fields
+    let maps: Vec<(Vec<F>, usize)> = fields
         .iter()
         .map(|&field| (field_coeffs(field, r_mix), field_bits(field)))
         .collect();
 
-    let mu: Vec<Vec<Flat<F>>> = linearized_coeffs(&maps)
-        .iter()
-        .map(|mu| {
-            mu.iter()
-                .map(|m| F::from(m.to_tower().0).to_hardware())
-                .collect()
-        })
-        .collect();
-
-    let gadget = RingGadget::new(ring, mu, first_wire);
+    let gadget = RingGadget::new(ring, linearized_coeffs(&maps)?, first_wire);
 
     form.extend(gadget.delta_form());
 
@@ -843,7 +904,7 @@ pub fn eval_initial_form<F: HardwareField + Into<Block128> + From<u128>>(
 /// through the rounds, plus the ring gadget.
 pub fn eval_record<F>(inputs: &EvalInputs<'_, F>) -> errors::Result<EvalRecord<F>>
 where
-    F: HardwareField + Into<Block128> + From<u128>,
+    F: TowerField + HardwareField + From<u128>,
 {
     let initial = eval_initial_form(
         inputs.pool,
@@ -855,13 +916,10 @@ where
         inputs.first_wire,
     )?;
 
-    let round_pads: Vec<[u32; 2]> = (0..inputs.challenges.len() as u32)
-        .map(|i| [inputs.round_first + 2 * i, inputs.round_first + 2 * i + 1])
-        .collect();
-    let round_refs: Vec<&[u32]> = round_pads.iter().map(|p| p.as_slice()).collect();
+    let rounds = multilinear_rounds(inputs.challenges, 2, inputs.round_first);
 
     Ok(EvalRecord {
-        mask_form: sumcheck_mask_form(&initial.form, &round_refs, inputs.challenges, 2),
+        mask_form: sumcheck_mask_form(&initial.form, &rounds),
         claim_masked: inputs.claim_masked,
         fin: inputs.fin,
         gadget: initial.gadget,
@@ -870,7 +928,7 @@ where
 
 pub fn table_record<'s, F>(inputs: TableInputs<'_, 's, F>) -> errors::Result<TableRecord<'s, F>>
 where
-    F: TowerField + HardwareField,
+    F: TowerField + HardwareField + FlatPromote<Block8> + FlatPromote<Block16>,
 {
     let TableStatics {
         ast,
@@ -882,8 +940,10 @@ where
     let shape = inputs.shape;
     let num_vars = shape.num_vars;
     let trace_width = shape.num_columns;
-    let r_final = inputs.r_final;
     let pad_first = inputs.pads.claims;
+
+    let skip = shape.skip();
+    let point = SkipPoint::from_challenges(skip, inputs.r_final)?;
     let half = shape.eval_claims() as u32;
 
     if inputs.claims_masked.len() != 2 * half as usize {
@@ -893,9 +953,7 @@ where
         });
     }
 
-    let eq_row_checker = TensorProduct::new(r_final.to_vec());
-
-    let mut shapes = ShapeEvaluator::new(r_final);
+    let mut shapes = ShapeEvaluator::new(&point);
     let mut fixed = Vec::new();
 
     for fc in fixed_columns {
@@ -925,36 +983,37 @@ where
         boundary.push((
             bc.col_idx as u32,
             bc.resolve_target(inputs.instance)?.to_hardware(),
-            eq_row_checker.evaluate_at_index(bc.row_idx),
+            point.weight(bc.row_idx),
         ));
     }
 
     let h_columns = shape.h_columns();
+    let planes = shape.h_planes;
 
-    if inputs.claimed_sums_masked.len() != h_columns || inputs.h_evals_masked.len() != h_columns {
+    if inputs.claimed_sums_masked.len() != shape.bus_columns
+        || inputs.h_evals_masked.len() != h_columns
+    {
         return Err(errors::Error::Protocol {
             protocol: "outer",
-            message: "LogUp limb count does not match the table shape",
+            message: "LogUp claim count does not match the table shape",
         });
     }
 
     let columns = bus_columns(bus_specs, shape.sumcheck_degree);
 
     let mut buses = Vec::with_capacity(columns.len());
-    let mut claimed_sums = Vec::with_capacity(h_columns);
+    let mut claimed_sums = Vec::with_capacity(columns.len());
 
     if !columns.is_empty() {
-        let field = BusField::<F>::new()?;
-        let challenges = [field.import(inputs.gamma), field.import(inputs.beta)];
+        let challenges = [inputs.gamma.to_hardware(), inputs.beta.to_hardware()];
 
         let fraction = |idx: usize| {
             BusFraction::new(
-                &field,
                 idx,
                 &bus_specs[idx],
                 trace_width,
                 challenges,
-                r_final,
+                &point,
                 inputs.clocks,
             )
         };
@@ -962,22 +1021,21 @@ where
         let mut first_wire = shape.mul_nodes as u32;
         for (c, column) in columns.iter().enumerate() {
             let group = column.group(bus_specs);
-            let eq_lookup = group.row_weight(&field, inputs.lookup_bus_points, r_final)?;
+            let eq_lookup = group.row_weight(inputs.lookup_bus_points, &point)?;
 
-            let limb = |j: usize| BUS_LIMBS * c + j;
-
-            for j in 0..BUS_LIMBS {
-                claimed_sums.push((
-                    group.clone(),
-                    j,
-                    inputs.pads.claimed_sums + limb(j) as u32,
-                    inputs.claimed_sums_masked[limb(j)].to_hardware(),
-                ));
-            }
+            claimed_sums.push((
+                group,
+                inputs.pads.claimed_sums + c as u32,
+                inputs.claimed_sums_masked[c].to_hardware(),
+            ));
 
             buses.push(BusColumnRow {
-                h_pads: core::array::from_fn(|j| inputs.pads.h_evals + limb(j) as u32),
-                h_masked: core::array::from_fn(|j| inputs.h_evals_masked[limb(j)].to_hardware()),
+                h_pads: (0..planes)
+                    .map(|j| inputs.pads.h_evals + (planes * c + j) as u32)
+                    .collect(),
+                h_masked: (0..planes)
+                    .map(|j| inputs.h_evals_masked[planes * c + j].to_hardware())
+                    .collect(),
                 first: fraction(column.first)?,
                 second: column.second.map(fraction).transpose()?,
                 eq_lookup,
@@ -995,27 +1053,23 @@ where
         alpha_pow *= inputs.alpha;
     }
 
-    let initial: Vec<(Unknown, Flat<F>)> = (0..h_columns as u32)
+    let initial: Vec<(Unknown, Flat<F>)> = (0..columns.len() as u32)
         .zip(bus_alpha_weights(alpha_pow, inputs.alpha))
-        .map(|(k, w)| (Unknown::Pad(inputs.pads.claimed_sums + k), w.bus_sum))
+        .map(|(c, w)| (Unknown::Pad(inputs.pads.claimed_sums + c), w.bus_sum))
         .collect();
 
-    let degree = shape.sumcheck_degree;
-    let round_pads: Vec<Vec<u32>> = (0..num_vars)
-        .map(|i| {
-            let first = inputs.pads.zerocheck + (i * degree) as u32;
-
-            (0..degree as u32).map(|j| first + j).collect()
-        })
-        .collect();
-
-    let round_refs: Vec<&[u32]> = round_pads.iter().map(|p| p.as_slice()).collect();
+    let rounds = zerocheck_rounds(
+        skip,
+        inputs.r_final,
+        shape.sumcheck_degree,
+        inputs.pads.zerocheck,
+    )?;
 
     let consistency = ConsistencyInputs {
         pad_first,
-        eq_zc: TensorProduct::evaluate_eq_slice(inputs.r_zerocheck, r_final),
+        eq_zc: point.eq_with(inputs.r_zerocheck)?,
         alpha: inputs.alpha,
-        tau: F::EXTENSION_TAU.to_hardware(),
+        planes: plane_basis::<F>()?,
         boundary,
         telescope: (0..inputs.blinding_columns as u32)
             .map(|k| {
@@ -1025,7 +1079,7 @@ where
             })
             .collect(),
         buses,
-        val_final_form: sumcheck_mask_form(&initial, &round_refs, r_final, degree),
+        val_final_form: sumcheck_mask_form(&initial, &rounds),
         val_final_masked: inputs.val_final_masked,
     };
 
@@ -1041,33 +1095,30 @@ where
 }
 
 /// Pushes an `h` column's honest `(lhs, rhs, product)` wires,
-/// in wire order, from the true claims and `h` limbs.
+/// in wire order, from the true claims and `h`.
 pub fn bus_wire_values<F: TowerField + HardwareField>(
-    field: &BusField<F>,
     first: &BusFraction<F>,
     second: Option<&BusFraction<F>>,
     claims: &[Flat<F>],
-    h: BusValue<F>,
+    h: Flat<F>,
     out: &mut Vec<[Flat<F>; 3]>,
 ) {
     let d1 = first.denominator(claims);
 
-    karatsuba_values(h, d1, out);
+    out.push([h, d1, h * d1]);
 
     let Some(second) = second else {
         return;
     };
 
-    let u = field.mul(h, d1) + BusValue::from_base(first.selector_value(claims));
+    let u = h * d1 + first.selector_value(claims);
+    let d2 = second.denominator(claims);
 
-    karatsuba_values(u, second.denominator(claims), out);
+    out.push([u, d2, u * d2]);
 
     if second.selector_claimed() {
         let s2 = second.selector_value(claims);
-
-        for d in d1.limbs() {
-            out.push([s2, d, s2 * d]);
-        }
+        out.push([s2, d1, s2 * d1]);
     }
 }
 
@@ -1132,7 +1183,7 @@ pub fn assemble<'r, F: TowerField + HardwareField>(
 
 /// Affine rows of the statement [`assemble`] builds:
 /// every table's, the pool's eval rows,
-/// one bus-sum row per bus group and limb.
+/// one bus-sum row per bus group.
 pub fn statement_rows<F: TowerField + HardwareField>(
     records: &[TableRecord<'_, F>],
     eval: &EvalRecord<F>,
@@ -1213,8 +1264,8 @@ pub fn consistency_row<F: TowerField + HardwareField>(
         let weight = eq_row * alpha_pow;
 
         push_claim(&mut row, inputs.pad_first, claim, weight);
-        row.constant += public * weight;
 
+        row.constant += public * weight;
         alpha_pow *= inputs.alpha;
     }
 
@@ -1225,16 +1276,14 @@ pub fn consistency_row<F: TowerField + HardwareField>(
         alpha_pow *= inputs.alpha;
     }
 
-    let mut weights = bus_alpha_weights(alpha_pow, inputs.alpha);
+    let weights = bus_alpha_weights(alpha_pow, inputs.alpha);
 
-    for column in &inputs.buses {
-        let consistency = column_terms(column, inputs.pad_first, inputs.tau, &mut |_| {});
-        let bus_sum = bus_sum_forms(column, inputs.tau);
+    for (column, w) in inputs.buses.iter().zip(weights) {
+        let consistency = column_terms(column, inputs.pad_first, &inputs.planes, &mut |_| {});
+        let bus_sum = h_form(column, &inputs.planes).scaled(column.eq_lookup);
 
-        for ((c, s), w) in consistency.iter().zip(&bus_sum).zip(weights.by_ref()) {
-            add_form(&mut row, &c.scaled(w.consistency * inputs.eq_zc));
-            add_form(&mut row, &s.scaled(w.bus_sum));
-        }
+        add_form(&mut row, &consistency.scaled(w.consistency * inputs.eq_zc));
+        add_form(&mut row, &bus_sum.scaled(w.bus_sum));
     }
 
     row
@@ -1245,18 +1294,11 @@ pub fn consistency_row<F: TowerField + HardwareField>(
 /// entries of round `i` carry `Π_{j>i} L_0(r_j)`.
 pub fn sumcheck_mask_form<F: TowerField + HardwareField>(
     initial: &[(Unknown, Flat<F>)],
-    round_pads: &[&[u32]],
-    challenges: &[Flat<F>],
-    degree: usize,
+    rounds: &[RoundForm<F>],
 ) -> Vec<(Unknown, Flat<F>)> {
-    let rounds: Vec<Vec<Flat<F>>> = challenges
-        .iter()
-        .map(|&r| lagrange_weights::<F>(degree, r))
-        .collect();
-
     let mut suffix = vec![Flat::from_raw(F::ONE); rounds.len() + 1];
     for i in (0..rounds.len()).rev() {
-        suffix[i] = suffix[i + 1] * rounds[i][0];
+        suffix[i] = suffix[i + 1] * rounds[i].weights[0];
     }
 
     let mut form: Vec<(Unknown, Flat<F>)> = initial
@@ -1264,17 +1306,78 @@ pub fn sumcheck_mask_form<F: TowerField + HardwareField>(
         .map(|&(u, coeff)| (u, coeff * suffix[0]))
         .collect();
 
-    for (i, (pads, weights)) in round_pads.iter().zip(&rounds).enumerate() {
+    for (i, round) in rounds.iter().enumerate() {
         let after = suffix[i + 1];
 
-        form.push((Unknown::Pad(pads[0]), weights[0] * after));
+        for (j, &pad) in round.pads.iter().enumerate() {
+            let mut weight = round.weights[j + 1];
 
-        for (j, &pad) in pads.iter().enumerate() {
-            form.push((Unknown::Pad(pad), weights[j + 1] * after));
+            if j < round.derived_from {
+                weight += round.weights[0];
+            }
+
+            form.push((Unknown::Pad(pad), weight * after));
         }
     }
 
     form
+}
+
+/// Builds a zerocheck's rounds for the mask form: the skip
+/// round first when the table skips, then the multilinear ones.
+pub fn zerocheck_rounds<F>(
+    skip: SkipPlan,
+    challenges: &[Flat<F>],
+    degree: usize,
+    first_pad: u32,
+) -> errors::Result<Vec<RoundForm<F>>>
+where
+    F: TowerField + HardwareField + FlatPromote<Block8> + FlatPromote<Block16>,
+{
+    if !skip.is_skip() {
+        return Ok(multilinear_rounds(challenges, degree, first_pad));
+    }
+
+    let (&r_skip, tail) = challenges.split_first().ok_or(errors::Error::Protocol {
+        protocol: "outer",
+        message: "skipped zerocheck ended without its skip challenge",
+    })?;
+
+    let sent = skip.sent_scalars() as u32;
+
+    let mut rounds = Vec::with_capacity(challenges.len());
+
+    rounds.push(RoundForm {
+        pads: (first_pad..first_pad + sent).collect(),
+        weights: SkipDomain::<F>::new(skip)?.lagrange(r_skip),
+        derived_from: skip.block_rows() - 1,
+    });
+
+    rounds.extend(multilinear_rounds(tail, degree, first_pad + sent));
+
+    Ok(rounds)
+}
+
+/// Builds `degree` multilinear rounds for the mask form, their
+/// pads consecutive from `first_pad`, `P(0)` rebuilt from `P(1)`.
+pub fn multilinear_rounds<F: TowerField + HardwareField>(
+    challenges: &[Flat<F>],
+    degree: usize,
+    first_pad: u32,
+) -> Vec<RoundForm<F>> {
+    challenges
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| {
+            let first = first_pad + (i * degree) as u32;
+
+            RoundForm {
+                pads: (first..first + degree as u32).collect(),
+                weights: lagrange_weights::<F>(degree, r),
+                derived_from: 1,
+            }
+        })
+        .collect()
 }
 
 /// `claim_n = fin` for an eval sumcheck: `fin` is public,
@@ -1349,7 +1452,7 @@ pub fn plane_binding_row<F: TowerField + HardwareField>(
     row
 }
 
-/// `Σ claimed_sum = 0` over one bus group and limb:
+/// `Σ claimed_sum = 0` over one bus group:
 /// `(pad, masked sum)` per column.
 pub fn bus_sum_row<F: TowerField + HardwareField>(endpoints: &[(u32, Flat<F>)]) -> AffineRow<F> {
     let mut constant = Flat::from_raw(F::ZERO);
@@ -1501,7 +1604,7 @@ pub fn linear_tensor_vars(rows: usize) -> usize {
 /// Weights and target of the linear test on
 /// the rows [`assemble`] builds, computed
 /// from the records without building them.
-pub fn linear_weights<F: TowerField + HardwareField + Into<Block128>>(
+pub fn linear_weights<F: TowerField + HardwareField>(
     layout: &OuterLayout,
     statement: &OuterStatement,
     records: &[TableRecord<'_, F>],
@@ -1522,7 +1625,7 @@ pub fn linear_weights<F: TowerField + HardwareField + Into<Block128>>(
 
 /// Weights and target of the linear test on built rows:
 /// the reference [`linear_weights`] is tested against.
-pub fn linear_weights_of_rows<F: TowerField + HardwareField + Into<Block128>>(
+pub fn linear_weights_of_rows<F: TowerField + HardwareField>(
     layout: &OuterLayout,
     rows: &OuterRows<'_, F>,
     tensor: &[F],
@@ -1541,14 +1644,14 @@ pub fn linear_weights_of_rows<F: TowerField + HardwareField + Into<Block128>>(
         });
     }
 
-    Ok(weigh_rows(
+    weigh_rows(
         layout,
         rows,
         &expand_batch_tensor(tensor, rows.affine.len()),
-    ))
+    )
 }
 
-/// Builds a table's ring-switch plan with the `h` limb columns of `shape`.
+/// Builds a table's ring-switch plan with the `h` planes of `shape`.
 pub fn table_plan<F: TowerField>(
     air: &impl Air<F>,
     shape: &TableShape,
@@ -1588,19 +1691,29 @@ where
     let shapes: Vec<TableShape> = tables.clone().map(|(_, shape)| shape).collect();
 
     let mut zerocheck_events: u128 = 0;
+    let mut skip_events: u128 = 0;
     let mut sumcheck_events: u128 = 0;
 
     for (statics, shape) in tables {
         let terms = statics.ast.roots.len()
             + statics.boundary.len()
             + config.blind_units()
-            + 2 * shape.h_columns();
+            + 2 * shape.bus_columns;
 
         let round = shape.sumcheck_degree + usize::from(shape.subfield_units);
 
         zerocheck_events = zerocheck_events.max((terms + shape.num_vars) as u128);
+        skip_events = skip_events.max(shape.skip().domain_points() as u128);
         sumcheck_events = sumcheck_events.max(round as u128);
     }
+
+    let skip = match skip_events {
+        0 => None,
+        events => {
+            config.check_draw("skip round", F::BITS, events)?;
+            Some(config.draw_bits(F::BITS, events))
+        }
+    };
 
     let mix = match pool.has_subfield_units() {
         true => F::BITS.ilog2() as usize,
@@ -1612,7 +1725,7 @@ where
     let batch_events = ((2 * pool.num_sigma()).saturating_sub(1) + pool.rho_vars() + mix) as u128;
     let round_events = EVAL_SUMCHECK_DEGREE as u128;
 
-    config.check_draw("bus draw", BusElement::BITS, bus_events)?;
+    config.check_draw("bus draw", F::BITS, bus_events)?;
     config.check_draw("zerocheck draw", F::BITS, zerocheck_events)?;
     config.check_draw("sumcheck round", F::BITS, sumcheck_events)?;
     config.check_draw("eval batch draw", F::BITS, batch_events)?;
@@ -1620,7 +1733,7 @@ where
 
     let outer = match config.zero_knowledge {
         true => {
-            let statement = OuterStatement::new(&shapes, pool.layout().num_vars());
+            let statement = OuterStatement::new::<F>(&shapes, pool.layout().num_vars());
             let geom = config.outer_geom(statement.masked_scalars, statement.mul_wires, F::BITS)?;
 
             Some(
@@ -1633,8 +1746,9 @@ where
     };
 
     Ok(DrawBits {
-        bus: config.draw_bits(BusElement::BITS, bus_events),
+        bus: config.draw_bits(F::BITS, bus_events),
         zerocheck: config.draw_bits(F::BITS, zerocheck_events),
+        skip,
         sumcheck: config.draw_bits(F::BITS, sumcheck_events),
         eval_batch: config.draw_bits(F::BITS, batch_events),
         eval_round: config.draw_bits(F::BITS, round_events),
@@ -1680,6 +1794,15 @@ fn expand_batch_tensor<F: TowerField + HardwareField>(tensor: &[F], len: usize) 
     scales
 }
 
+/// Tells whether `c` lies in GF(2^8), the tower elements
+/// with every coordinate past the first byte zero.
+fn in_byte_field<F: TowerField>(c: &F) -> bool {
+    let mut raw = [0u8; linearized::MAX_BYTES];
+    let bytes = &mut raw[..c.serialized_size()];
+
+    c.serialize(bytes).is_ok() && bytes[1..].iter().all(|&b| b == 0)
+}
+
 fn lagrange_weights<F: TowerField + HardwareField>(degree: usize, r: Flat<F>) -> Vec<Flat<F>> {
     (0..=degree)
         .map(|j| {
@@ -1691,7 +1814,7 @@ fn lagrange_weights<F: TowerField + HardwareField>(degree: usize, r: Flat<F>) ->
         .collect()
 }
 
-fn weigh_records<F: TowerField + HardwareField + Into<Block128>>(
+fn weigh_records<F: TowerField + HardwareField>(
     layout: &OuterLayout,
     records: &[TableRecord<'_, F>],
     eval: &EvalRecord<F>,
@@ -1734,14 +1857,14 @@ fn weigh_records<F: TowerField + HardwareField + Into<Block128>>(
     first += 1;
 
     if let Some(gadget) = &eval.gadget {
-        let chain = &scales[first..first + linearized::CHAIN_ROWS];
+        let chain = &scales[first..first + linearized::chain_rows::<F>()];
         for (row, &scale) in gadget.wire_rows().iter().zip(chain) {
             acc.row(row, scale, &[], 0);
         }
 
-        gadget.for_each_tie_weight(chain, |pad, weight| acc.add(Unknown::Pad(pad), weight));
+        gadget.for_each_tie_weight(chain, |pad, weight| acc.add(Unknown::Pad(pad), weight))?;
 
-        first += linearized::CHAIN_ROWS;
+        first += linearized::chain_rows::<F>();
     }
 
     for (endpoints, &scale) in buses.values().zip(&scales[first..]) {
@@ -1751,7 +1874,7 @@ fn weigh_records<F: TowerField + HardwareField + Into<Block128>>(
     Ok(acc.batch())
 }
 
-fn weigh_table<F: TowerField + HardwareField + Into<Block128>>(
+fn weigh_table<F: TowerField + HardwareField>(
     acc: &mut Accumulator<'_, F>,
     sweep: &mut Sweep<F>,
     record: &TableRecord<'_, F>,
@@ -1772,48 +1895,45 @@ fn weigh_table<F: TowerField + HardwareField + Into<Block128>>(
     Ok(())
 }
 
-fn weigh_rows<F: TowerField + HardwareField + Into<Block128>>(
+fn weigh_rows<F: TowerField + HardwareField>(
     layout: &OuterLayout,
     rows: &OuterRows<'_, F>,
     scales: &[Flat<F>],
-) -> LinearBatch<F> {
+) -> errors::Result<LinearBatch<F>> {
     let mut acc = Accumulator::new(layout);
     for (row, &scale) in rows.affine.iter().zip(scales) {
         acc.row(row, scale, &[], 0);
     }
 
     for &(first, gadget) in &rows.gadgets {
-        let chain = &scales[first..first + linearized::CHAIN_ROWS];
-        gadget.for_each_tie_weight(chain, |pad, weight| acc.add(Unknown::Pad(pad), weight));
+        let chain = &scales[first..first + linearized::chain_rows::<F>()];
+        gadget.for_each_tie_weight(chain, |pad, weight| acc.add(Unknown::Pad(pad), weight))?;
     }
 
-    acc.batch()
+    Ok(acc.batch())
 }
 
 fn bus_endpoints<'r, F: TowerField>(records: &'r [TableRecord<'_, F>]) -> BusSums<'r, F> {
     let mut buses = BusSums::new();
     for record in records {
-        for (group, limb, pad, masked) in &record.claimed_sums {
-            buses
-                .entry((group, *limb))
-                .or_default()
-                .push((*pad, *masked));
+        for (group, pad, masked) in &record.claimed_sums {
+            buses.entry(group).or_default().push((*pad, *masked));
         }
     }
 
     buses
 }
 
-fn eval_rows<F>(eval: &EvalRecord<F>) -> usize {
+fn eval_rows<F: TowerField>(eval: &EvalRecord<F>) -> usize {
     match eval.gadget {
-        Some(_) => 1 + linearized::CHAIN_ROWS,
+        Some(_) => 1 + linearized::chain_rows::<F>(),
         None => 1,
     }
 }
 
-fn eval_wires<F>(eval: &EvalRecord<F>) -> usize {
+fn eval_wires<F: TowerField>(eval: &EvalRecord<F>) -> usize {
     match eval.gadget {
-        Some(_) => linearized::BITS - 1,
+        Some(_) => F::BITS - 1,
         None => 0,
     }
 }
@@ -1821,119 +1941,89 @@ fn eval_wires<F>(eval: &EvalRecord<F>) -> usize {
 /// Counts the Hadamard wires one bus column adds to the outer statement.
 fn column_wires(column: &BusColumn, specs: &[(String, PermutationCheckSpec)]) -> usize {
     let Some(second) = column.second else {
-        return KARATSUBA_WIRES;
+        return 1;
     };
 
     let spec = &specs[second].1;
-    let selector_wires = match spec.selector.is_some() || spec.recv_selector.is_some() {
-        true => BUS_LIMBS,
-        false => 0,
-    };
+    let selector_wires = usize::from(spec.selector.is_some() || spec.recv_selector.is_some());
 
-    2 * KARATSUBA_WIRES + selector_wires
+    2 + selector_wires
 }
 
-/// Emits a column's operand rows into `f` and
-/// returns its consistency `C` as limb forms:
+/// Emits a column's operand rows into `f` and returns its consistency `C`:
 /// `g·D + s`, or `(g·D₁ + s₁)·D₂ + s₂·D₁` for a pair.
 fn column_terms<F: TowerField + HardwareField>(
     column: &BusColumnRow<F>,
     pad_first: u32,
-    tau: Flat<F>,
+    planes: &[Flat<F>],
     f: &mut impl FnMut(AffineRow<F>),
-) -> [Form<F>; BUS_LIMBS] {
+) -> Form<F> {
     let one = Flat::from_raw(F::ONE);
-    let g = h_forms(column);
-    let d1 = denominator_forms(&column.first, pad_first);
+    let g = h_form(column, planes);
+    let d1 = denominator_form(&column.first, pad_first);
     let wire = column.first_wire;
 
-    karatsuba_rows(&g, &d1, wire, f);
+    f(operand_row(&g, wire, WireRole::Lhs));
+    f(operand_row(&d1, wire, WireRole::Rhs));
 
-    let [mut lo, hi] = product_forms(wire, tau);
-    lo.extend(&selector_form(&column.first, pad_first));
+    let mut c = product_form(wire);
+    c.extend(&selector_form(&column.first, pad_first));
 
     let Some(second) = &column.second else {
-        return [lo, hi];
+        return c;
     };
 
-    let d2 = denominator_forms(second, pad_first);
-    let next = wire + KARATSUBA_WIRES as u32;
+    let d2 = denominator_form(second, pad_first);
 
-    karatsuba_rows(&[lo, hi], &d2, next, f);
+    f(operand_row(&c, wire + 1, WireRole::Lhs));
+    f(operand_row(&d2, wire + 1, WireRole::Rhs));
 
-    let [mut lo, mut hi] = product_forms(next, tau);
+    let mut c = product_form(wire + 1);
 
     match second.selector_claimed() {
         true => {
             let s2 = selector_form(second, pad_first);
-            let first = next + KARATSUBA_WIRES as u32;
 
-            for (j, d) in d1.iter().enumerate() {
-                let mul = first + j as u32;
+            f(operand_row(&s2, wire + 2, WireRole::Lhs));
+            f(operand_row(&d1, wire + 2, WireRole::Rhs));
 
-                f(operand_row(&s2, mul, WireRole::Lhs));
-                f(operand_row(d, mul, WireRole::Rhs));
-            }
-
-            lo.unknowns.push((product_wire(first), one));
-            hi.unknowns.push((product_wire(first + 1), one));
+            c.unknowns.push((product_wire(wire + 2), one));
         }
-        false => {
-            lo.extend(&d1[0]);
-            hi.extend(&d1[1]);
-        }
+        false => c.extend(&d1),
     }
 
-    [lo, hi]
+    c
 }
 
-/// Returns a column's bus-sum `S = eq_lookup · g` as limb forms.
-fn bus_sum_forms<F: TowerField + HardwareField>(
-    column: &BusColumnRow<F>,
-    tau: Flat<F>,
-) -> [Form<F>; BUS_LIMBS] {
-    let [g_lo, g_hi] = h_forms(column);
-    let e = column.eq_lookup;
+/// Returns a column's `h` as a form over its plane pads,
+/// `Σ_k plane_k · basis_k` with the masked planes as the constant.
+fn h_form<F: TowerField + HardwareField>(column: &BusColumnRow<F>, planes: &[Flat<F>]) -> Form<F> {
+    let mut form = Form::default();
+    for ((&pad, &masked), &basis) in column.h_pads.iter().zip(&column.h_masked).zip(planes) {
+        form.unknowns.push((Unknown::Pad(pad), basis));
 
-    let mut lo = g_lo.scaled(e.lo);
-    lo.extend(&g_hi.scaled(tau * e.hi));
+        form.constant += masked * basis;
+    }
 
-    let mut hi = g_hi.scaled(e.lo + e.hi);
-    hi.extend(&g_lo.scaled(e.hi));
-
-    [lo, hi]
+    form
 }
 
-fn h_forms<F: TowerField + HardwareField>(column: &BusColumnRow<F>) -> [Form<F>; BUS_LIMBS] {
-    core::array::from_fn(|j| Form {
-        unknowns: vec![(Unknown::Pad(column.h_pads[j]), Flat::from_raw(F::ONE))],
-        claims: Vec::new(),
-        constant: column.h_masked[j],
-    })
-}
-
-fn denominator_forms<F: TowerField + HardwareField>(
+fn denominator_form<F: TowerField + HardwareField>(
     fraction: &BusFraction<F>,
     pad_first: u32,
-) -> [Form<F>; BUS_LIMBS] {
-    let constant = fraction.constant.limbs();
+) -> Form<F> {
+    let mut form = Form {
+        unknowns: Vec::with_capacity(fraction.slots.len()),
+        claims: Vec::with_capacity(fraction.slots.len()),
+        constant: fraction.constant,
+    };
 
-    core::array::from_fn(|j| {
-        let mut form = Form {
-            unknowns: Vec::with_capacity(fraction.slots.len()),
-            claims: Vec::with_capacity(fraction.slots.len()),
-            constant: constant[j],
-        };
+    for &(claim, coeff) in &fraction.slots {
+        form.unknowns.push((Unknown::Pad(pad_first + claim), coeff));
+        form.claims.push((claim, coeff));
+    }
 
-        for &(claim, coeff) in &fraction.slots {
-            let c = coeff.limbs()[j];
-
-            form.unknowns.push((Unknown::Pad(pad_first + claim), c));
-            form.claims.push((claim, c));
-        }
-
-        form
-    })
+    form
 }
 
 fn selector_form<F: TowerField + HardwareField>(
@@ -1959,57 +2049,12 @@ fn selector_form<F: TowerField + HardwareField>(
     form
 }
 
-fn product_forms<F: TowerField + HardwareField>(wire: u32, tau: Flat<F>) -> [Form<F>; BUS_LIMBS] {
-    let one = Flat::from_raw(F::ONE);
-    let zero = Flat::from_raw(F::ZERO);
-
-    [
-        Form {
-            unknowns: vec![(product_wire(wire), one), (product_wire(wire + 1), tau)],
-            claims: Vec::new(),
-            constant: zero,
-        },
-        Form {
-            unknowns: vec![(product_wire(wire), one), (product_wire(wire + 2), one)],
-            claims: Vec::new(),
-            constant: zero,
-        },
-    ]
-}
-
-fn karatsuba_rows<F: TowerField + HardwareField>(
-    a: &[Form<F>; BUS_LIMBS],
-    b: &[Form<F>; BUS_LIMBS],
-    wire: u32,
-    f: &mut impl FnMut(AffineRow<F>),
-) {
-    let mut a_sum = a[0].clone();
-    a_sum.extend(&a[1]);
-
-    let mut b_sum = b[0].clone();
-    b_sum.extend(&b[1]);
-
-    let operands = [(&a[0], &b[0]), (&a[1], &b[1]), (&a_sum, &b_sum)];
-
-    for (k, (lhs, rhs)) in operands.into_iter().enumerate() {
-        let mul = wire + k as u32;
-
-        f(operand_row(lhs, mul, WireRole::Lhs));
-        f(operand_row(rhs, mul, WireRole::Rhs));
+fn product_form<F: TowerField + HardwareField>(wire: u32) -> Form<F> {
+    Form {
+        unknowns: vec![(product_wire(wire), Flat::from_raw(F::ONE))],
+        claims: Vec::new(),
+        constant: Flat::from_raw(F::ZERO),
     }
-}
-
-fn karatsuba_values<F: TowerField + HardwareField>(
-    a: BusValue<F>,
-    b: BusValue<F>,
-    out: &mut Vec<[Flat<F>; 3]>,
-) {
-    let a_sum = a.lo + a.hi;
-    let b_sum = b.lo + b.hi;
-
-    out.push([a.lo, b.lo, a.lo * b.lo]);
-    out.push([a.hi, b.hi, a.hi * b.hi]);
-    out.push([a_sum, b_sum, a_sum * b_sum]);
 }
 
 fn operand_row<F: TowerField + HardwareField>(
@@ -2058,8 +2103,8 @@ mod tests {
     const BUS_H_PAD: u32 = 20;
     const BUS_PUBLIC: u128 = 77;
 
-    /// `half - h_columns` at `bus_record`'s `half = 4` and one bus column.
-    const H_CLAIM: usize = 2;
+    /// `half - h_columns` at `bus_record`'s `half = 4` and one bus column of one plane.
+    const H_CLAIM: usize = 3;
 
     fn shape(num_vars: usize, num_columns: usize, degree: usize, buses: usize) -> TableShape {
         TableShape {
@@ -2067,23 +2112,18 @@ mod tests {
             num_columns,
             sumcheck_degree: degree,
             bus_columns: buses,
-            bus_wires: KARATSUBA_WIRES * buses,
+            h_planes: 1,
+            bus_wires: buses,
             mul_nodes: 0,
             expands_bits: false,
             subfield_units: false,
             whole_blinds: 0,
+            skip_lanes: SkipLanes::Block16,
         }
     }
 
-    fn field() -> BusField<F> {
-        BusField::new().unwrap()
-    }
-
-    fn value(seed: u128) -> BusValue<F> {
-        BusValue {
-            lo: mix(seed),
-            hi: mix(seed + 1000),
-        }
+    fn value(seed: u128) -> Flat<F> {
+        mix(seed + 1000)
     }
 
     fn bus_fraction(seed: u128, selector: Option<u32>) -> BusFraction<F> {
@@ -2146,16 +2186,16 @@ mod tests {
     fn bus_record(
         ast: &ConstraintAst<F>,
         claims_masked: Vec<Flat<F>>,
-        h_masked: [Flat<F>; BUS_LIMBS],
+        h_masked: Flat<F>,
     ) -> TableRecord<'_, F> {
         let mul_nodes = mul_node_count(ast);
 
         let column = BusColumnRow {
-            h_pads: [BUS_H_PAD, BUS_H_PAD + 1],
-            h_masked,
+            h_pads: vec![BUS_H_PAD],
+            h_masked: vec![h_masked],
             first: bus_fraction(3, Some(1)),
             second: None,
-            eq_lookup: BusValue::one(),
+            eq_lookup: Flat::from_raw(F::ONE),
             first_wire: mul_nodes as u32,
         };
 
@@ -2166,7 +2206,7 @@ mod tests {
                 pad_first: BUS_PAD_FIRST,
                 eq_zc: mix(1),
                 alpha: mix(2),
-                tau: field().tau(),
+                planes: plane_basis().unwrap(),
                 boundary: Vec::new(),
                 telescope: Vec::new(),
                 buses: vec![column],
@@ -2174,9 +2214,7 @@ mod tests {
                 val_final_masked: mix(4),
             },
             fixed: Vec::new(),
-            claimed_sums: (0..BUS_LIMBS)
-                .map(|j| (BusGroup::Permutation, j, j as u32, mix(7 + j as u128)))
-                .collect(),
+            claimed_sums: vec![(BusGroup::Permutation, 0, mix(7))],
             bindings: Vec::new(),
             shape: TableShape {
                 mul_nodes,
@@ -2296,17 +2334,16 @@ mod tests {
         fixed: bool,
     ) -> TableRecord<'_, F> {
         let seed = base as u128;
-        let limbs = BUS_LIMBS as u32;
-        let half = columns + limbs * buses;
+        let half = columns + buses;
         let mul_nodes = mul_node_count(ast);
 
         let free = base + 2 * half;
-        let sums_pad = free + limbs * buses;
-        let mask_pad = sums_pad + limbs * buses;
+        let sums_pad = free + buses;
+        let mask_pad = sums_pad + buses;
 
         let wires = |k: u32| match k {
-            1 => 2 * KARATSUBA_WIRES + BUS_LIMBS,
-            _ => KARATSUBA_WIRES,
+            1 => 3,
+            _ => 1,
         };
 
         let mut first_wire = mul_nodes as u32;
@@ -2316,8 +2353,8 @@ mod tests {
             let s = seed + 100 * k as u128;
 
             bus_rows.push(BusColumnRow {
-                h_pads: [free + limbs * k, free + limbs * k + 1],
-                h_masked: [mix(s + 10), mix(s + 11)],
+                h_pads: vec![free + k],
+                h_masked: vec![mix(s + 10)],
                 first: BusFraction {
                     slots: vec![(0, value(s + 12)), (columns - 1, value(s + 13))],
                     constant: value(s + 14),
@@ -2326,7 +2363,7 @@ mod tests {
                 },
                 second: (k == 1).then(|| bus_fraction(s + 15, Some(1))),
                 eq_lookup: match k % 2 {
-                    0 => BusValue::one(),
+                    0 => Flat::from_raw(F::ONE),
                     _ => value(s + 16),
                 },
                 first_wire,
@@ -2342,7 +2379,7 @@ mod tests {
                 pad_first: base,
                 eq_zc: mix(seed + 1),
                 alpha: mix(seed + 2),
-                tau: field().tau(),
+                planes: plane_basis().unwrap(),
                 boundary: vec![
                     (1, mix(seed + 5), mix(seed + 6)),
                     (0, mix(seed + 7), mix(seed + 8)),
@@ -2359,17 +2396,13 @@ mod tests {
                 false => Vec::new(),
             },
             claimed_sums: (0..buses)
-                .flat_map(|k| {
-                    (0..BUS_LIMBS).map(move |j| {
-                        let group = match k {
-                            0 => BusGroup::Permutation,
-                            _ => BusGroup::Lookup(alloc::format!("table {base} bus {k}")),
-                        };
+                .map(|k| {
+                    let group = match k {
+                        0 => BusGroup::Permutation,
+                        _ => BusGroup::Lookup(format!("table {base} bus {k}")),
+                    };
 
-                        let limb = limbs * k + j as u32;
-
-                        (group, j, sums_pad + limb, mix(seed + 90 + limb as u128))
-                    })
+                    (group, sums_pad + k, mix(seed + 90 + k as u128))
                 })
                 .collect(),
             bindings: Vec::new(),
@@ -2378,11 +2411,13 @@ mod tests {
                 num_columns: columns as usize,
                 sumcheck_degree: 3,
                 bus_columns: buses as usize,
+                h_planes: 1,
                 bus_wires: (0..buses).map(wires).sum(),
                 mul_nodes,
                 expands_bits: false,
                 subfield_units: false,
                 whole_blinds: 0,
+                skip_lanes: SkipLanes::Block16,
             },
         }
     }
@@ -2400,7 +2435,7 @@ mod tests {
 
         let mu = (0..2u128)
             .map(|k| {
-                (0..linearized::BITS as u128)
+                (0..F::BITS as u128)
                     .map(|j| mix(seed + 100 + 200 * k + j))
                     .collect()
             })
@@ -2438,11 +2473,11 @@ mod tests {
 
         let statement = OuterStatement {
             masked_scalars: 2048,
-            mul_wires: table_wires + linearized::BITS - 1,
+            mul_wires: table_wires + F::BITS - 1,
         };
 
-        let geom = hekate_core::config::Config::prod()
-            .outer_geom(statement.masked_scalars, statement.mul_wires, 128)
+        let geom = Config::prod()
+            .outer_geom(statement.masked_scalars, statement.mul_wires, 256)
             .unwrap();
 
         let layout =
@@ -2500,8 +2535,8 @@ mod tests {
             ..plain
         };
 
-        let without = OuterStatement::new(&[plain, plain], 12);
-        let with = OuterStatement::new(&[ring, ring], 12);
+        let without = OuterStatement::new::<F>(&[plain, plain], 12);
+        let with = OuterStatement::new::<F>(&[ring, ring], 12);
 
         assert_eq!(ring.mul_wires(), plain.mul_wires());
         assert_eq!(with.mul_wires - without.mul_wires, 127);
@@ -2630,9 +2665,9 @@ mod tests {
             ..with_bus
         };
 
-        let claimed_sum_and_h_eval = 2 * BUS_LIMBS;
+        let claimed_sum_and_h_eval = 2;
 
-        let h_claim_halves = 2 * BUS_LIMBS;
+        let h_claim_halves = 2;
         let h_blind_halves = 2 * with_bus.whole_blinds;
 
         assert_eq!(
@@ -2649,10 +2684,11 @@ mod tests {
                 ..shape(12, 1977, 5, 3)
             };
 
-            let claimed_sums_and_h_evals = 2 * BUS_LIMBS * 3;
-            let zerocheck_rounds = 12 * 5;
+            let claimed_sums_and_h_evals = 3 + 3;
+            let skip_round = (5 << 6) - 1;
+            let zerocheck_rounds = skip_round + (12 - 6) * 5;
             let h_blinds = whole_blinds;
-            let claims = 2 * (1977 + whole_blinds + BUS_LIMBS * 3 + h_blinds);
+            let claims = 2 * (1977 + whole_blinds + 3 + h_blinds);
 
             assert_eq!(
                 s.masked_scalars(),
@@ -2662,13 +2698,13 @@ mod tests {
     }
 
     #[test]
-    fn every_bus_column_adds_karatsuba_wires() {
+    fn every_bus_column_adds_one_wire() {
         let s = TableShape {
             mul_nodes: 40,
             ..shape(12, 100, 3, 3)
         };
 
-        assert_eq!(s.mul_wires(), 40 + 3 * KARATSUBA_WIRES);
+        assert_eq!(s.mul_wires(), 40 + 3);
     }
 
     #[test]
@@ -2685,20 +2721,20 @@ mod tests {
             ..shape(10, 30, 4, 1)
         };
 
-        let statement = OuterStatement::new(&[main, chiplet], 12);
+        let statement = OuterStatement::new::<F>(&[main, chiplet], 12);
 
         assert_eq!(
             statement.masked_scalars,
             main.masked_scalars() + chiplet.masked_scalars() + 2 * 12
         );
-        assert_eq!(statement.mul_wires, 40 + 7 + 3 * KARATSUBA_WIRES);
+        assert_eq!(statement.mul_wires, 40 + 7 + 3);
     }
 
     #[test]
     fn every_hadamard_wire_operand_is_pinned_by_row() {
         let claims: Vec<Flat<F>> = (0..8).map(|i| mix(100 + i)).collect();
         let ast = bus_ast();
-        let record = bus_record(&ast, claims, [mix(8), mix(9)]);
+        let record = bus_record(&ast, claims, mix(8));
         let statement = OuterStatement {
             masked_scalars: 32,
             mul_wires: record.shape.mul_wires(),
@@ -2720,16 +2756,13 @@ mod tests {
 
     #[test]
     fn bus_column_rows_hold_on_honest_wires() {
-        let field = field();
+        let planes = plane_basis::<F>().unwrap();
         let plain: Vec<Flat<F>> = (0..8).map(|i| mix(200 + i)).collect();
         let pad: Vec<Flat<F>> = (0..32).map(|i| mix(300 + i)).collect();
         let claims_masked = masked(&plain, &pad);
 
         let h = value(400);
-        let h_masked = [
-            h.lo + pad[BUS_H_PAD as usize],
-            h.hi + pad[BUS_H_PAD as usize + 1],
-        ];
+        let h_masked = vec![h + pad[BUS_H_PAD as usize]];
 
         for second in [
             None,
@@ -2737,8 +2770,8 @@ mod tests {
             Some(bus_fraction(5, Some(1))),
         ] {
             let column = BusColumnRow {
-                h_pads: [BUS_H_PAD, BUS_H_PAD + 1],
-                h_masked,
+                h_pads: vec![BUS_H_PAD],
+                h_masked: h_masked.clone(),
                 first: bus_fraction(3, Some(1)),
                 second,
                 eq_lookup: value(500),
@@ -2746,19 +2779,11 @@ mod tests {
             };
 
             let mut wires = Vec::new();
-            bus_wire_values(
-                &field,
-                &column.first,
-                column.second.as_ref(),
-                &plain,
-                h,
-                &mut wires,
-            );
+            bus_wire_values(&column.first, column.second.as_ref(), &plain, h, &mut wires);
 
             let mut rows = Vec::new();
-            let consistency = column_terms(&column, BUS_PAD_FIRST, field.tau(), &mut |row| {
-                rows.push(row)
-            });
+            let consistency =
+                column_terms(&column, BUS_PAD_FIRST, &planes, &mut |row| rows.push(row));
 
             assert_eq!(rows.len(), 2 * wires.len());
             assert!(
@@ -2773,63 +2798,52 @@ mod tests {
             }
 
             let d1 = column.first.denominator(&plain);
-            let s1 = BusValue::from_base(column.first.selector_value(&plain));
+            let s1 = column.first.selector_value(&plain);
 
             let expected = match &column.second {
-                None => field.mul(h, d1) + s1,
+                None => h * d1 + s1,
                 Some(second) => {
                     let d2 = second.denominator(&plain);
-                    let s2 = BusValue::from_base(second.selector_value(&plain));
+                    let s2 = second.selector_value(&plain);
 
-                    field.mul(field.mul(h, d1), d2) + field.mul(s1, d2) + field.mul(s2, d1)
+                    h * d1 * d2 + s1 * d2 + s2 * d1
                 }
             };
 
-            let got = consistency.map(|form| form.evaluate(&claims_masked, &pad, &wires));
+            assert_eq!(consistency.evaluate(&claims_masked, &pad, &wires), expected);
 
-            assert_eq!(got, expected.limbs());
+            let bus_sum = h_form(&column, &planes).scaled(column.eq_lookup).evaluate(
+                &claims_masked,
+                &pad,
+                &wires,
+            );
 
-            let bus_sum = bus_sum_forms(&column, field.tau())
-                .map(|form| form.evaluate(&claims_masked, &pad, &wires));
-
-            assert_eq!(bus_sum, field.mul(column.eq_lookup, h).limbs());
+            assert_eq!(bus_sum, column.eq_lookup * h);
         }
     }
 
     #[test]
     fn bus_column_rows_reject_free_operand() {
-        let field = field();
+        let planes = plane_basis::<F>().unwrap();
         let plain: Vec<Flat<F>> = (0..8).map(|i| mix(200 + i)).collect();
         let pad: Vec<Flat<F>> = (0..32).map(|i| mix(300 + i)).collect();
         let claims_masked = masked(&plain, &pad);
 
         let h = value(400);
         let column = BusColumnRow {
-            h_pads: [BUS_H_PAD, BUS_H_PAD + 1],
-            h_masked: [
-                h.lo + pad[BUS_H_PAD as usize],
-                h.hi + pad[BUS_H_PAD as usize + 1],
-            ],
+            h_pads: vec![BUS_H_PAD],
+            h_masked: vec![h + pad[BUS_H_PAD as usize]],
             first: bus_fraction(3, Some(1)),
             second: None,
-            eq_lookup: BusValue::one(),
+            eq_lookup: Flat::from_raw(F::ONE),
             first_wire: 0,
         };
 
         let mut wires = Vec::new();
-        bus_wire_values(
-            &field,
-            &column.first,
-            column.second.as_ref(),
-            &plain,
-            h,
-            &mut wires,
-        );
+        bus_wire_values(&column.first, column.second.as_ref(), &plain, h, &mut wires);
 
         let mut rows = Vec::new();
-        column_terms(&column, BUS_PAD_FIRST, field.tau(), &mut |row| {
-            rows.push(row)
-        });
+        column_terms(&column, BUS_PAD_FIRST, &planes, &mut |row| rows.push(row));
 
         let one = Flat::from_raw(F::ONE);
 
@@ -2846,7 +2860,7 @@ mod tests {
         let cfg = Config::prod();
 
         for (scalars, wires) in [(1usize, 0usize), (4_075, 2_384), (12_000, 20_000)] {
-            let geom = cfg.outer_geom(scalars, wires, 128).unwrap();
+            let geom = cfg.outer_geom(scalars, wires, 256).unwrap();
             let layout = OuterLayout::new(&geom, scalars, wires).unwrap();
 
             assert!(layout.pad_rows * layout.message_len >= scalars);
@@ -2873,7 +2887,7 @@ mod tests {
         let cfg = Config::prod();
         let (scalars, wires) = (4_075usize, 2_384usize);
 
-        let geom = cfg.outer_geom(scalars, wires, 128).unwrap();
+        let geom = cfg.outer_geom(scalars, wires, 256).unwrap();
         let layout = OuterLayout::new(&geom, scalars, wires).unwrap();
 
         let triples: Vec<[Flat<F>; 3]> = (0..wires as u128)
@@ -2921,35 +2935,96 @@ mod tests {
             .map(|i| (Unknown::Pad(i), mix(500 + i as u128)))
             .collect();
 
-        let round_pads: Vec<Vec<u32>> = (0..5u32)
-            .map(|i| {
-                (0..degree as u32)
-                    .map(|j| 100 + i * degree as u32 + j)
-                    .collect()
-            })
-            .collect();
-
-        let round_refs: Vec<&[u32]> = round_pads.iter().map(|p| p.as_slice()).collect();
         let challenges: Vec<Flat<F>> = (0..5).map(|i| mix(600 + i)).collect();
+        let rounds = multilinear_rounds(&challenges, degree, 100);
 
         let mut expected: Vec<(Unknown, Flat<F>)> = initial.clone();
-        for (pads, &r) in round_refs.iter().zip(&challenges) {
+        for (round, &r) in rounds.iter().zip(&challenges) {
             let weights = lagrange_weights::<F>(degree, r);
             for (_, coeff) in expected.iter_mut() {
                 *coeff *= weights[0];
             }
 
-            expected.push((Unknown::Pad(pads[0]), weights[0]));
+            assert_eq!(round.pads[0], 100 + 3 * (round.pads[0] - 100) / 3);
 
-            for (j, &pad) in pads.iter().enumerate() {
-                expected.push((Unknown::Pad(pad), weights[j + 1]));
+            for (j, &pad) in round.pads.iter().enumerate() {
+                let derived = match j {
+                    0 => weights[0],
+                    _ => Flat::from_raw(F::ZERO),
+                };
+
+                expected.push((Unknown::Pad(pad), weights[j + 1] + derived));
             }
         }
 
-        assert_eq!(
-            sumcheck_mask_form(&initial, &round_refs, &challenges, degree),
-            expected
-        );
+        assert_eq!(sumcheck_mask_form(&initial, &rounds), expected);
+    }
+
+    #[test]
+    fn skip_round_form_matches_recursion_on_pads() {
+        let zero = Flat::from_raw(F::ZERO);
+        let degree = 3;
+
+        let skip = SkipPlan {
+            vars: 2,
+            lanes: SkipLanes::Block8,
+            cosets: 3,
+        };
+
+        let domain = SkipDomain::<F>::new(skip).unwrap();
+        let challenges: Vec<Flat<F>> = (0..4).map(|i| mix(700 + i)).collect();
+        let rounds = zerocheck_rounds(skip, &challenges, degree, 40).unwrap();
+
+        assert_eq!(rounds[0].pads.len(), skip.sent_scalars());
+        assert_eq!(rounds[0].derived_from, skip.block_rows() - 1);
+        assert_eq!(rounds.len(), challenges.len());
+
+        let pad: Vec<Flat<F>> = (0..80).map(|i| mix(800 + i as u128)).collect();
+        let initial = vec![(Unknown::Pad(7), mix(900))];
+        let form = sumcheck_mask_form(&initial, &rounds);
+
+        let via_form = form.iter().fold(zero, |acc, &(u, coeff)| match u {
+            Unknown::Pad(p) => acc + coeff * pad[p as usize],
+            _ => acc,
+        });
+
+        let mut claim = mix(900) * pad[7];
+        let mut next_pad = 40usize;
+
+        let sent: Vec<Flat<F>> = (0..skip.sent_scalars())
+            .map(|_| {
+                let v = pad[next_pad];
+                next_pad += 1;
+
+                v
+            })
+            .collect();
+
+        let rest: Flat<F> = sent[..skip.block_rows() - 1]
+            .iter()
+            .fold(zero, |a, &v| a + v);
+
+        let mut values = vec![claim - rest];
+        values.extend_from_slice(&sent);
+
+        claim = domain.interpolate(&values, challenges[0]).unwrap();
+
+        for &r in &challenges[1..] {
+            let p1 = pad[next_pad];
+            let weights = lagrange_weights::<F>(degree, r);
+
+            let mut round = vec![claim - p1];
+            round.extend_from_slice(&pad[next_pad..next_pad + degree]);
+
+            next_pad += degree;
+
+            claim = round
+                .iter()
+                .zip(&weights)
+                .fold(zero, |acc, (&v, &w)| acc + v * w);
+        }
+
+        assert_eq!(via_form, claim);
     }
 
     #[test]
@@ -2957,56 +3032,49 @@ mod tests {
         let pad: Vec<Flat<F>> = (0..32).map(|i| mix(300 + i)).collect();
         let one = Flat::from_raw(F::ONE);
 
-        let h = [mix(400), mix(401)];
-        let h_masked = [
-            h[0] + pad[BUS_H_PAD as usize],
-            h[1] + pad[BUS_H_PAD as usize + 1],
-        ];
+        let h = mix(400);
+        let h_masked = h + pad[BUS_H_PAD as usize];
 
         for whole_blinds in [0, 1] {
             let half = 4 + 2 * whole_blinds;
-            for j in 0..BUS_LIMBS {
-                let claim = H_CLAIM + whole_blinds + j;
-                let h_pad = BUS_H_PAD + j as u32;
+            let claim = H_CLAIM + whole_blinds;
 
-                let pin_form = [
-                    (Unknown::Pad(h_pad), one),
-                    (Unknown::Pad(BUS_PAD_FIRST + claim as u32), one),
-                ];
+            let pin_form = [
+                (Unknown::Pad(BUS_H_PAD), one),
+                (Unknown::Pad(BUS_PAD_FIRST + claim as u32), one),
+            ];
 
-                for (h_claim, honest) in [(h[j], true), (h[j] + one, false)] {
-                    let mut plain: Vec<Flat<F>> =
-                        (0..2 * half).map(|i| mix(200 + i as u128)).collect();
+            for (h_claim, honest) in [(h, true), (h + one, false)] {
+                let mut plain: Vec<Flat<F>> = (0..2 * half).map(|i| mix(200 + i as u128)).collect();
 
-                    plain[claim] = h_claim;
+                plain[claim] = h_claim;
 
-                    let claims_masked = masked(&plain, &pad);
-                    let ast = bus_ast();
+                let claims_masked = masked(&plain, &pad);
+                let ast = bus_ast();
 
-                    let mut record = bus_record(&ast, claims_masked.clone(), h_masked);
-                    record.shape.whole_blinds = whole_blinds;
+                let mut record = bus_record(&ast, claims_masked.clone(), h_masked);
+                record.shape.whole_blinds = whole_blinds;
 
-                    let statement = OuterStatement {
-                        masked_scalars: 32,
-                        mul_wires: record.shape.mul_wires(),
-                    };
+                let statement = OuterStatement {
+                    masked_scalars: 32,
+                    mul_wires: record.shape.mul_wires(),
+                };
 
-                    let records = [record];
-                    let eval = eval_without_gadget();
-                    let rows = assemble(&records, &eval, &statement).unwrap();
-                    let pins: Vec<&AffineRow<F>> = rows
-                        .affine
-                        .iter()
-                        .filter(|r| r.unknowns == pin_form)
-                        .collect();
+                let records = [record];
+                let eval = eval_without_gadget();
+                let rows = assemble(&records, &eval, &statement).unwrap();
+                let pins: Vec<&AffineRow<F>> = rows
+                    .affine
+                    .iter()
+                    .filter(|r| r.unknowns == pin_form)
+                    .collect();
 
-                    assert_eq!(pins.len(), 1, "{whole_blinds} whole blinds, limb {j}");
-                    assert_eq!(pins[0].constant, h_masked[j] + claims_masked[claim]);
+                assert_eq!(pins.len(), 1, "{whole_blinds} whole blinds");
+                assert_eq!(pins[0].constant, h_masked + claims_masked[claim]);
 
-                    let left = pad[h_pad as usize] + pad[BUS_PAD_FIRST as usize + claim];
+                let left = pad[BUS_H_PAD as usize] + pad[BUS_PAD_FIRST as usize + claim];
 
-                    assert_eq!(left == pins[0].constant, honest);
-                }
+                assert_eq!(left == pins[0].constant, honest);
             }
         }
     }
@@ -3074,7 +3142,7 @@ mod tests {
             .map(|i| mix(7000 + i))
             .collect();
 
-        let want = weigh_rows(&layout, &assembled, &scales);
+        let want = weigh_rows(&layout, &assembled, &scales).unwrap();
         let full = weigh_records(&layout, &records, &eval, &scales).unwrap();
 
         assert_eq!(full.weights, want.weights);
@@ -3110,7 +3178,7 @@ mod tests {
             };
 
             let geom = Config::prod()
-                .outer_geom(statement.masked_scalars, statement.mul_wires, 128)
+                .outer_geom(statement.masked_scalars, statement.mul_wires, 256)
                 .unwrap();
 
             let layout =
@@ -3171,9 +3239,9 @@ mod tests {
                 statics(&none, &specs),
                 shape(4, 2, 3, 1),
                 &empty,
-                252,
+                124,
                 "bus draw",
-                251,
+                123,
             ),
             (
                 statics(&roots, &[]),
@@ -3259,8 +3327,9 @@ mod tests {
         assert_eq!(
             draws,
             DrawBits {
-                bus: 251,
+                bus: 123,
                 zerocheck: 124,
+                skip: None,
                 sumcheck: 125,
                 eval_batch: 128,
                 eval_round: 127,
@@ -3295,5 +3364,50 @@ mod tests {
         };
 
         assert_eq!(below.weakest(), draws.weakest() - 1);
+    }
+
+    #[test]
+    fn skip_plan_follows_lanes_degree_and_height() {
+        let with = |num_vars, degree, lanes| TableShape {
+            skip_lanes: lanes,
+            ..shape(num_vars, 8, degree, 0)
+        };
+
+        let plan = |vars, lanes, cosets| SkipPlan {
+            vars,
+            lanes,
+            cosets,
+        };
+
+        assert_eq!(
+            with(15, 4, SkipLanes::Block8).skip(),
+            plan(6, SkipLanes::Block8, 4)
+        );
+        assert_eq!(
+            with(15, 5, SkipLanes::Block8).skip(),
+            plan(7, SkipLanes::Block16, 5)
+        );
+        assert_eq!(
+            with(20, 3, SkipLanes::Block16).skip(),
+            plan(7, SkipLanes::Block16, 3)
+        );
+        assert_eq!(
+            with(12, 3, SkipLanes::Block16).skip(),
+            plan(6, SkipLanes::Block16, 3)
+        );
+        assert_eq!(
+            with(9, 3, SkipLanes::Block16).skip(),
+            plan(4, SkipLanes::Block16, 3)
+        );
+        assert_eq!(
+            with(9, 4, SkipLanes::Block16).skip(),
+            plan(4, SkipLanes::Block16, 4)
+        );
+        assert_eq!(with(8, 3, SkipLanes::Block16).skip(), SkipPlan::NONE);
+        assert_eq!(with(11, 5, SkipLanes::Block16).skip(), SkipPlan::NONE);
+        assert_eq!(
+            with(12, 5, SkipLanes::Block16).skip(),
+            plan(6, SkipLanes::Block16, 5)
+        );
     }
 }

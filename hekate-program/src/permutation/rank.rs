@@ -11,11 +11,12 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use hekate_core::errors;
+use hekate_core::skip::SkipPoint;
 use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
 
 use crate::permutation::{BusKind, PermutationCheckSpec, Side, Source};
-use crate::{FixedColumn, FixedShape, eq_index, residue_sums, validate_shape};
+use crate::{FixedColumn, FixedShape, residue_sums, validate_shape};
 
 /// `v^((2^128 - 1) / p)` for the tower generator
 /// `v = Block128(1 << 64)`; order exactly `p`, `p` prime.
@@ -96,7 +97,7 @@ impl Run {
         self.count as u64 * self.offsets.len() as u64
     }
 
-    fn evaluate<F>(&self, r: &[Flat<F>], base: u64, powers: &OmegaPowers<F>) -> Flat<F>
+    fn evaluate<F>(&self, point: &SkipPoint<F>, base: u64, powers: &OmegaPowers<F>) -> Flat<F>
     where
         F: TowerField + HardwareField,
     {
@@ -110,19 +111,10 @@ impl Run {
         let stride = self.stride;
         let call_step = powers.pow(calls as u64);
 
-        let mut steps = Vec::with_capacity(r.len());
-        let mut step = call_step;
-
-        for _ in 0..r.len() {
-            steps.push(step);
-
-            step *= step;
-        }
-
         let end = self.origin + stride * self.count;
 
-        let upper = residue_sums(r, end, stride, Some(steps.as_slice()));
-        let lower = residue_sums(r, self.origin, stride, Some(steps.as_slice()));
+        let upper = residue_sums(point, end, stride, Some(call_step));
+        let lower = residue_sums(point, self.origin, stride, Some(call_step));
 
         let (q_origin, r_origin) = (self.origin / stride, self.origin % stride);
 
@@ -257,7 +249,7 @@ struct OmegaPowers<F: HardwareField> {
 
 impl<F: TowerField + HardwareField> OmegaPowers<F> {
     fn new() -> errors::Result<Self> {
-        if F::BITS != 128 {
+        if F::BITS < 128 {
             return Err(errors::Error::Protocol {
                 protocol: "emit_rank",
                 message: "ordered buses need GF(2^128); omega has order p nowhere below",
@@ -315,13 +307,13 @@ impl RankClock {
             })
     }
 
-    /// MLE of the clock column at `r`.
-    /// Errors unless `r.len() == num_vars`.
-    pub fn evaluate<F>(&self, r: &[Flat<F>]) -> errors::Result<Flat<F>>
+    /// Evaluates the clock column's MLE at `point`;
+    /// errors unless the point spans `num_vars`.
+    pub fn evaluate<F>(&self, point: &SkipPoint<F>) -> errors::Result<Flat<F>>
     where
         F: TowerField + HardwareField,
     {
-        if r.len() != self.num_vars {
+        if point.num_vars() != self.num_vars {
             return Err(errors::Error::Protocol {
                 protocol: "emit_rank",
                 message: "evaluation point length differs from the table's num_vars",
@@ -338,14 +330,14 @@ impl RankClock {
 
                 let mut label = powers.pow(self.base);
                 for &row in rows {
-                    acc += eq_index(r, row) * label;
+                    acc += point.weight(row) * label;
                     label *= omega;
                 }
             }
             Schedule::Runs(runs) => {
                 let mut base = self.base;
                 for run in runs {
-                    acc += run.evaluate(r, base, &powers);
+                    acc += run.evaluate(point, base, &powers);
                     base += run.emits();
                 }
             }
@@ -446,7 +438,7 @@ fn ordered_endpoints<'a, F: TowerField>(
 ) -> errors::Result<Vec<Ordered<'a>>> {
     let ordered = ordered_bus_ids(tables);
 
-    if !ordered.is_empty() && F::BITS != 128 {
+    if !ordered.is_empty() && F::BITS < 128 {
         return Err(errors::Error::Protocol {
             protocol: "logup_bus",
             message: "ordered buses need GF(2^128); omega has order p nowhere below",
@@ -736,15 +728,22 @@ mod tests {
 
         assert_eq!(column, accumulated);
 
-        for _ in 0..3 {
-            let r = rng.point(num_vars);
+        let mut points = vec![
+            SkipPoint::multilinear(rng.point(num_vars)),
+            SkipPoint::multilinear(rng.point(num_vars)),
+        ];
 
+        if num_vars >= 2 {
+            points.push(SkipPoint::new(rng.point(4), rng.point(num_vars - 2)).unwrap());
+        }
+
+        for point in &points {
             let mut mle = Flat::from_raw(F::ZERO);
             for (row, &value) in expected.iter().enumerate() {
-                mle += eq_index(&r, row) * value;
+                mle += point.weight(row) * value;
             }
 
-            assert_eq!(clock.evaluate(&r).unwrap(), mle);
+            assert_eq!(clock.evaluate(point).unwrap(), mle);
         }
     }
 

@@ -4,26 +4,41 @@
 
 use hekate_core::config::Config;
 use hekate_core::trace::ColumnType;
-use hekate_math::{Block128, Flat, HardwareField, TowerField};
+use hekate_math::{Block128, Block256, Flat, HardwareField, TowerField};
 use hekate_program::expander::{
     RingMaps, RingSwitchPlan, VirtualExpander, claim_weights, field_bits, field_coeffs, ring_target,
 };
 use hekate_program::fold_pool::{FoldPool, UnitWeights};
-use hekate_program::linearized::{self, RingGadget, linearized_coeffs};
+use hekate_program::linearized::{RingGadget, linearized_coeffs};
 use hekate_program::outer::{
     EvalInputs, LinearBatch, OuterLayout, OuterStatement, eval_record, linear_tensor_vars,
     linear_weights, statement_rows,
 };
 use hekate_program::predicate::{Unknown, WireRole};
 
+trait Draw: TowerField + HardwareField + From<u128> {
+    fn next(state: &mut u128) -> Self;
+}
+
 type K = Block128;
 
-fn next(state: &mut u128) -> K {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
+impl Draw for Block128 {
+    fn next(state: &mut u128) -> Self {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
 
-    Block128(*state)
+        Block128(*state)
+    }
+}
+
+impl Draw for Block256 {
+    fn next(state: &mut u128) -> Self {
+        let lo = Block128::next(state);
+        let hi = Block128::next(state);
+
+        Block256::new(lo, hi)
+    }
 }
 
 fn linear_residual(
@@ -63,18 +78,14 @@ fn linear_residual(
     residual
 }
 
-/// `ring_target(c + h) - ring_target(c)` equals the
-/// K-linear whole-unit part plus the ring part through
-/// the Frobenius-Horner chain, on a plan with ring,
-/// whole and blind units and shifted claims.
-#[test]
-fn pad_contribution_to_ring_target_is_horner_delta() {
+fn horner_delta<F: Draw>(seed: u128) {
     let layout = [
         ColumnType::B32,
         ColumnType::B32,
         ColumnType::B64,
         ColumnType::Bit,
     ];
+
     let expander = VirtualExpander::new()
         .expand_bits(2, ColumnType::B32)
         .pass_through(1, ColumnType::B64)
@@ -84,26 +95,25 @@ fn pad_contribution_to_ring_target_is_horner_delta() {
 
     let entries = expander.expansion_entries();
 
-    let mut state = 0x0101_0202_0303_0404_0505_0606_0707_0808u128;
-
+    let mut state = seed;
     for num_h in [0, 2] {
         let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, num_h).unwrap();
         let total = 2 * plan.total_claims();
 
-        let claims: Vec<K> = (0..total).map(|_| next(&mut state)).collect();
-        let pad: Vec<K> = (0..total).map(|_| next(&mut state)).collect();
-        let masked: Vec<K> = claims.iter().zip(&pad).map(|(c, h)| *c + *h).collect();
+        let claims: Vec<F> = (0..total).map(|_| F::next(&mut state)).collect();
+        let pad: Vec<F> = (0..total).map(|_| F::next(&mut state)).collect();
+        let masked: Vec<F> = claims.iter().zip(&pad).map(|(c, h)| *c + *h).collect();
 
         let unit_weights = UnitWeights {
             units: (0..plan.num_units)
-                .map(|_| next(&mut state).to_hardware())
+                .map(|_| F::next(&mut state).to_hardware())
                 .collect(),
-            shift: next(&mut state).to_hardware(),
+            shift: F::next(&mut state).to_hardware(),
         };
 
-        let r_mix: Vec<K> = (0..7).map(|_| next(&mut state)).collect();
+        let r_mix: Vec<F> = (0..F::BITS.ilog2()).map(|_| F::next(&mut state)).collect();
 
-        let to_flat = |v: &[K]| -> Vec<Flat<K>> { v.iter().map(|x| x.to_hardware()).collect() };
+        let to_flat = |v: &[F]| -> Vec<Flat<F>> { v.iter().map(|x| x.to_hardware()).collect() };
 
         let mut ring_maps = RingMaps::new(&r_mix);
 
@@ -113,20 +123,23 @@ fn pad_contribution_to_ring_target_is_horner_delta() {
             &to_flat(&masked),
             &mut ring_maps,
             true,
-        );
+        )
+        .unwrap();
+
         let t_plain = ring_target(
             &plan,
             &unit_weights,
             &to_flat(&claims),
             &mut ring_maps,
             true,
-        );
+        )
+        .unwrap();
 
         let expected = (t_masked - t_plain).to_hardware();
 
-        let mut whole_part = Flat::from_raw(K::ZERO);
-        let mut ring: Vec<(u32, Flat<K>, usize)> = Vec::new();
-        let mut ring_pad: Vec<Flat<K>> = Vec::new();
+        let mut whole_part = Flat::from_raw(F::ZERO);
+        let mut ring: Vec<(u32, Flat<F>, usize)> = Vec::new();
+        let mut ring_pad: Vec<Flat<F>> = Vec::new();
         let mut fields: Vec<ColumnType> = Vec::new();
 
         let weights = claim_weights(&plan, &unit_weights, true);
@@ -151,21 +164,32 @@ fn pad_contribution_to_ring_target_is_horner_delta() {
             ring_pad.push(h);
         }
 
-        let maps: Vec<(Vec<K>, usize)> = fields
+        let maps: Vec<(Vec<F>, usize)> = fields
             .iter()
             .map(|&field| (field_coeffs(field, &r_mix), field_bits(field)))
             .collect();
 
-        let mu = linearized_coeffs(&maps);
+        let mu = linearized_coeffs(&maps).unwrap();
 
         let gadget = RingGadget::new(ring, mu, 0);
 
         assert_eq!(
-            whole_part + gadget.delta(&ring_pad),
+            whole_part + gadget.delta(&ring_pad).unwrap(),
             expected,
-            "{num_h} h columns"
+            "{} bits, {num_h} h columns",
+            F::BITS
         );
     }
+}
+
+/// `ring_target(c + h) - ring_target(c)` equals the
+/// linear whole-unit part plus the ring part through
+/// the Frobenius-Horner chain, on a plan with ring,
+/// whole and blind units and shifted claims.
+#[test]
+fn pad_contribution_to_ring_target_is_horner_delta() {
+    horner_delta::<Block128>(0x0101_0202_0303_0404_0505_0606_0707_0808);
+    horner_delta::<Block256>(0x0101_0202_0303_0404_0505_0606_0707_0808);
 }
 
 /// A pad swapped after `r''` closes the eval row on
@@ -205,7 +229,7 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
         .claims[0];
 
     let mut state = 0x0909_0a0a_0b0b_0c0c_0d0d_0e0e_0f0f_1010u128;
-    let mut draw = || next(&mut state).to_hardware();
+    let mut draw = || K::next(&mut state).to_hardware();
 
     let truth: Vec<Flat<K>> = (0..total).map(|_| draw()).collect();
     let pad: Vec<Flat<K>> = (0..total).map(|_| draw()).collect();
@@ -229,6 +253,7 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
             &mut RingMaps::new(&r_mix),
             true,
         )
+        .unwrap()
         .to_hardware()
     };
 
@@ -256,7 +281,7 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
 
     let statement = OuterStatement {
         masked_scalars: total,
-        mul_wires: linearized::BITS - 1,
+        mul_wires: K::BITS - 1,
     };
 
     let geom = config
@@ -283,7 +308,7 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
             .map(|&(c, _, _)| values[c as usize])
             .collect();
 
-        gadget.wires(&ring)
+        gadget.wires(&ring).unwrap()
     };
 
     let zero = Flat::from_raw(K::ZERO);

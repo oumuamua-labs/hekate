@@ -8,14 +8,15 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use hekate_core::errors;
-use hekate_crypto::{DefaultHasher, Hasher};
-use hekate_math::{Flat, HardwareField, TowerField};
+use hekate_core::skip::SkipPoint;
+use hekate_crypto::{DefaultHasher, Digest, Hasher};
+use hekate_math::{Block128, CanonicalDeserialize, Flat, HardwareField, TowerField};
 
 use super::{
-    BusElement, BusField, BusKind, BusValue, PermutationCheckSpec, RankClock, Slot,
-    eval_row_idx_byte_mle, eval_row_idx_le_mle,
+    BusKind, PermutationCheckSpec, RankClock, Slot, eval_row_idx_byte_mle, eval_row_idx_le_mle,
 };
 
 /// Fractions one Permutation column carries at most.
@@ -40,7 +41,7 @@ impl BusColumn {
     }
 }
 
-/// The cancellation a claimed-sum limb enters:
+/// The cancellation a claimed sum enters:
 /// every Permutation column at once, or one Lookup bus.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BusGroup {
@@ -50,23 +51,22 @@ pub enum BusGroup {
 
 impl BusGroup {
     /// Returns the group's bus-sum row weight:
-    /// one for Permutation, `eq(r_bus, (r_final, 0))` for a Lookup bus;
+    /// one for Permutation, `eq(r_bus, (point, 0))` for a Lookup bus;
     /// errors when `points` holds no `r_bus` for the bus or a short one.
     pub fn row_weight<F: TowerField + HardwareField>(
         &self,
-        field: &BusField<F>,
-        points: &BTreeMap<String, Vec<BusElement>>,
-        r_final: &[Flat<F>],
-    ) -> errors::Result<BusValue<F>> {
+        points: &BTreeMap<String, Vec<F>>,
+        point: &SkipPoint<F>,
+    ) -> errors::Result<Flat<F>> {
         match self {
-            Self::Permutation => Ok(BusValue::one()),
+            Self::Permutation => Ok(Flat::from_raw(F::ONE)),
             Self::Lookup(bus_id) => {
                 let r_bus = points.get(bus_id).ok_or(errors::Error::Protocol {
                     protocol: "logup",
                     message: "lookup bus spec missing r_bus point",
                 })?;
 
-                lookup_weight(field, r_bus, r_final)
+                lookup_weight(r_bus, point)
             }
         }
     }
@@ -76,22 +76,21 @@ impl BusGroup {
 /// `D = constant + Σ coeff · claim` over the table's claims.
 #[derive(Clone, Debug)]
 pub struct BusFraction<F> {
-    pub slots: Vec<(u32, BusValue<F>)>,
-    pub constant: BusValue<F>,
+    pub slots: Vec<(u32, Flat<F>)>,
+    pub constant: Flat<F>,
     pub selector: Option<u32>,
     pub recv_selector: Option<u32>,
 }
 
 impl<F: TowerField + HardwareField> BusFraction<F> {
-    /// Builds spec `spec_idx`'s fraction at `r_final`; errors on
+    /// Builds spec `spec_idx`'s fraction at `point`; errors on
     /// a column outside the table's `width` or a missing rank clock.
     pub fn new(
-        field: &BusField<F>,
         spec_idx: usize,
         (bus_id, spec): &(String, PermutationCheckSpec),
         width: usize,
-        challenges: [BusValue<F>; 2],
-        r_final: &[Flat<F>],
+        challenges: [Flat<F>; 2],
+        point: &SkipPoint<F>,
         clocks: &[Option<RankClock>],
     ) -> errors::Result<Self> {
         let [gamma, beta] = challenges;
@@ -104,7 +103,7 @@ impl<F: TowerField + HardwareField> BusFraction<F> {
             }),
         };
 
-        let (schedule, tag) = key_schedule(field, (bus_id, spec), beta);
+        let (schedule, tag) = key_schedule((bus_id, spec), beta);
 
         let mut slots = Vec::new();
         let mut constant = gamma + tag;
@@ -112,16 +111,16 @@ impl<F: TowerField + HardwareField> BusFraction<F> {
         for (slot, coeff) in schedule {
             match slot {
                 Slot::Column(c) => slots.push((column(c)?, coeff)),
-                Slot::Const(v) => constant += coeff.mul_base(F::from(v).to_hardware()),
+                Slot::Const(v) => constant += coeff * F::from(v).to_hardware(),
                 Slot::RowIndexLeBytes(n) => {
-                    constant += coeff.mul_base(eval_row_idx_le_mle::<F>(n, r_final));
+                    constant += coeff * eval_row_idx_le_mle::<F>(n, point);
                 }
                 Slot::RowIndexByte(n) => {
-                    constant += coeff.mul_base(eval_row_idx_byte_mle::<F>(n, r_final));
+                    constant += coeff * eval_row_idx_byte_mle::<F>(n, point);
                 }
                 Slot::EmitRank => {
                     let clock = RankClock::for_spec(clocks, spec_idx)?;
-                    constant += coeff.mul_base(clock.evaluate(r_final)?);
+                    constant += coeff * clock.evaluate(point)?;
                 }
             }
         }
@@ -135,9 +134,9 @@ impl<F: TowerField + HardwareField> BusFraction<F> {
     }
 
     /// Evaluates `D` at the table's claims.
-    pub fn denominator(&self, claims: &[Flat<F>]) -> BusValue<F> {
+    pub fn denominator(&self, claims: &[Flat<F>]) -> Flat<F> {
         self.slots.iter().fold(self.constant, |acc, &(c, coeff)| {
-            acc + coeff.mul_base(claims[c as usize])
+            acc + coeff * claims[c as usize]
         })
     }
 
@@ -204,57 +203,115 @@ pub fn bus_columns(
 /// the tag term, `β^k · t` one slot past the last of
 /// a Permutation key's `k` slots, zero on a Lookup key.
 pub fn key_schedule<F: TowerField + HardwareField>(
-    field: &BusField<F>,
     (bus_id, spec): (&str, &PermutationCheckSpec),
-    beta: BusValue<F>,
-) -> (Vec<(Slot, BusValue<F>)>, BusValue<F>) {
-    let mut beta_pow = BusValue::one();
+    beta: Flat<F>,
+) -> (Vec<(Slot, Flat<F>)>, Flat<F>) {
+    let mut beta_pow = Flat::from_raw(F::ONE);
     let mut schedule = Vec::new();
 
     for slot in spec.slots() {
         schedule.push((slot, beta_pow));
 
-        beta_pow = field.mul(beta_pow, beta);
+        beta_pow *= beta;
     }
 
     let tag = match spec.kind {
-        BusKind::Permutation => field.mul(beta_pow, field.import(bus_tag(bus_id))),
-        BusKind::Lookup => BusValue::zero(),
+        BusKind::Permutation => beta_pow * bus_tag::<F>(bus_id).to_hardware(),
+        BusKind::Lookup => Flat::from_raw(F::ZERO),
     };
 
     (schedule, tag)
 }
 
 /// Derives the tag a bus's Permutation keys carry in their top `β` slot.
-pub fn bus_tag(bus_id: &str) -> BusElement {
+pub fn bus_tag<F: TowerField>(bus_id: &str) -> F {
     let mut h = DefaultHasher::new();
     h.update(b"hekate-bus-tag-v1");
     h.update(&(bus_id.len() as u64).to_le_bytes());
     h.update(bus_id.as_bytes());
 
-    BusElement::from_uniform_bytes(&h.finalize())
+    F::from_uniform_bytes(&h.finalize().leading())
 }
 
-/// Evaluates a Lookup bus's row weight `eq(r_bus, (r_final, 0))`;
-/// errors when `r_bus` is shorter than `r_final`.
+/// Counts the B128 planes an `h` value of `F` commits as.
+pub fn h_planes<F: TowerField>() -> usize {
+    F::BITS / Block128::BITS
+}
+
+/// Returns the element behind each B128 plane of an `F` value
+/// in the flat basis, the value being `Σ_k plane_k · basis_k`.
+pub fn plane_basis<F: TowerField + HardwareField>() -> errors::Result<Vec<Flat<F>>> {
+    let plane_bytes = Block128::BITS / 8;
+
+    (0..h_planes::<F>())
+        .map(|k| {
+            let mut bytes = vec![0u8; F::BITS / 8];
+            bytes[k * plane_bytes] = 1;
+
+            F::deserialize(&bytes)
+                .map(Flat::from_raw)
+                .map_err(|()| errors::Error::Protocol {
+                    protocol: "logup",
+                    message: "no plane basis element at this byte",
+                })
+        })
+        .collect()
+}
+
+/// Writes the B128 planes of `value`, the flat limbs `plane_basis` pairs
+/// with its elements; errors unless `out` holds one slot per plane.
+pub fn flat_planes<F: TowerField + HardwareField>(
+    value: Flat<F>,
+    out: &mut [Flat<Block128>],
+) -> errors::Result<()> {
+    let plane_bytes = Block128::BITS / 8;
+
+    let malformed = |()| errors::Error::Protocol {
+        protocol: "logup",
+        message: "h value does not split into B128 planes",
+    };
+
+    if out.len() != h_planes::<F>() {
+        return Err(malformed(()));
+    }
+
+    let mut bytes = [0u8; 32];
+    value
+        .into_raw()
+        .serialize(&mut bytes[..F::BITS / 8])
+        .map_err(malformed)?;
+
+    for (k, plane) in out.iter_mut().enumerate() {
+        let limb = <Block128 as CanonicalDeserialize>::deserialize(
+            &bytes[k * plane_bytes..(k + 1) * plane_bytes],
+        )
+        .map_err(malformed)?;
+
+        *plane = Flat::from_raw(limb);
+    }
+
+    Ok(())
+}
+
+/// Evaluates a Lookup bus's row weight `eq(r_bus, (point, 0))`;
+/// errors when `r_bus` is shorter than the point.
 pub fn lookup_weight<F: TowerField + HardwareField>(
-    field: &BusField<F>,
-    r_bus: &[BusElement],
-    r_final: &[Flat<F>],
-) -> errors::Result<BusValue<F>> {
-    if r_bus.len() < r_final.len() {
+    r_bus: &[F],
+    point: &SkipPoint<F>,
+) -> errors::Result<Flat<F>> {
+    if r_bus.len() < point.num_vars() {
         return Err(errors::Error::Protocol {
             protocol: "logup",
             message: "r_bus shorter than table num_vars",
         });
     }
 
-    let (lo, hi) = r_bus.split_at(r_final.len());
-    let r_lo: Vec<BusValue<F>> = lo.iter().map(|&r| field.import(r)).collect();
+    let (lo, hi) = r_bus.split_at(point.num_vars());
+    let r_lo: Vec<Flat<F>> = lo.iter().map(|r| r.to_hardware()).collect();
 
-    let mut weight = field.eq_at(&r_lo, r_final);
-    for &r_j in hi {
-        weight = field.mul(weight, field.import(r_j) + BusValue::one());
+    let mut weight = point.eq_with(&r_lo)?;
+    for r_j in hi {
+        weight *= r_j.to_hardware() + Flat::from_raw(F::ONE);
     }
 
     Ok(weight)
@@ -294,7 +351,7 @@ mod tests {
     use crate::permutation::Source;
     use alloc::string::ToString;
     use alloc::vec;
-    use hekate_math::{Block128, Block256};
+    use hekate_math::{Block128, Block256, FlatPromote};
 
     fn spec(kind: BusKind) -> (String, PermutationCheckSpec) {
         let sources = vec![(Source::Column(0), b"v".as_slice())];
@@ -315,22 +372,17 @@ mod tests {
         }
     }
 
-    fn denominator(
-        field: &BusField<Block128>,
-        bus_id: &str,
-        spec: &PermutationCheckSpec,
-        value: u128,
-    ) -> BusValue<Block128> {
-        let gamma = field.import(Block256::new(Block128(0x9e37), Block128(0x79b9)));
-        let beta = field.import(Block256::new(Block128(0x7f4a), Block128(0x7c15)));
+    fn denominator(bus_id: &str, spec: &PermutationCheckSpec, value: u128) -> Flat<Block256> {
+        let gamma = Block256::new(Block128(0x9e37), Block128(0x79b9)).to_hardware();
+        let beta = Block256::new(Block128(0x7f4a), Block128(0x7c15)).to_hardware();
 
-        let (schedule, tag) = key_schedule(field, (bus_id, spec), beta);
+        let (schedule, tag) = key_schedule((bus_id, spec), beta);
 
         schedule
             .iter()
             .fold(gamma + tag, |acc, &(slot, coeff)| match slot {
-                Slot::Const(c) => acc + coeff.mul_base(Block128::from(c).to_hardware()),
-                _ => acc + coeff.mul_base(Block128::from(value).to_hardware()),
+                Slot::Const(c) => acc + coeff * Block256::from(c).to_hardware(),
+                _ => acc + coeff * Block256::from(value).to_hardware(),
             })
     }
 
@@ -374,13 +426,37 @@ mod tests {
 
     #[test]
     fn bus_tag_spends_full_digest() {
-        let a = bus_tag("link");
-        let b = bus_tag("link2");
+        let a = bus_tag::<Block256>("link");
+        let b = bus_tag::<Block256>("link2");
 
         assert_ne!(a, b);
-        assert_eq!(a, bus_tag("link"));
+        assert_eq!(a, bus_tag::<Block256>("link"));
         assert_ne!(a.split().1, Block128::ZERO);
         assert_ne!(b.split().1, Block128::ZERO);
+    }
+
+    #[test]
+    fn plane_basis_rebuilds_value_from_its_planes() {
+        let value = Block256::new(Block128(0x1234_5678), Block128(0x9abc_def0));
+        let (lo, hi) = value.split();
+        let basis = plane_basis::<Block256>().unwrap();
+
+        assert_eq!(basis.len(), h_planes::<Block256>());
+        assert_eq!(
+            Block256::promote_flat(lo.to_hardware()) * basis[0]
+                + Block256::promote_flat(hi.to_hardware()) * basis[1],
+            value.to_hardware()
+        );
+        assert_eq!(
+            plane_basis::<Block128>().unwrap(),
+            vec![Flat::from_raw(Block128::ONE)]
+        );
+
+        let mut planes = [Flat::from_raw(Block128::ZERO); 2];
+        flat_planes(value.to_hardware(), &mut planes).unwrap();
+
+        assert_eq!(planes, [lo.to_hardware(), hi.to_hardware()]);
+        assert!(flat_planes(value.to_hardware(), &mut planes[..1]).is_err());
     }
 
     #[test]
@@ -411,20 +487,17 @@ mod tests {
 
     #[test]
     fn tag_keys_one_tuple_apart_on_two_buses() {
-        let field = BusField::<Block128>::new().unwrap();
         let (_, spec) = spec(BusKind::Permutation);
 
         assert_ne!(
-            denominator(&field, "bus_a", &spec, 0xCAFE),
-            denominator(&field, "bus_b", &spec, 0xCAFE)
+            denominator("bus_a", &spec, 0xCAFE),
+            denominator("bus_b", &spec, 0xCAFE)
         );
     }
 
     #[test]
     fn slot_zero_const_cannot_cancel_tag_difference() {
-        let field = BusField::<Block128>::new().unwrap();
-
-        let lo = |bus_id: &str| bus_tag(bus_id).split().0;
+        let lo = |bus_id: &str| bus_tag::<Block256>(bus_id).split().0;
         let offset = (lo("bus_a") + lo("bus_b")).0;
 
         let keyed = |constant: u128| {
@@ -438,8 +511,8 @@ mod tests {
         };
 
         assert_ne!(
-            denominator(&field, "bus_a", &keyed(offset), 0xCAFE),
-            denominator(&field, "bus_b", &keyed(0), 0xCAFE)
+            denominator("bus_a", &keyed(offset), 0xCAFE),
+            denominator("bus_b", &keyed(0), 0xCAFE)
         );
     }
 }
