@@ -25,7 +25,8 @@ cargo add --dev hekate-scribble hekate-math hekate-program
 use hekate_math::Block128;
 use hekate_program::{Program, ProgramInstance, ProgramWitness};
 use hekate_scribble::{
-    Mutation, ScribbleConfig, Target, assert_all_caught_all_targets, check_single_mutation,
+    Mutation, ScribbleConfig, Target, Verdict, assert_all_caught_all_targets,
+    check_single_mutation,
 };
 
 type F = Block128;
@@ -47,13 +48,17 @@ fn swapped_rows_are_caught<P: Program<F>>(
         row_b: 1,
     };
 
-    check_single_mutation(program, instance, witness, &swap).is_ok()
+    matches!(
+        check_single_mutation(program, instance, witness, &swap),
+        Verdict::Caught(_)
+    )
 }
 ```
 
 Call both from tests with a witness your generator built. `fuzz` runs 512 random tampers on the main trace and 512
-on each chiplet trace. `check_single_mutation` runs one tamper you choose and returns `Ok` with the report of the
-checks that caught it, or `Err` with the clean report of a tamper that escaped.
+on each chiplet trace; a tamper that changes no cell, or a selector flip only a fixed column catches, is skipped,
+not counted. `check_single_mutation` runs one tamper you choose and returns `Verdict::Caught` with the report of the
+checks that caught it, `Escaped` for a tamper preflight misses, or `Unchanged` for one that changes no cell.
 
 | Tampers                | Kinds                                                                                                                            |
 |:-----------------------|:---------------------------------------------------------------------------------------------------------------------------------|

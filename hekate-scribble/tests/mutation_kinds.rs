@@ -13,12 +13,12 @@
 //! through `check_single_mutation`.
 
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceColumn};
-use hekate_math::{Bit, Block32, Block128, Flat, TowerField};
+use hekate_math::{Bit, Block32, Block256, Flat, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::{ProgramInstance, ProgramWitness};
+use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_scribble::{
-    Mutation, MutationKind, ScribbleConfig, Target, apply_mutation, check_single_mutation,
-    mutation_strategy,
+    Mutation, MutationKind, ScribbleConfig, Target, Verdict, apply_mutation, assert_all_caught,
+    check_single_mutation, mutation_strategy,
 };
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::{Config as PtConfig, TestRunner};
@@ -26,7 +26,7 @@ use proptest::test_runner::{Config as PtConfig, TestRunner};
 const N: usize = 4;
 const NUM_VARS: usize = 2;
 
-type F = Block128;
+type F = Block256;
 
 fn trivial_air(num_rows: usize) -> CircuitProgram<F> {
     let mut cx = Circuit::<F>::new("Trivial", num_rows).unwrap();
@@ -199,10 +199,10 @@ fn row_segment_zero_on_zeroed_cell_is_noop_not_escape() {
         cols: vec![0],
     };
 
-    assert!(
-        check_single_mutation(&air, &instance, &witness, &noop).is_ok(),
-        "zeroing already-zero cells must not be flagged as an escape"
-    );
+    assert!(matches!(
+        check_single_mutation(&air, &instance, &witness, &noop),
+        Verdict::Unchanged
+    ));
 
     let real = Mutation::RowSegmentZero {
         target: Target::Main,
@@ -211,8 +211,11 @@ fn row_segment_zero_on_zeroed_cell_is_noop_not_escape() {
     };
 
     assert!(
-        check_single_mutation(&air, &instance, &witness, &real).is_err(),
-        "a genuine change under a constraint-free AIR must escape, proving the no-op guard is load-bearing"
+        matches!(
+            check_single_mutation(&air, &instance, &witness, &real),
+            Verdict::Escaped
+        ),
+        "genuine change under a constraint-free AIR must escape, proving the no-op guard is load-bearing"
     );
 }
 
@@ -874,5 +877,32 @@ fn target_chiplet_out_of_bounds_panics() {
             row: 0,
             mask: 1,
         },
+    );
+}
+
+#[test]
+#[should_panic(expected = "Too many global rejects")]
+fn flip_caught_by_pin_alone_is_not_counted() {
+    let mut cx = Circuit::<F>::new("PinnedBit", N).unwrap();
+
+    let bit = cx.column(ColumnType::Bit);
+    cx.column(ColumnType::B32);
+
+    cx.fix(
+        bit,
+        FixedShape::Periodic {
+            period: 2,
+            values: vec![F::ZERO, F::ONE],
+        },
+    );
+
+    let air = cx.compile().unwrap();
+    let instance = ProgramInstance::new(N, vec![]);
+
+    assert_all_caught(
+        &air,
+        &instance,
+        &build_witness(),
+        ScribbleConfig::default().mutations([MutationKind::FlipSelector]),
     );
 }
