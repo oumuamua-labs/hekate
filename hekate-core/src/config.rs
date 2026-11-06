@@ -8,7 +8,7 @@ use crate::errors;
 
 /// Production soundness floor, per Fiat-Shamir round: a proof
 /// is as strong as its weakest round (round-by-round soundness).
-pub const MIN_PRODUCTION_BITS: usize = 100;
+pub const MIN_PRODUCTION_BITS: usize = 128;
 
 /// Most row variables one table may carry. The verifier
 /// rejects a proof that claims a taller table.
@@ -220,27 +220,28 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Production parameters: 100-bit soundness with the
+    /// Production parameters: 128-bit soundness with the
     /// `MIN_PRODUCTION_BITS` acceptance threshold. The `Default`.
     pub fn prod() -> Self {
         Self::prod_at(CodeRate::Half)
     }
 
-    /// [`Config::prod`] at `code_rate`, with the fewest
-    /// queries whose fold term clears the floor.
+    /// [`Config::prod`] at `code_rate`.
     pub fn prod_at(code_rate: CodeRate) -> Self {
-        let num_queries = match code_rate {
-            CodeRate::Half => const { fold_floor_queries(CodeRate::Half) },
-            CodeRate::Quarter => const { fold_floor_queries(CodeRate::Quarter) },
-        };
+        Self::at_bits(MIN_PRODUCTION_BITS, code_rate)
+    }
 
+    /// `bits` of soundness at `code_rate`: the fewest fold
+    /// and outer queries whose query terms clear `bits`,
+    /// which every draw, layout and hasher is then held to.
+    pub fn at_bits(bits: usize, code_rate: CodeRate) -> Self {
         Self {
             code_rate,
-            num_queries,
+            num_queries: fold_floor_queries(bits, code_rate),
             fold_arity_log: 4,
             early_stop_vars: 11,
-            min_security_bits: MIN_PRODUCTION_BITS,
-            outer_queries: 121,
+            min_security_bits: bits,
+            outer_queries: outer_floor_queries(bits),
             zero_knowledge: true,
         }
     }
@@ -321,6 +322,23 @@ impl Config {
 
         field_bits.saturating_sub(log_events)
     }
+
+    /// Rejects a `digest_bytes`-wide hash whose collision resistance,
+    /// half its bits, falls below `min_security_bits`; 0 waives it.
+    pub fn check_digest(&self, digest_bytes: usize) -> errors::Result<()> {
+        let bits = 4 * digest_bytes;
+
+        if self.min_security_bits != 0 && bits < self.min_security_bits {
+            return Err(Error::SecurityTooLow {
+                round: "digest",
+                estimated_bits: bits,
+                min_bits: self.min_security_bits,
+            }
+            .into());
+        }
+
+        Ok(())
+    }
 }
 
 /// `floor(log₂(n / m) · 2^LOG2_FRAC_BITS)` for `n > m >= 1`.
@@ -370,10 +388,23 @@ pub(crate) const fn ldt_bits(num_queries: usize, msg_len: usize, code_width: usi
 }
 
 /// Fewest queries whose fold term `⌊t · log2(2 / (1 + ρ))⌋`
-/// clears `MIN_PRODUCTION_BITS` at `code_rate`.
-const fn fold_floor_queries(code_rate: CodeRate) -> usize {
+/// clears `bits` at `code_rate`.
+const fn fold_floor_queries(bits: usize, code_rate: CodeRate) -> usize {
     let mut queries = 1;
-    while ldt_bits(queries, 1, code_rate.inv_rate()) < MIN_PRODUCTION_BITS {
+    while ldt_bits(queries, 1, code_rate.inv_rate()) < bits {
+        queries += 1;
+    }
+
+    queries
+}
+
+/// Fewest outer queries clearing `bits` (Ligero journal Lemma 4.6).
+const fn outer_floor_queries(bits: usize) -> usize {
+    let inv_rate = 1u128 << OUTER_RATE_LOG2;
+    let per_query = log2_ratio_fixed(2 * inv_rate, inv_rate + 2);
+
+    let mut queries = 1;
+    while ((queries as u128 * per_query) >> LOG2_FRAC_BITS) < bits as u128 {
         queries += 1;
     }
 
@@ -392,13 +423,57 @@ mod tests {
 
     #[test]
     fn prod_queries_are_fewest_clearing_fold_floor() {
-        for (rate, queries) in [(CodeRate::Half, 241), (CodeRate::Quarter, 148)] {
+        for (rate, queries) in [(CodeRate::Half, 309), (CodeRate::Quarter, 189)] {
             let t = Config::prod_at(rate).num_queries;
 
             assert_eq!(t, queries);
             assert!(ldt_bits(t, 1, rate.inv_rate()) >= MIN_PRODUCTION_BITS);
             assert!(ldt_bits(t - 1, 1, rate.inv_rate()) < MIN_PRODUCTION_BITS);
         }
+    }
+
+    #[test]
+    fn at_bits_derives_fold_and_outer_queries() {
+        for (bits, half, quarter, outer) in [
+            (100, 241, 148, 121),
+            (128, 309, 189, 155),
+            (220, 531, 325, 266),
+        ] {
+            let config = Config::at_bits(bits, CodeRate::Half);
+
+            assert_eq!(config.min_security_bits, bits);
+            assert_eq!(config.num_queries, half);
+            assert_eq!(config.outer_queries, outer);
+            assert_eq!(
+                Config::at_bits(bits, CodeRate::Quarter).num_queries,
+                quarter
+            );
+        }
+
+        assert_eq!(
+            Config::prod().outer_queries,
+            outer_floor_queries(MIN_PRODUCTION_BITS)
+        );
+    }
+
+    #[test]
+    fn digest_clears_half_its_bits() {
+        let prod = Config::prod();
+        let wide = Config::at_bits(220, CodeRate::Half);
+
+        assert!(prod.check_digest(32).is_ok());
+        assert!(wide.check_digest(64).is_ok());
+        assert!(Config::dev().check_digest(16).is_ok());
+
+        assert!(matches!(
+            wide.check_digest(32),
+            Err(errors::Error::Config(Error::SecurityTooLow {
+                round: "digest",
+                estimated_bits: 128,
+                min_bits: 220,
+            }))
+        ));
+        assert!(prod.check_digest(16).is_err());
     }
 
     #[test]

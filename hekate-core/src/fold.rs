@@ -9,9 +9,6 @@ use hekate_math::{Block256, TowerField};
 use crate::config::{self, Config, ldt_bits};
 use crate::errors;
 
-/// Bytes of one Merkle digest.
-const DIGEST_BYTES: usize = 32;
-
 const MASKS: usize = 2;
 
 /// The phase a polynomial is committed in; a tree holds one kind.
@@ -383,9 +380,10 @@ impl FoldLayout {
         self.query_bits().min(self.proximity_bits())
     }
 
-    /// Returns an upper bound on the fold's proof bytes: roots,
-    /// opened leaves and paths, the fold rounds and the final layer.
-    pub fn proof_bytes(&self) -> usize {
+    /// Returns an upper bound on the fold's proof bytes
+    /// at a `digest_bytes`-wide hash: roots, opened leaves
+    /// and paths, the fold rounds and the final layer.
+    pub fn proof_bytes(&self, digest_bytes: usize) -> usize {
         let fold_bytes = Block256::BITS / 8;
 
         let opened: usize = self
@@ -399,7 +397,7 @@ impl FoldLayout {
                 let digests =
                     1 + self.num_queries * (tree.depth - tree.layer_log) + (1 << tree.layer_log);
 
-                leaves * tree.leaf_bytes + digests * DIGEST_BYTES
+                leaves * tree.leaf_bytes + digests * digest_bytes
             })
             .sum();
 
@@ -438,10 +436,13 @@ pub fn noise_cells_of(config: &Config, shapes: &[PolyShape]) -> errors::Result<V
         .collect())
 }
 
-/// Returns `(t + 2) · 2^leaf_vars`, the uniform cells that hide a polynomial
-/// opened at `2^leaf_vars` symbols per query in zero knowledge.
+/// Returns `(t + 2) · 2^leaf_vars + 1`, the uniform cells that hide a
+/// polynomial opened at `2^leaf_vars` symbols per query in zero knowledge.
 pub fn noise_cells(num_queries: usize, leaf_vars: usize) -> usize {
-    num_queries.saturating_add(2).saturating_mul(1 << leaf_vars)
+    num_queries
+        .saturating_add(2)
+        .saturating_mul(1 << leaf_vars)
+        .saturating_add(1)
 }
 
 fn fold_of(config: &Config, num_vars: usize, shape: PolyShape) -> PolyFold {
@@ -801,7 +802,7 @@ mod tests {
         let layout = FoldLayout::new(&tiny, &[trace(4, 0)]).unwrap();
 
         assert_eq!((layout.stop_vars(), layout.rounds()), (1, 3));
-        assert_eq!(layout.proof_bytes(), 352 + 352 + 288 + 192 + 64);
+        assert_eq!(layout.proof_bytes(32), 352 + 352 + 288 + 192 + 64);
     }
 
     #[test]
@@ -878,11 +879,11 @@ mod tests {
     }
 
     #[test]
-    fn noise_holds_two_leaves_past_queries() {
+    fn noise_holds_two_leaves_and_one_cell_past_queries() {
         let t = 241;
 
-        assert_eq!(noise_cells(t, 0), t + 2);
-        assert_eq!(noise_cells(t, 4), 16 * (t + 2));
+        assert_eq!(noise_cells(t, 0), t + 3);
+        assert_eq!(noise_cells(t, 4), 16 * (t + 2) + 1);
     }
 
     #[test]
@@ -911,7 +912,7 @@ mod tests {
 
         assert_eq!(
             fields(true),
-            [(CodeField::B128, 4 * (t + 2)), (CodeField::B128, t + 2)]
+            [(CodeField::B128, 4 * (t + 2) + 1), (CodeField::B128, t + 3)]
         );
         assert_eq!(fields(false), [(CodeField::B64, 0), (CodeField::B32, 0)]);
     }

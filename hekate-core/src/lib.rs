@@ -28,6 +28,7 @@ pub mod outer;
 pub mod poly;
 pub mod proofs;
 pub mod protocol;
+pub mod skip;
 pub mod tensor;
 pub mod trace;
 pub mod utils;

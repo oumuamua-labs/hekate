@@ -597,7 +597,7 @@ pub fn verify_quadratic<F: BinaryFieldExtras + HardwareField + TowerField>(
 /// leaves are hashed from the wire's
 /// tower bytes, as [`column_leaf`] does.
 pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
-    root: &[u8; 32],
+    root: &H::Digest,
     geom: &OuterGeometry,
     rows: usize,
     opening: &OuterOpening<F>,
@@ -606,7 +606,7 @@ pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
         return false;
     }
 
-    let leaves: Vec<(usize, [u8; 32])> = opening
+    let leaves: Vec<(usize, H::Digest)> = opening
         .columns
         .iter()
         .zip(opening.values.chunks_exact(rows))
@@ -663,7 +663,7 @@ pub fn weights_at_columns<F: BinaryFieldExtras + HardwareField + TowerField>(
 }
 
 /// Leaf of one column, its rows top to bottom.
-pub fn column_leaf<F: TowerField, H: Hasher>(column: impl Iterator<Item = F>) -> [u8; 32] {
+pub fn column_leaf<F: TowerField, H: Hasher>(column: impl Iterator<Item = F>) -> H::Digest {
     let mut hasher = H::new();
     hasher.update_fields(column);
     hasher.update(&[Tag::OuterLeaf as u8]);
@@ -684,7 +684,7 @@ mod tests {
     type F = Block128;
 
     fn geometry() -> OuterGeometry {
-        Config::prod().outer_geom(4_075, 2_384, 128).unwrap()
+        Config::prod().outer_geom(4_075, 2_384, 256).unwrap()
     }
 
     fn geometries() -> Vec<OuterGeometry> {
@@ -692,7 +692,7 @@ mod tests {
 
         [(1, 0), (4_075, 2_384), (41_025, 34_648)]
             .iter()
-            .map(|&(scalars, wires)| config.outer_geom(scalars, wires, 128).unwrap())
+            .map(|&(scalars, wires)| config.outer_geom(scalars, wires, 256).unwrap())
             .collect()
     }
 

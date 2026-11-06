@@ -72,6 +72,7 @@ where
     /// Fully materialized hypercube.
     #[zeroize(skip)]
     Dense(&'a [Flat<F>]),
+
     #[zeroize(skip)]
     Shifted(&'a [Flat<F>]),
 
@@ -370,36 +371,16 @@ where
             }
             Self::Eq(t) => t.evaluate_at_index(index),
             Self::PackedBitB8 { data, bit_idx } => {
-                let bit = data[index].tower_bit(*bit_idx);
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[index].tower_bit(*bit_idx))))
             }
             Self::PackedBitB16 { data, bit_idx } => {
-                let bit = data[index].tower_bit(*bit_idx);
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[index].tower_bit(*bit_idx))))
             }
             Self::PackedBitB32 { data, bit_idx } => {
-                let bit = data[index].tower_bit(*bit_idx);
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[index].tower_bit(*bit_idx))))
             }
             Self::PackedBitB64 { data, bit_idx } => {
-                let bit = data[index].tower_bit(*bit_idx);
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[index].tower_bit(*bit_idx))))
             }
             Self::TransitionMask {
                 num_vars,
@@ -413,14 +394,9 @@ where
                 }
             }
             Self::CompositeSelector(cols) => {
-                let mut sum = Flat::from_raw(F::default());
-                for col in cols {
-                    if col[index].get() == 1 {
-                        sum += Flat::from_raw(F::ONE);
-                    }
-                }
+                let parity = cols.iter().fold(0, |acc, col| acc ^ col[index].get());
 
-                sum
+                Flat::from_raw(F::from(Bit::new(parity)))
             }
 
             Self::IndirectBit { data, indices } => Flat::from_raw(F::from(data[indices[index]])),
@@ -514,46 +490,26 @@ where
             Self::ShiftedPackedBitB8 { data, bit_idx } => {
                 let len = data.len();
                 let next_idx = if index + 1 == len { 0 } else { index + 1 };
-                let bit = data[next_idx].tower_bit(*bit_idx);
 
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[next_idx].tower_bit(*bit_idx))))
             }
             Self::ShiftedPackedBitB16 { data, bit_idx } => {
                 let len = data.len();
                 let next_idx = if index + 1 == len { 0 } else { index + 1 };
-                let bit = data[next_idx].tower_bit(*bit_idx);
 
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[next_idx].tower_bit(*bit_idx))))
             }
             Self::ShiftedPackedBitB32 { data, bit_idx } => {
                 let len = data.len();
                 let next_idx = if index + 1 == len { 0 } else { index + 1 };
-                let bit = data[next_idx].tower_bit(*bit_idx);
 
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[next_idx].tower_bit(*bit_idx))))
             }
             Self::ShiftedPackedBitB64 { data, bit_idx } => {
                 let len = data.len();
                 let next_idx = if index + 1 == len { 0 } else { index + 1 };
-                let bit = data[next_idx].tower_bit(*bit_idx);
 
-                if bit == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
+                Flat::from_raw(F::from(Bit::new(data[next_idx].tower_bit(*bit_idx))))
             }
         }
     }
