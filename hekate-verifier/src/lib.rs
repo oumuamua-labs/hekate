@@ -29,7 +29,7 @@ pub mod evaluator;
 pub mod logup;
 pub mod prepared;
 
-pub use sumcheck::verify;
+pub use sumcheck::{verify, verify_skip};
 
 use crate::evaluator::{Claims, EvalOutcome, EvalVerifyContext, EvaluatorVerifier, TableClaims};
 use crate::outer::PadCursor;
@@ -44,12 +44,13 @@ use hekate_core::errors;
 use hekate_core::fold::{PolyKind, TreeKind};
 use hekate_core::proofs::{InnerProof, LogUpAux, SumcheckProof};
 use hekate_core::protocol;
-use hekate_core::tensor::TensorProduct;
+use hekate_core::skip::{SkipDomain, SkipPoint};
 use hekate_core::trace::TraceCompatibleField;
-use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField};
+use hekate_crypto::{Digest, Hasher};
+use hekate_math::{BinaryFieldExtras, Flat, HardwareField, PackableField, TowerField};
 use hekate_program::chiplet::ChipletDef;
+use hekate_program::digest::ProgramId;
 use hekate_program::expander::RingSwitchPlan;
 use hekate_program::fold_pool::FoldPool;
 use hekate_program::outer::{
@@ -57,8 +58,8 @@ use hekate_program::outer::{
     TableStatics, check_draws, eval_record, table_record,
 };
 use hekate_program::permutation::{
-    self, BUS_LIMBS, BusElement, BusField, BusFraction, BusValue, PermutationCheckSpec, RankClock,
-    RankTable, TableHeight, bus_alpha_weights, bus_columns, rank_clocks,
+    self, BusFraction, PermutationCheckSpec, RankClock, RankTable, TableHeight, bus_alpha_weights,
+    bus_columns, plane_basis, rank_clocks,
 };
 use hekate_program::{
     Air, FixedColumn, Program, ProgramInstance, ShapeEvaluator, validate_fixed_columns,
@@ -76,8 +77,11 @@ struct ZerocheckMasked<F: HardwareField> {
     val_final: Flat<F>,
 }
 
+/// `r_final` is the challenge list the proof carries, the skip
+/// challenge first when the table skips; `point` weighs the rows.
 struct ZerocheckOutcome<F: HardwareField> {
     r_final: Vec<Flat<F>>,
+    point: SkipPoint<F>,
     masked: Option<ZerocheckMasked<F>>,
 }
 
@@ -119,10 +123,10 @@ struct CheckedTable<'a, 's, F: TowerField + HardwareField> {
 /// Phase-3 LogUp challenges that
 /// flow into every table's ZeroCheck.
 #[derive(Clone, Copy)]
-struct LogUpContext<'a> {
-    gamma: BusElement,
-    beta: BusElement,
-    lookup_bus_points: &'a BTreeMap<String, Vec<BusElement>>,
+struct LogUpContext<'a, F> {
+    gamma: F,
+    beta: F,
+    lookup_bus_points: &'a BTreeMap<String, Vec<F>>,
 }
 
 /// The main Hekate Verifier for AIR circuits.
@@ -132,12 +136,7 @@ pub struct HekateVerifier<F, H> {
 
 impl<F, H: Hasher> HekateVerifier<F, H>
 where
-    F: HardwareField
-        + PackableField
-        + TraceCompatibleField
-        + BinaryFieldExtras
-        + Into<Block128>
-        + From<u128>,
+    F: HardwareField + PackableField + TraceCompatibleField + BinaryFieldExtras + From<u128>,
 {
     /// Verifies an `InnerProof` produced by `HekateProver::prove`.
     ///
@@ -151,7 +150,7 @@ where
     /// 7. Check that LogUp `claimed_sum` totals cancel per `bus_id`.
     #[instrument(skip_all, level = "trace", name = "Hekate::verify")]
     pub fn verify<P: Program<F> + Sync>(
-        program_id: &[u8; 32],
+        program_id: &ProgramId,
         program: &P,
         instance: &ProgramInstance<F>,
         proof: &InnerProof<F>,
@@ -174,7 +173,7 @@ where
     /// proof per pool thread with its own scratch and a transcript
     /// opened with `label`; results come back in input order.
     pub fn verify_batch(
-        program_id: &[u8; 32],
+        program_id: &ProgramId,
         prepared: &PreparedProgram<F>,
         label: &'static [u8],
         proofs: &[(&ProgramInstance<F>, &InnerProof<F>)],
@@ -218,7 +217,7 @@ where
     /// against the id computed when `prepared` was built.
     #[instrument(skip_all, level = "trace", name = "verify_prepared")]
     pub fn verify_prepared(
-        program_id: &[u8; 32],
+        program_id: &ProgramId,
         prepared: &PreparedProgram<F>,
         instance: &ProgramInstance<F>,
         proof: &InnerProof<F>,
@@ -382,9 +381,15 @@ where
             return Err(errors::Error::ProgramIdMismatch { actual });
         }
 
+        config.check_digest(H::Digest::BYTES.min(<ProgramId as Digest>::BYTES))?;
+
+        let trace_root = root::<H>(&proof.trace_root)?;
+        let h_root = proof.h_root.as_deref().map(root::<H>).transpose()?;
+        let pad_root = proof.pad_root.as_deref().map(root::<H>).transpose()?;
+
         Self::verify_trace_commitment(actual, &main_view, transcript, config)?;
 
-        if config.zero_knowledge != proof.pad_root.is_some()
+        if config.zero_knowledge != pad_root.is_some()
             || config.zero_knowledge != proof.outer.is_some()
         {
             return Err(errors::Error::Protocol {
@@ -404,8 +409,8 @@ where
 
         // Derived after every root,
         // bound before any challenge.
-        if let Some(root) = proof.pad_root.as_ref() {
-            transcript.append_message(b"pad_root", root);
+        if let Some(root) = &pad_root {
+            transcript.append_message(b"pad_root", root.as_ref());
         }
 
         // =========================================================
@@ -435,8 +440,8 @@ where
             "pool security"
         );
 
-        let gamma = transcript.challenge_field::<BusElement>(b"bus_gamma")?;
-        let beta = transcript.challenge_field::<BusElement>(b"bus_beta")?;
+        let gamma = transcript.challenge_field::<F>(b"bus_gamma")?;
+        let beta = transcript.challenge_field::<F>(b"bus_beta")?;
 
         let lookup_bus_points =
             Self::draw_lookup_bus_points(main_perm, num_rows, chiplet_defs, proof, transcript)?;
@@ -514,7 +519,7 @@ where
         let table_claims: Vec<TableClaims<F>> = checked
             .iter()
             .map(|t| TableClaims {
-                point: &t.zerocheck.r_final,
+                point: &t.zerocheck.point,
                 claims: &t.claims,
             })
             .collect();
@@ -527,15 +532,15 @@ where
         };
 
         let outcome = match EvaluatorVerifier::<F, H>::verify(
-            &proof.trace_root,
-            proof.h_root.as_ref(),
+            &trace_root,
+            h_root.as_ref(),
             &proof.eval_proof,
             transcript,
             ctx,
         )? {
             Some(outcome) => outcome,
             None => {
-                warn!("Pool evaluation verification failed");
+                warn!("pool evaluation failed");
                 return Ok(false);
             }
         };
@@ -545,14 +550,22 @@ where
         // =========================================================
         if let Some(mut cursor) = pad_cursor {
             let shapes: Vec<TableShape> = checked.iter().map(|t| *t.view.shape).collect();
-            let statement = OuterStatement::new(&shapes, pool.layout().num_vars());
+            let statement = OuterStatement::new::<F>(&shapes, pool.layout().num_vars());
             let first_wire = shapes.iter().map(TableShape::mul_wires).sum::<usize>() as u32;
 
             let eval = Self::pool_eval_record(&pool, &checked, &outcome, first_wire, &mut cursor)?;
             let records = Self::table_records(&pool, &checked, &logup, config)?;
 
             return outer::verify_outer(
-                proof, transcript, config, statement, &records, &eval, cursor, scratch,
+                proof,
+                pad_root.as_ref(),
+                transcript,
+                config,
+                statement,
+                &records,
+                &eval,
+                cursor,
+                scratch,
             );
         }
 
@@ -563,8 +576,7 @@ where
             let degree = table.view.shape.sumcheck_degree;
 
             for (c, column) in bus_columns(specs, degree).iter().enumerate() {
-                let limbs = core::array::from_fn(|j| sums[BUS_LIMBS * c + j]);
-                columns.push((column.group(specs), limbs));
+                columns.push((column.group(specs), sums[c]));
             }
         }
 
@@ -611,7 +623,7 @@ where
         proof: &'a InnerProof<F>,
         transcript: &mut Transcript<H>,
         config: &Config,
-        logup: &LogUpContext<'_>,
+        logup: &LogUpContext<'_, F>,
         mut cursor: Option<&mut PadCursor>,
     ) -> errors::Result<Vec<CheckedTable<'a, 's, F>>> {
         if proof.chiplet_zerocheck_proofs.len() != chiplet_tables.len() {
@@ -659,10 +671,10 @@ where
             )? {
                 Some(table) => checked.push(table),
                 None => {
-                    warn!(chiplet_idx = c_idx, "Chiplet ZeroCheck failed");
+                    warn!(chiplet_idx = c_idx, "chiplet zerocheck failed");
                     return Err(errors::Error::Protocol {
                         protocol: "verifier",
-                        message: "chiplet ZeroCheck failed",
+                        message: "chiplet zerocheck failed",
                     });
                 }
             }
@@ -683,7 +695,7 @@ where
         half: usize,
         transcript: &mut Transcript<H>,
         config: &Config,
-        logup: &LogUpContext<'_>,
+        logup: &LogUpContext<'_, F>,
         mut cursor: Option<&mut PadCursor>,
     ) -> errors::Result<Option<CheckedTable<'a, 's, F>>> {
         let claims = Claims::new(&proof.point_evaluation.1);
@@ -771,7 +783,7 @@ where
     fn table_records<'s>(
         pool: &FoldPool,
         checked: &[CheckedTable<'_, 's, F>],
-        logup: &LogUpContext<'_>,
+        logup: &LogUpContext<'_, F>,
         config: &Config,
     ) -> errors::Result<Vec<TableRecord<'s, F>>> {
         let unpadded = || errors::Error::Protocol {
@@ -818,7 +830,7 @@ where
     /// Absorbs every public parameter before the first challenge.
     #[instrument(skip_all, level = "trace", name = "verify_trace_commitment")]
     fn verify_trace_commitment(
-        program_id: [u8; 32],
+        program_id: ProgramId,
         main: &TableView<'_, '_, F>,
         transcript: &mut Transcript<H>,
         config: &Config,
@@ -860,7 +872,7 @@ where
         config: &Config,
         trace_values: &[Flat<F>],
         trace_values_next: &[Flat<F>],
-        logup: &LogUpContext<'_>,
+        logup: &LogUpContext<'_, F>,
         mut cursor: Option<&mut PadCursor>,
     ) -> errors::Result<Option<ZerocheckOutcome<F>>> {
         let TableView {
@@ -889,7 +901,7 @@ where
         let num_vars = num_rows.trailing_zeros() as usize;
         let h_columns = shape.h_columns();
 
-        let claimed_sums_first = cursor.as_deref_mut().map(|c| c.take(h_columns));
+        let claimed_sums_first = cursor.as_deref_mut().map(|c| c.take(shape.bus_columns));
 
         // =========================================================
         // Constraint System Setup
@@ -898,17 +910,17 @@ where
         // Validate LogUp aux structure and bind claimed_sums
         // into the transcript before drawing alpha / r_zerocheck,
         // the ZeroCheck challenges depend on the bus-sum target.
-        if logup_aux.claimed_sums.len() != h_columns {
+        if logup_aux.claimed_sums.len() != shape.bus_columns {
             return Err(errors::Error::Protocol {
                 protocol: "verifier",
-                message: "logup_aux claimed_sums length mismatch with the h limb columns",
+                message: "logup_aux claimed_sums length mismatch with the h columns",
             });
         }
 
         if logup_aux.h_evals.len() != h_columns {
             return Err(errors::Error::Protocol {
                 protocol: "verifier",
-                message: "logup_aux h_evals length mismatch with the h limb columns",
+                message: "logup_aux h_evals length mismatch with the h planes",
             });
         }
 
@@ -947,14 +959,33 @@ where
             initial_claim += w.bus_sum * claim.to_hardware();
         }
 
+        let skip = shape.skip();
+
         let zc_first = cursor
             .as_deref_mut()
-            .map(|c| c.take(num_vars * sumcheck_degree));
+            .map(|c| c.take(skip.sent_scalars() + (num_vars - skip.vars) * sumcheck_degree));
+
+        let (skipped, tail_claim) = match skip.is_skip() {
+            true => {
+                let domain = SkipDomain::<F>::new(skip)?;
+                let (r_skip, claim) =
+                    verify_skip(&domain, initial_claim, &sc_proof.skip, transcript)?;
+
+                (Some((domain, r_skip)), claim)
+            }
+            false if sc_proof.skip.is_empty() => (None, initial_claim),
+            false => {
+                return Err(errors::Error::Protocol {
+                    protocol: "verifier",
+                    message: "skip round sent for a table that skips nothing",
+                });
+            }
+        };
 
         let sc_res = verify(
-            num_vars,
+            num_vars - skip.vars,
             sumcheck_degree,
-            initial_claim,
+            tail_claim,
             sc_proof,
             transcript,
         )?;
@@ -963,12 +994,26 @@ where
 
         protocol::absorb_logup_h_evals(transcript, &logup_aux.h_evals);
 
-        let (r_final, val_final) = match sc_res {
+        let (tail, val_final) = match sc_res {
             Some(res) => res,
             None => {
-                warn!("Main constraint sumcheck failed");
+                warn!("zerocheck sumcheck failed");
                 return Ok(None);
             }
+        };
+
+        let (r_final, point) = match skipped {
+            Some((domain, r_skip)) => {
+                let mut r_final = Vec::with_capacity(tail.len() + 1);
+                r_final.push(r_skip);
+                r_final.extend_from_slice(&tail);
+
+                (
+                    r_final,
+                    SkipPoint::new(domain.lagrange_block(r_skip), tail)?,
+                )
+            }
+            None => (tail.clone(), SkipPoint::multilinear(tail)),
         };
 
         // =========================================================
@@ -984,6 +1029,7 @@ where
         {
             return Ok(Some(ZerocheckOutcome {
                 r_final,
+                point,
                 masked: Some(ZerocheckMasked {
                     claimed_sums_first,
                     zerocheck_first,
@@ -1002,12 +1048,12 @@ where
 
         for (h_eval, &claim) in logup_aux.h_evals.iter().zip(h_claims) {
             if h_eval.to_hardware() != claim {
-                warn!("Reported h_eval does not match the committed h claim");
+                warn!("h_eval does not match the committed h claim");
                 return Ok(None);
             }
         }
 
-        let eq_zc_eval = TensorProduct::evaluate_eq_slice(&r_zerocheck, &r_final);
+        let eq_zc_eval = point.eq_with(&r_zerocheck)?;
 
         // Separate physical trace from blinding
         // to match AIR constraints index layout.
@@ -1019,7 +1065,7 @@ where
         // MLE at r_final, substituted into the row ast.evaluate
         // sees so constraints use the verified value.
         let mut current_row_subst: Vec<Flat<F>> = current_row.to_vec();
-        let mut shapes = ShapeEvaluator::new(&r_final);
+        let mut shapes = ShapeEvaluator::new(&point);
 
         for fc in statics.fixed {
             let FixedColumn { col_idx, shape } = fc;
@@ -1035,8 +1081,10 @@ where
 
             if current_row[*col_idx] != expected {
                 warn!(
-                    "Fixed-column forgery detected.\nCol: {}\nClaimed: {:?}\nExpected: {:?}",
-                    col_idx, current_row[*col_idx], expected
+                    col = col_idx,
+                    claimed = ?current_row[*col_idx],
+                    expected = ?expected,
+                    "fixed column differs from its shape"
                 );
                 return Ok(None);
             }
@@ -1060,8 +1108,6 @@ where
         expected_val += main_constraints_sum * eq_zc_eval;
 
         // C. Boundary Constraints
-        let eq_row_checker = TensorProduct::new(r_final.clone());
-
         for bc in boundary_constraints {
             if bc.col_idx >= current_row.len() {
                 return Err(errors::Error::Protocol {
@@ -1079,7 +1125,7 @@ where
 
             let pub_val = bc.resolve_target(instance)?.to_hardware();
             let trace_val = current_row[bc.col_idx];
-            let eq_eval = eq_row_checker.evaluate_at_index(bc.row_idx);
+            let eq_eval = point.weight(bc.row_idx);
 
             expected_val += (trace_val - pub_val) * eq_eval * alpha_pow;
             alpha_pow *= alpha;
@@ -1099,19 +1145,18 @@ where
 
         // E. LogUp consistency + bus-sum at r_final
         if !bus_specs.is_empty() {
-            let field = BusField::<F>::new()?;
-            let challenges = [field.import(gamma), field.import(beta)];
+            let challenges = [gamma.to_hardware(), beta.to_hardware()];
+            let planes = plane_basis::<F>()?;
 
             let mut weights = bus_alpha_weights(alpha_pow, alpha);
             for (c, column) in bus_columns(bus_specs, sumcheck_degree).iter().enumerate() {
                 let fraction = |idx: usize| {
                     BusFraction::new(
-                        &field,
                         idx,
                         &bus_specs[idx],
                         trace_width,
                         challenges,
-                        &r_final,
+                        &point,
                         clocks,
                     )
                 };
@@ -1119,20 +1164,26 @@ where
                 let first = fraction(column.first)?;
                 let second = column.second.map(fraction).transpose()?;
 
-                let g = BusValue {
-                    lo: logup_aux.h_evals[BUS_LIMBS * c].to_hardware(),
-                    hi: logup_aux.h_evals[BUS_LIMBS * c + 1].to_hardware(),
-                };
+                let g =
+                    planes
+                        .iter()
+                        .enumerate()
+                        .fold(Flat::from_raw(F::ZERO), |acc, (k, &basis)| {
+                            acc + logup_aux.h_evals[planes.len() * c + k].to_hardware() * basis
+                        });
 
-                let weight =
-                    column
-                        .group(bus_specs)
-                        .row_weight(&field, lookup_bus_points, &r_final)?;
+                let weight = column
+                    .group(bus_specs)
+                    .row_weight(lookup_bus_points, &point)?;
 
-                let terms =
-                    logup::ColumnTerms::at(&field, &first, second.as_ref(), g, weight, current_row);
+                let terms = logup::ColumnTerms::at(&first, second.as_ref(), g, weight, current_row);
 
-                expected_val += terms.weighted(&mut weights, eq_zc_eval)?;
+                let w = weights.next().ok_or(errors::Error::Protocol {
+                    protocol: "LogUp",
+                    message: "bus weights end before the columns",
+                })?;
+
+                expected_val += terms.weighted(w, eq_zc_eval);
             }
         }
 
@@ -1140,14 +1191,17 @@ where
         let masking_bias = val_final - expected_val;
         if masking_bias != Flat::from_raw(F::ZERO) {
             warn!(
-                "Constraint logic mismatch.\nClaimed (Sumcheck): {:?}\nCalculated (Constraints): {:?}\nDiff: {:?}",
-                val_final, expected_val, masking_bias
+                claimed = ?val_final,
+                calculated = ?expected_val,
+                diff = ?masking_bias,
+                "constraints disagree with the zerocheck claim"
             );
             return Ok(None);
         }
 
         Ok(Some(ZerocheckOutcome {
             r_final,
+            point,
             masked: None,
         }))
     }
@@ -1160,7 +1214,7 @@ where
         chiplet_defs: &[ChipletDef<F>],
         proof: &InnerProof<F>,
         transcript: &mut Transcript<H>,
-    ) -> errors::Result<BTreeMap<String, Vec<BusElement>>> {
+    ) -> errors::Result<BTreeMap<String, Vec<F>>> {
         let mut heights: BTreeMap<String, u64> = BTreeMap::new();
         permutation::accumulate_lookup_heights(main_specs, main_rows as u64, &mut heights);
 
@@ -1188,4 +1242,11 @@ fn canonical_slice_to_flat<F: HardwareField>(values: &[F]) -> Vec<Flat<F>> {
         .copied()
         .map(|value| value.to_hardware())
         .collect()
+}
+
+pub(crate) fn root<H: Hasher>(bytes: &[u8]) -> errors::Result<H::Digest> {
+    H::Digest::from_slice(bytes).ok_or(errors::Error::Protocol {
+        protocol: "verifier",
+        message: "root width does not match the hash",
+    })
 }

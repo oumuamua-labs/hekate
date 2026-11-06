@@ -8,20 +8,19 @@ use hekate_core::config::MAX_FOLD_ARITY_LOG;
 use hekate_core::errors;
 use hekate_core::fold::{CodeField, FoldLayout, FoldTree, PolyKind, TreeKind};
 use hekate_core::proofs::{FoldEvalProof, TreeOpening};
+use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::{ColumnType, TraceCompatibleField};
-use hekate_crypto::Hasher;
 use hekate_crypto::merkle::{MerkleTree, Tag, hash_symbol_leaf};
 use hekate_crypto::transcript::Transcript;
+use hekate_crypto::{Digest, Hasher};
 use hekate_math::{BinaryFieldExtras, CantorBasis, Flat, HardwareField, TowerField};
-use hekate_program::permutation::{BUS_LIMBS, BusElement, BusField, BusValue};
 use tracing::{instrument, warn};
 
-const SYMBOL_BYTES: usize = 16;
 const MAX_COSET: usize = 1 << MAX_FOLD_ARITY_LOG;
 
-pub struct FoldClaims<'a, F> {
-    pub trace_root: &'a [u8; 32],
-    pub helper_root: Option<&'a [u8; 32]>,
+pub struct FoldClaims<'a, F, H: Hasher> {
+    pub trace_root: &'a H::Digest,
+    pub helper_root: Option<&'a H::Digest>,
     pub point: &'a [Flat<F>],
     pub masters: &'a [Flat<F>],
 }
@@ -45,7 +44,6 @@ impl<'p> OpenedTree<'p> {
 }
 
 struct Kernel<F> {
-    field: BusField<F>,
     basis: CantorBasis<F>,
 }
 
@@ -55,11 +53,11 @@ where
 {
     fn fold_coset(
         &self,
-        values: &[BusValue<F>],
+        values: &[Flat<F>],
         base: usize,
-        challenges: &[BusValue<F>],
-    ) -> errors::Result<BusValue<F>> {
-        let mut cur = [BusValue::zero(); MAX_COSET];
+        challenges: &[Flat<F>],
+    ) -> errors::Result<Flat<F>> {
+        let mut cur = [Flat::from_raw(F::ZERO); MAX_COSET];
         let mut len = values.len();
         let mut at = base;
 
@@ -75,9 +73,9 @@ where
                     .map_err(|_| malformed("fold twiddle outside the Cantor domain"))?;
 
                 let f1 = cur[2 * u] + cur[2 * u + 1];
-                let f0 = cur[2 * u] + f1.mul_base(twiddle);
+                let f0 = cur[2 * u] + f1 * twiddle;
 
-                cur[u] = f0 + self.field.mul(ch, f0 + f1);
+                cur[u] = f0 + ch * (f0 + f1);
             }
 
             at >>= 1;
@@ -86,38 +84,24 @@ where
         Ok(cur[0])
     }
 
-    fn encode_final(
-        &self,
-        layer: &[BusValue<F>],
-        positions: &[usize],
-    ) -> errors::Result<Vec<BusValue<F>>> {
+    fn encode_final(&self, layer: &[Flat<F>], positions: &[usize]) -> errors::Result<Vec<Flat<F>>> {
         let zero = Flat::from_raw(F::ZERO);
 
         let mut scratch = vec![zero; layer.len() - 1];
-        let mut limbs = [vec![zero; positions.len()], vec![zero; positions.len()]];
+        let mut out = vec![zero; positions.len()];
 
-        for (j, out) in limbs.iter_mut().enumerate() {
-            let coeffs: Vec<Flat<F>> = layer.iter().map(|v| v.limbs()[j]).collect();
+        self.basis
+            .evaluate_at(layer, zero, positions, &mut scratch, &mut out)
+            .map_err(|_| malformed("final layer encode outside the Cantor domain"))?;
 
-            self.basis
-                .evaluate_at(&coeffs, zero, positions, &mut scratch, out)
-                .map_err(|_| malformed("final layer encode outside the Cantor domain"))?;
-        }
-
-        let [lo, hi] = limbs;
-
-        Ok(lo
-            .into_iter()
-            .zip(hi)
-            .map(|(lo, hi)| BusValue { lo, hi })
-            .collect())
+        Ok(out)
     }
 }
 
 #[instrument(skip_all, level = "trace", name = "Fold::verify")]
 pub fn verify<F, H>(
     layout: &FoldLayout,
-    claims: FoldClaims<'_, F>,
+    claims: FoldClaims<'_, F, H>,
     proof: &FoldEvalProof<F>,
     transcript: &mut Transcript<H>,
 ) -> errors::Result<bool>
@@ -131,27 +115,31 @@ where
     let fold_vars = layout.num_vars() - stop;
     let polys = layout.polys();
 
+    let symbol_bytes = F::BITS / 8;
+    let digest_bytes = H::Digest::BYTES;
+
     if claims.masters.len() != polys.len() || claims.point.len() != layout.num_vars() {
         return Err(malformed("one master per polynomial at the batching point"));
     }
 
-    if proof.fold_rounds.len() != 2 * BUS_LIMBS * fold_vars
-        || proof.round_roots.len() + 1 != rounds
-        || proof.final_layer.len() != BUS_LIMBS << stop
+    if proof.fold_rounds.len() != 2 * fold_vars
+        || proof.round_roots.len() != (rounds - 1) * digest_bytes
+        || proof.final_layer.len() != 1 << stop
         || proof.openings.len() != layout.trees().len()
     {
         return Err(malformed("fold proof does not match its layout"));
     }
 
+    let round_root = |c: usize| &proof.round_roots[(c - 1) * digest_bytes..c * digest_bytes];
+
     let kernel = Kernel {
-        field: BusField::new()?,
         basis: CantorBasis::new(layout.num_vars() + layout.log_inv_rate())
             .map_err(|_| malformed("fold domain beyond the Cantor basis"))?,
     };
 
-    let field = &kernel.field;
-
-    let lambda = field.import(transcript.challenge_field::<BusElement>(b"fold_lambda")?);
+    let lambda = transcript
+        .challenge_field::<F>(b"fold_lambda")?
+        .to_hardware();
 
     let mut lambdas = Vec::with_capacity(polys.len());
     let mut power = lambda;
@@ -159,60 +147,48 @@ where
     for _ in 0..polys.len() {
         lambdas.push(power);
 
-        power = field.mul(power, lambda);
+        power *= lambda;
     }
 
-    let mut claim = BusValue::zero();
+    let mut claim = Flat::from_raw(F::ZERO);
     for (&lambda_k, &master) in lambdas.iter().zip(claims.masters) {
-        claim += lambda_k.mul_base(master);
+        claim += lambda_k * master;
     }
 
     let mut challenges = Vec::with_capacity(fold_vars);
-    for (j, coeffs) in proof
-        .fold_rounds
-        .as_chunks::<{ 2 * BUS_LIMBS }>()
-        .0
-        .iter()
-        .enumerate()
-    {
+    for (j, coeffs) in proof.fold_rounds.as_chunks::<2>().0.iter().enumerate() {
         transcript.append_field_list(b"fold_round", coeffs);
 
-        let (pair, _) = coeffs.as_chunks::<BUS_LIMBS>();
+        let g1 = coeffs[0].to_hardware();
+        let c2 = coeffs[1].to_hardware();
 
-        let g1 = limb_value(&pair[0]);
-        let c2 = limb_value(&pair[1]);
-
-        let r = field.import(transcript.challenge_field::<BusElement>(b"fold_challenge")?);
+        let r = transcript
+            .challenge_field::<F>(b"fold_challenge")?
+            .to_hardware();
 
         let c0 = claim + g1;
         let c1 = g1 + c0 + c2;
 
-        claim = c0 + field.mul(r, c1 + field.mul(c2, r));
+        claim = c0 + r * (c1 + c2 * r);
 
         challenges.push(r);
 
         if (j + 1) % a == 0 {
             match (j + 1) / a {
                 c if c < rounds => {
-                    transcript.append_message(b"fold_round_root", &proof.round_roots[c - 1]);
+                    transcript.append_message(b"fold_round_root", round_root(c));
                 }
                 _ => transcript.append_field_list(b"fold_final_layer", &proof.final_layer),
             }
         }
     }
 
-    let final_layer: Vec<BusValue<F>> = proof
-        .final_layer
-        .as_chunks::<BUS_LIMBS>()
-        .0
-        .iter()
-        .map(limb_value)
-        .collect();
+    let final_layer: Vec<Flat<F>> = proof.final_layer.iter().map(|v| v.to_hardware()).collect();
 
-    let head = field.eq_at(&challenges, &claims.point[..fold_vars]);
+    let head = TensorProduct::evaluate_eq_slice(&challenges, &claims.point[..fold_vars]);
     let tail = mle_at(&final_layer, &claims.point[fold_vars..]);
 
-    if claim != field.mul(head, tail) {
+    if claim != head * tail {
         warn!("fold sumcheck final claim disagrees with the final layer");
         return Ok(false);
     }
@@ -228,17 +204,24 @@ where
 
     for (tree, opening) in layout.trees().iter().zip(&proof.openings) {
         let (root, tag) = match tree.kind {
-            TreeKind::Polys(PolyKind::Trace) => (claims.trace_root, Tag::PoolLeaf),
+            TreeKind::Polys(PolyKind::Trace) => (*claims.trace_root, Tag::PoolLeaf),
             TreeKind::Polys(PolyKind::Helper | PolyKind::Mask) => (
-                claims
+                *claims
                     .helper_root
                     .ok_or(malformed("helper tree without a root"))?,
                 Tag::PoolLeaf,
             ),
-            TreeKind::Round(c) => (&proof.round_roots[c - 1], Tag::RoundLeaf),
+            TreeKind::Round(c) => (
+                H::Digest::from_slice(round_root(c)).ok_or(malformed("round root width"))?,
+                Tag::RoundLeaf,
+            ),
         };
 
-        let opened = open_tree::<F, H>(tree, opening, root, tag, a, &queries)?;
+        if matches!(tree.kind, TreeKind::Round(_)) && tree.leaf_bytes != symbol_bytes << a {
+            return Err(malformed("round tree leaves do not hold the fold field"));
+        }
+
+        let opened = open_tree::<F, H>(tree, opening, &root, tag, a, &queries)?;
 
         match tree.kind {
             TreeKind::Polys(_) => poly_trees.push((tree, opened)),
@@ -257,8 +240,8 @@ where
     let coset_len = 1 << a;
 
     for (query, &q) in queries.iter().enumerate() {
-        let mut coset = [BusValue::zero(); MAX_COSET];
-        let mut joined = BusValue::zero();
+        let mut coset = [Flat::from_raw(F::ZERO); MAX_COSET];
+        let mut joined = Flat::from_raw(F::ZERO);
 
         for (tree, opened) in &poly_trees {
             let leaf = opened.leaf(q)?;
@@ -273,20 +256,20 @@ where
                 match fold.join_round {
                     0 => {
                         for (slot, bytes) in coset.iter_mut().zip(symbols) {
-                            *slot += lambdas[k].mul_base(symbol::<F>(fold.field, bytes));
+                            *slot += lambdas[k] * symbol::<F>(fold.field, bytes);
                         }
                     }
                     1 => {
-                        let mut values = [BusValue::zero(); MAX_COSET];
+                        let mut values = [Flat::from_raw(F::ZERO); MAX_COSET];
                         for (slot, bytes) in values.iter_mut().zip(symbols) {
-                            *slot = BusValue::from_base(symbol::<F>(fold.field, bytes));
+                            *slot = symbol::<F>(fold.field, bytes);
                         }
 
                         let p = fold.prefold_vars;
                         let prefolded =
                             kernel.fold_coset(&values[..run], q << p, &challenges[a - p..a])?;
 
-                        joined += field.mul(lambdas[k], prefolded);
+                        joined += lambdas[k] * prefolded;
                     }
                     _ => return Err(malformed("polynomial joins past the first round")),
                 }
@@ -299,19 +282,12 @@ where
         let mut pos = q;
 
         for (c, opened) in round_trees.iter().enumerate().map(|(i, t)| (i + 1, t)) {
-            let mut word = [BusValue::zero(); MAX_COSET];
-            for (slot, bytes) in word.iter_mut().zip(
-                opened
-                    .leaf(q)?
-                    .as_chunks::<{ BUS_LIMBS * SYMBOL_BYTES }>()
-                    .0,
-            ) {
-                let (limbs, _) = bytes.as_chunks::<SYMBOL_BYTES>();
-
-                *slot = BusValue {
-                    lo: symbol::<F>(CodeField::B128, &limbs[0]),
-                    hi: symbol::<F>(CodeField::B128, &limbs[1]),
-                };
+            let mut word = [Flat::from_raw(F::ZERO); MAX_COSET];
+            for (slot, bytes) in word
+                .iter_mut()
+                .zip(opened.leaf(q)?.chunks_exact(symbol_bytes))
+            {
+                *slot = fold_symbol::<F>(bytes)?;
             }
 
             if word[pos & (coset_len - 1)] != value {
@@ -350,7 +326,7 @@ where
 fn open_tree<'p, F, H>(
     tree: &FoldTree,
     opening: &'p TreeOpening,
-    root: &[u8; 32],
+    root: &H::Digest,
     tag: Tag,
     arity_log: usize,
     queries: &[usize],
@@ -374,7 +350,7 @@ where
         ));
     }
 
-    let hashes: Vec<(usize, [u8; 32])> = distinct
+    let hashes: Vec<(usize, H::Digest)> = distinct
         .iter()
         .zip(opening.leaves.chunks_exact(leaf_bytes))
         .map(|(&index, leaf)| (index, hash_symbol_leaf::<H>([leaf], tag)))
@@ -401,7 +377,7 @@ where
     })
 }
 
-fn mle_at<F>(values: &[BusValue<F>], point: &[Flat<F>]) -> BusValue<F>
+fn mle_at<F>(values: &[Flat<F>], point: &[Flat<F>]) -> Flat<F>
 where
     F: TowerField + HardwareField,
 {
@@ -409,7 +385,7 @@ where
     for &x in point {
         let half = cur.len() / 2;
         for u in 0..half {
-            cur[u] = cur[2 * u] + (cur[2 * u] + cur[2 * u + 1]).mul_base(x);
+            cur[u] = cur[2 * u] + (cur[2 * u] + cur[2 * u + 1]) * x;
         }
 
         cur.truncate(half);
@@ -418,11 +394,10 @@ where
     cur[0]
 }
 
-fn limb_value<F: TowerField + HardwareField>(limbs: &[F; BUS_LIMBS]) -> BusValue<F> {
-    BusValue {
-        lo: limbs[0].to_hardware(),
-        hi: limbs[1].to_hardware(),
-    }
+fn fold_symbol<F: TowerField + HardwareField>(bytes: &[u8]) -> errors::Result<Flat<F>> {
+    F::deserialize(bytes)
+        .map(Flat::from_raw)
+        .map_err(|()| malformed("round symbol outside its byte form"))
 }
 
 fn symbol<F: TraceCompatibleField>(field: CodeField, bytes: &[u8]) -> Flat<F> {
@@ -445,9 +420,11 @@ fn malformed(message: &'static str) -> errors::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hekate_math::{AdditiveFft, Block32, Block64, Block128, FlatPromote};
+    use hekate_math::{
+        AdditiveFft, Block32, Block64, Block128, Block256, CanonicalSerialize, FlatPromote,
+    };
 
-    type F = Block128;
+    type F = Block256;
 
     fn values(seed: u128, n: usize) -> Vec<Flat<F>> {
         let mut state = seed;
@@ -458,15 +435,11 @@ mod tests {
                 state ^= state >> 7;
                 state ^= state << 17;
 
-                Flat::from_raw(Block128(state))
+                Flat::from_raw(Block256::new(
+                    Block128(state),
+                    Block128(state.rotate_left(64) ^ 0x5DEE_CE66),
+                ))
             })
-            .collect()
-    }
-
-    fn ext(lo: &[Flat<F>], hi: &[Flat<F>]) -> Vec<BusValue<F>> {
-        lo.iter()
-            .zip(hi)
-            .map(|(&lo, &hi)| BusValue { lo, hi })
             .collect()
     }
 
@@ -484,7 +457,6 @@ mod tests {
 
     fn kernel(dim: usize) -> Kernel<F> {
         Kernel {
-            field: BusField::new().unwrap(),
             basis: CantorBasis::new(dim).unwrap(),
         }
     }
@@ -500,7 +472,7 @@ mod tests {
             .iter()
             .map(|v| {
                 let mut bytes = [0u8; 32];
-                bytes[..16].copy_from_slice(&v.into_raw().0.to_le_bytes());
+                bytes.copy_from_slice(&v.into_raw().to_bytes());
 
                 Flat::from_raw(S::from_uniform_bytes(&bytes))
             })
@@ -534,36 +506,22 @@ mod tests {
         for a in 1..=MAX_FOLD_ARITY_LOG {
             let seed = 0x94_0400 + 16 * a as u128;
             let message = values(seed, 1 << vars);
-            let challenges = ext(&values(seed + 1, a), &values(seed + 2, a));
+            let challenges = values(seed + 1, a);
 
-            let mut folded: Vec<BusValue<F>> =
-                message.iter().map(|&m| BusValue::from_base(m)).collect();
-
+            let mut folded = message.clone();
             for &r in &challenges {
                 folded = (0..folded.len() / 2)
-                    .map(|u| folded[2 * u] + k.field.mul(r, folded[2 * u] + folded[2 * u + 1]))
+                    .map(|u| folded[2 * u] + r * (folded[2 * u] + folded[2 * u + 1]))
                     .collect();
             }
 
-            let folded_lo: Vec<Flat<F>> = folded.iter().map(|v| v.lo).collect();
-            let folded_hi: Vec<Flat<F>> = folded.iter().map(|v| v.hi).collect();
-
-            let log_folded = vars - a + log_inv_rate;
-            let want = ext(
-                &encode(&folded_lo, log_folded),
-                &encode(&folded_hi, log_folded),
-            );
-
+            let want = encode(&folded, vars - a + log_inv_rate);
             let code = encode(&message, vars + log_inv_rate);
 
             for (q, &want) in want.iter().enumerate() {
-                let coset: Vec<BusValue<F>> = code[q << a..(q + 1) << a]
-                    .iter()
-                    .map(|&x| BusValue::from_base(x))
-                    .collect();
-
                 assert_eq!(
-                    k.fold_coset(&coset, q << a, &challenges).unwrap(),
+                    k.fold_coset(&code[q << a..(q + 1) << a], q << a, &challenges)
+                        .unwrap(),
                     want,
                     "arity 2^{a}, coset {q}"
                 );
@@ -576,29 +534,24 @@ mod tests {
         let (stop, log_inv_rate) = (5, 2);
         let k = kernel(stop + log_inv_rate + 3);
 
-        let lo = values(0x94_0431, 1 << stop);
-        let hi = values(0x94_0432, 1 << stop);
-        let layer = ext(&lo, &hi);
-
-        let full = ext(
-            &encode(&lo, stop + log_inv_rate),
-            &encode(&hi, stop + log_inv_rate),
-        );
+        let layer = values(0x94_0431, 1 << stop);
+        let full = encode(&layer, stop + log_inv_rate);
 
         let all: Vec<usize> = (0..full.len()).collect();
         let sparse: Vec<usize> = all.iter().copied().step_by(7).collect();
         let edges = vec![0, full.len() - 1];
 
         for positions in [all, sparse, edges] {
-            let want: Vec<BusValue<F>> = positions.iter().map(|&i| full[i]).collect();
+            let want: Vec<Flat<F>> = positions.iter().map(|&i| full[i]).collect();
 
             assert_eq!(k.encode_final(&layer, &positions).unwrap(), want);
         }
     }
 
     #[test]
-    fn narrow_code_symbols_lift_into_b128_code() {
+    fn narrow_code_symbols_lift_into_the_fold_field() {
         narrow_code_matches_wide::<Block32>(CodeField::B32, 0x94_0471);
         narrow_code_matches_wide::<Block64>(CodeField::B64, 0x94_0472);
+        narrow_code_matches_wide::<Block128>(CodeField::B128, 0x94_0473);
     }
 }
