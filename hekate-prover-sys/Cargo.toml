@@ -10,13 +10,14 @@ authors.workspace = true
 description = "Open-source shim that links the closed-source Hekate prover cdylib over a stable C ABI."
 keywords = ["zk", "prover", "ffi", "hekate", "cdylib"]
 categories = ["cryptography", "external-ffi-bindings"]
-links = "hekate_prover_cdylib"
+links = "hekate_prover"
 
 [features]
 default = ["blake3"]
 blake3 = ["hekate-sdk/blake3"]
 sha2 = ["hekate-sdk/sha2"]
 sha3 = ["hekate-sdk/sha3"]
+shake256 = ["hekate-sdk/shake256"]
 ct = []
 public = []
 
