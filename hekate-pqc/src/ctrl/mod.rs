@@ -640,7 +640,7 @@ mod tests {
     use hekate_crypto::DefaultHasher;
     use hekate_crypto::transcript::Transcript;
     use hekate_keccak::generate_keccak_trace;
-    use hekate_math::{Bit, Block16, Block32, Block64, Block128};
+    use hekate_math::{Bit, Block16, Block32, Block64, Block256};
     use hekate_program::digest::program_id;
     use hekate_program::permutation::{BusKind, ServiceSlot};
     use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
@@ -651,7 +651,7 @@ mod tests {
 
     use crate::wiring::PolyLabels;
 
-    type F = Block128;
+    type F = Block256;
 
     const SHA3: u8 = 0x06;
     const SHA3_512_RATE: usize = 9;

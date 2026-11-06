@@ -7,7 +7,7 @@ use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakWitness, generate_keccak_trace};
-use hekate_math::{Bit, Block64, Block128, TowerField};
+use hekate_math::{Bit, Block64, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::{ProgramInstance, ProgramWitness};
@@ -16,7 +16,7 @@ use rand::{TryRngCore, rngs::OsRng};
 use std::hint::black_box;
 use std::time::Duration;
 
-type F = Block128;
+type F = Block256;
 
 // =======================================
 // 1. KECCAK BENCH AIR

@@ -36,7 +36,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate_math::{Bit, Block32, Block64, Block128, Flat, TowerField};
+use hekate_math::{Bit, Block32, Block64, Block128, Block256, Flat, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col, ColRange, Packed};
 use hekate_program::constraint::builder::Expr;
@@ -54,7 +54,7 @@ use crate::chiplets::bignum::bigint::{
     column_sums, divrem, is_less, limb_pair, normalise, sub_one_minus,
 };
 
-type F = Block128;
+type F = Block256;
 
 pub const BUS_ID: &str = "bignum_modexp";
 
@@ -99,7 +99,7 @@ pub struct ModexpChiplet {
     program: CircuitProgram<F>,
     layout: Layout,
     cols: ModexpCols,
-    basis: ExpBasis<F>,
+    basis: ExpBasis<Block128>,
 }
 
 impl ModexpChiplet {
@@ -107,7 +107,7 @@ impl ModexpChiplet {
     /// No primitive element, or the compiled layout
     /// diverges from the declaration.
     pub fn new() -> errors::Result<Self> {
-        let basis = ExpBasis::<F>::new()?;
+        let basis = ExpBasis::<Block128>::new()?;
         let layout = Layout::new();
         let (program, cols) = build_program(&basis)?;
 
@@ -130,7 +130,7 @@ impl ModexpChiplet {
         &self.cols
     }
 
-    pub fn basis(&self) -> &ExpBasis<F> {
+    pub fn basis(&self) -> &ExpBasis<Block128> {
         &self.basis
     }
 
@@ -375,27 +375,27 @@ struct RowValues {
     rc: u8,
     rcm: u8,
     rc_next: u8,
-    xa: [Vec<Flat<F>>; 2],
-    yf: [Vec<Flat<F>>; 2],
-    p: [Vec<Flat<F>>; 2],
-    u: [Vec<Flat<F>>; 2],
-    ut: [Vec<Flat<F>>; 2],
-    c: [Flat<F>; 2],
-    ct: [Flat<F>; 2],
-    cm: [Flat<F>; 2],
-    co: [Flat<F>; 2],
-    ctm: [Flat<F>; 2],
-    cto: [Flat<F>; 2],
-    dg: [Vec<Flat<F>>; 4],
-    ce: [Vec<Flat<F>>; 8],
-    fr: [Vec<Flat<F>>; 8],
-    lch: [Vec<Flat<F>>; 6],
+    xa: [Vec<Flat<Block128>>; 2],
+    yf: [Vec<Flat<Block128>>; 2],
+    p: [Vec<Flat<Block128>>; 2],
+    u: [Vec<Flat<Block128>>; 2],
+    ut: [Vec<Flat<Block128>>; 2],
+    c: [Flat<Block128>; 2],
+    ct: [Flat<Block128>; 2],
+    cm: [Flat<Block128>; 2],
+    co: [Flat<Block128>; 2],
+    ctm: [Flat<Block128>; 2],
+    cto: [Flat<Block128>; 2],
+    dg: [Vec<Flat<Block128>>; 4],
+    ce: [Vec<Flat<Block128>>; 8],
+    fr: [Vec<Flat<Block128>>; 8],
+    lch: [Vec<Flat<Block128>>; 6],
 }
 
 impl RowValues {
     fn zeroed() -> Self {
-        let one = Flat::from_raw(F::ONE);
-        let cols = |n: usize| vec![Flat::from_raw(F::ZERO); n];
+        let one = Flat::from_raw(Block128::ONE);
+        let cols = |n: usize| vec![Flat::from_raw(Block128::ZERO); n];
 
         Self {
             xs: 0,
@@ -488,17 +488,17 @@ impl Modexp {
     /// carries the previous row's carry-outs.
     fn row(
         &self,
-        basis: &ExpBasis<F>,
+        basis: &ExpBasis<Block128>,
         row: usize,
-        u_state: &mut [[Flat<F>; LIMBS32]; 2],
-        ut_state: &mut [[Flat<F>; LIMBS32]; 2],
+        u_state: &mut [[Flat<Block128>; LIMBS32]; 2],
+        ut_state: &mut [[Flat<Block128>; LIMBS32]; 2],
         out: &mut RowValues,
     ) {
         let b = row / ROWS_PER_MODMUL;
         let i = row % ROWS_PER_MODMUL;
         let block_start = i == 0;
 
-        let one = Flat::from_raw(F::ONE);
+        let one = Flat::from_raw(Block128::ONE);
 
         let block = &self.blocks[b];
         let prev = &self.blocks[(b + NUM_MODMULS - 1) % NUM_MODMULS];
@@ -558,12 +558,12 @@ impl Modexp {
 
             let yf = &out.yf[side];
 
-            let chain_of = |(chain, &limb): (&mut [Flat<F>], &u32)| {
+            let chain_of = |(chain, &limb): (&mut [Flat<Block128>], &u32)| {
                 let mut acc = one;
                 for (t, slot) in chain.iter_mut().enumerate() {
                     for s in [2 * t, 2 * t + 1] {
                         let frob = if s == 0 { g_a } else { yf[s - 1] };
-                        let bit = Flat::from_raw(F::from(((limb >> s) & 1) as u8));
+                        let bit = Flat::from_raw(Block128::from(((limb >> s) & 1) as u8));
 
                         acc *= one + bit * (frob + one);
                     }
@@ -827,14 +827,14 @@ fn write_row(
 /// The last block is walked silently first: running
 /// products and carry-outs wrap cyclically into row 0.
 fn generate_trace(
-    basis: &ExpBasis<F>,
+    basis: &ExpBasis<Block128>,
     layout: &Layout,
     modexp: &Modexp,
 ) -> errors::Result<ColumnTrace> {
     let mut tb = TraceBuilder::new_secret(&layout.physical, NUM_VARS)?;
     let mut values = RowValues::zeroed();
-    let mut u_state = [[Flat::from_raw(F::ONE); LIMBS32]; 2];
-    let mut ut_state = [[Flat::from_raw(F::ONE); LIMBS32]; 2];
+    let mut u_state = [[Flat::from_raw(Block128::ONE); LIMBS32]; 2];
+    let mut ut_state = [[Flat::from_raw(Block128::ONE); LIMBS32]; 2];
 
     for row in NUM_ROWS - ROWS_PER_MODMUL..NUM_ROWS {
         modexp.row(basis, row, &mut u_state, &mut ut_state, &mut values);
@@ -950,7 +950,7 @@ fn cadence(values: Vec<F>, count: usize, origin: usize) -> FixedShape<F> {
     }
 }
 
-fn build_program(basis: &ExpBasis<F>) -> errors::Result<(CircuitProgram<F>, ModexpCols)> {
+fn build_program(basis: &ExpBasis<Block128>) -> errors::Result<(CircuitProgram<F>, ModexpCols)> {
     let mut cx = Circuit::<F>::new("ModexpChiplet", NUM_ROWS)?;
 
     let k = declare(&mut cx);
@@ -985,11 +985,11 @@ fn build_program(basis: &ExpBasis<F>) -> errors::Result<(CircuitProgram<F>, Mode
 
     let cs = cx.cs();
 
-    let pow2 = basis.tower_pow2();
+    let pow2 = basis.tower_pow2().map(F::from);
 
     let one = cs.constant(F::ONE);
     let v32 = cs.constant(F::from(V32));
-    let g_step = cs.constant(basis.generator() + F::ONE);
+    let g_step = cs.constant(F::from(basis.generator()) + F::ONE);
     let k32_step = cs.constant(pow2[DIGIT_BITS] + F::ONE);
 
     let col = |c: Col| cs.col(c.index());
