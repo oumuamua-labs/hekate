@@ -7,21 +7,19 @@
 
 use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate::crypto::DefaultHasher;
-use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block128, TowerField};
+use hekate::math::{Bit, Block256, TowerField};
+use hekate_core::errors;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
-use hekate_program::digest::program_id;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness, define_columns};
 use hekate_prover_sys::prove;
-use hekate_verifier::HekateVerifier;
+use hekate_testkit::site::{CHIPLET_ZEROCHECK, OUTER_LINEAR};
+use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
 use rand::{TryRngCore, rngs::OsRng};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 fn test_config() -> Config {
     Config {
@@ -33,11 +31,11 @@ fn test_config() -> Config {
     }
 }
 
-fn run_prove_verify<P: Program<F>>(
+fn run_prove_verify<P: Program<F> + Sync>(
     program: &P,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F>,
-) -> bool {
+) -> (errors::Result<bool>, String) {
     run_split_air(program, program, instance, witness)
 }
 
@@ -46,10 +44,10 @@ fn run_split_air<PProver, PVerifier>(
     verifier_air: &PVerifier,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F>,
-) -> bool
+) -> (errors::Result<bool>, String)
 where
     PProver: Program<F>,
-    PVerifier: Program<F>,
+    PVerifier: Program<F> + Sync,
 {
     let mut seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut seed).unwrap();
@@ -60,18 +58,7 @@ where
     let proof =
         prove(domain, prover_air, instance, witness, &cfg, seed, None).expect("prove failed");
 
-    let mut verifier_t = Transcript::<H>::new(domain);
-    let pinned_id = program_id(verifier_air).unwrap();
-
-    HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        verifier_air,
-        instance,
-        &proof,
-        &mut verifier_t,
-        &cfg,
-    )
-    .unwrap_or(false)
+    verify_logged(verifier_air, instance, &cfg, &proof, domain)
 }
 
 // =================================================================
@@ -146,10 +133,9 @@ fn chiplet_boundary_happy_path() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(
-        run_prove_verify(&air, &instance, &witness),
-        "honest trace must verify"
-    );
+    let (outcome, _) = run_prove_verify(&air, &instance, &witness);
+
+    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
 }
 
 #[test]
@@ -163,10 +149,9 @@ fn chiplet_boundary_pin_zero_happy_path() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(
-        run_prove_verify(&air, &instance, &witness),
-        "pin-zero trace must verify"
-    );
+    let (outcome, _) = run_prove_verify(&air, &instance, &witness);
+
+    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
 }
 
 #[test]
@@ -181,9 +166,11 @@ fn chiplet_boundary_violation_rejected() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
+    let (outcome, log) = run_prove_verify(&air, &instance, &witness);
+
     assert!(
-        !run_prove_verify(&air, &instance, &witness),
-        "trace violating chiplet boundary must reject"
+        rejected_at(&outcome, &log, OUTER_LINEAR),
+        "got {outcome:?}\n{log}"
     );
 }
 
@@ -200,9 +187,11 @@ fn chiplet_boundary_constant_swap_rejected() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
+    let (outcome, _) = run_split_air(&prover_air, &verifier_air, &instance, &witness);
+
     assert!(
-        !run_split_air(&prover_air, &verifier_air, &instance, &witness),
-        "constant swap between prover and verifier must reject (transcript binding)"
+        rejected_with(&outcome, CHIPLET_ZEROCHECK),
+        "got {outcome:?}"
     );
 }
 
@@ -287,7 +276,9 @@ fn chiplet_multiple_boundaries_all_satisfied() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(run_prove_verify(&air, &instance, &witness));
+    let (outcome, _) = run_prove_verify(&air, &instance, &witness);
+
+    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
 }
 
 #[test]
@@ -301,7 +292,12 @@ fn chiplet_multiple_boundaries_first_violated() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(!run_prove_verify(&air, &instance, &witness));
+    let (outcome, log) = run_prove_verify(&air, &instance, &witness);
+
+    assert!(
+        rejected_at(&outcome, &log, OUTER_LINEAR),
+        "got {outcome:?}\n{log}"
+    );
 }
 
 #[test]
@@ -315,7 +311,12 @@ fn chiplet_multiple_boundaries_last_violated() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(!run_prove_verify(&air, &instance, &witness));
+    let (outcome, log) = run_prove_verify(&air, &instance, &witness);
+
+    assert!(
+        rejected_at(&outcome, &log, OUTER_LINEAR),
+        "got {outcome:?}\n{log}"
+    );
 }
 
 #[test]
@@ -329,7 +330,12 @@ fn chiplet_multiple_boundaries_both_violated() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(!run_prove_verify(&air, &instance, &witness));
+    let (outcome, log) = run_prove_verify(&air, &instance, &witness);
+
+    assert!(
+        rejected_at(&outcome, &log, OUTER_LINEAR),
+        "got {outcome:?}\n{log}"
+    );
 }
 
 // =================================================================

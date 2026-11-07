@@ -12,7 +12,7 @@ mod common;
 use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_pqc::mldsa::{self, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaParams};
@@ -25,7 +25,7 @@ use ml_dsa::{B32, MlDsa44, MlDsa65, MlDsa87, SigningKey};
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const DIGEST_WORDS: usize = 16;

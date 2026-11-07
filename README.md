@@ -5,15 +5,18 @@
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-Hekate is a general-purpose zero-knowledge proof system for proving on the user's own device. You write the statement in
-Rust, and Hekate takes care of the field, the commitment and zero knowledge.
+Hekate is a general-purpose zero-knowledge proof system for proving where the data lives: on the user's own device or at
+the edge. You write your ZK program in Rust as tables and AIR constraints, and Hekate takes care of the field, the
+commitment and zero knowledge. The default configuration gives 128 bits of security.
 
-Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
+Learn more: [oumuamua.dev/hekate](https://oumuamua.dev/hekate)
 
 > [!IMPORTANT]  
 > Hekate's open code is AGPL-3.0-only; its signed prover ships as free binaries for macOS (Apple Silicon),
 > Linux (ARM64, glibc), iOS (ARM64, device and simulator), and Android (ARM64).
-> A product shipped under other terms, open source or closed, needs a commercial license.
+> Experiments, research, personal projects and products released under the AGPL are free.
+> A commercial license lets you ship closed-source products, or open-source products under a license of your
+> choice, such as MIT or Apache-2.0.
 
 > [!NOTE]  
 > [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed

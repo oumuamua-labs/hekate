@@ -4,7 +4,7 @@
 
 use hekate_gadgets::{IntArithmeticChiplet, RamChiplet};
 use hekate_keccak::KeccakChiplet;
-use hekate_math::{Block128, Flat, HardwareField, TowerField};
+use hekate_math::{Block256, Flat, HardwareField, TowerField};
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::Air;
@@ -12,7 +12,7 @@ use hekate_program::predicate::{ClaimLayout, compile, wire_values};
 
 const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
 
-type F = Block128;
+type F = Block256;
 
 fn mix(seed: u128) -> Flat<F> {
     F::from(

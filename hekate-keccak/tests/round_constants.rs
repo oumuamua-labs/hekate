@@ -4,26 +4,26 @@
 
 use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, Trace, TraceBuilder};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
 use hekate_keccak::{
-    CpuKeccakColumns, KeccakChiplet, KeccakWitness, PhysKeccakColumns, generate_keccak_trace,
+    CpuKeccakColumns, KeccakChiplet, KeccakColumns, KeccakWitness, PhysKeccakColumns,
+    generate_keccak_trace,
 };
-use hekate_math::{Bit, Block32, Block64, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block64, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{Air, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::fault::{Check, Fault};
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 const ROUNDS: usize = 24;
 
 const ROWS_PER_CALL: usize = ROUNDS + 1;
 const ROWS: usize = 32;
+
+const KECCAK: TableId = TableId::Chiplet(0);
 
 /// Which row sends the state and which receives
 /// it is the statement, not a witness value.
@@ -132,48 +132,58 @@ fn chiplet_trace(input: [u64; 25], schedule: &[(u32, u64)]) -> (ColumnTrace, [u6
     (tb.build(), state)
 }
 
-fn proves_and_verifies(schedule: &[(u32, u64)]) -> bool {
+fn witness(cpu_input: [u64; 25], cpu_output: [u64; 25], chiplet: ColumnTrace) -> ProgramWitness<F> {
+    ProgramWitness::new(cpu_trace(cpu_input, cpu_output)).with_chiplets(vec![chiplet])
+}
+
+fn scheduled(schedule: &[(u32, u64)]) -> ProgramWitness<F> {
     let input = test_input();
     let (chiplet, output) = chiplet_trace(input, schedule);
 
-    run(input, output, chiplet)
+    witness(input, output, chiplet)
 }
 
-fn run(cpu_input: [u64; 25], cpu_output: [u64; 25], chiplet: ColumnTrace) -> bool {
-    let air = build_program();
-    let instance = ProgramInstance::new(ROWS, vec![]);
-    let witness =
-        ProgramWitness::new(cpu_trace(cpu_input, cpu_output)).with_chiplets(vec![chiplet]);
+fn canonical() -> Vec<(u32, u64)> {
+    constant_schedule(&KeccakChiplet::ROUND_CONSTANTS)
+}
 
-    let config = Config {
+fn config() -> Config {
+    Config {
         num_queries: 2,
         fold_arity_log: 1,
         early_stop_vars: 1,
-        zero_knowledge: true,
         ..Config::dev()
+    }
+}
+
+fn assert_schedule_rejected(forged: &ProgramWitness<F>, fault: Fault<'_>) {
+    let instance = ProgramInstance::new(ROWS, vec![]);
+
+    assert_rejected(
+        &build_program(),
+        (&instance, &scheduled(&canonical())),
+        (&instance, forged),
+        fault,
+        &config(),
+    );
+}
+
+fn assert_short_schedule_rejected(schedule: &[(u32, u64)]) {
+    let selectors = [KeccakColumns::S_ROUND, KeccakColumns::S_IN_OUT];
+    let pins: Vec<(TableId, usize)> = (5..ROUNDS)
+        .map(|round| (KECCAK, KeccakColumns::ROUND_BITS + round))
+        .chain(selectors.map(|col| (KECCAK, col)))
+        .collect();
+
+    let fault = Fault {
+        constraint_tables: &[KECCAK],
+        pin_columns: &pins,
+        buses: &[KeccakChiplet::BUS_ID],
+        first_check: Some(Check::FixedColumn),
+        ..Fault::NONE
     };
 
-    let proof = match prove(
-        b"Keccak_RC",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        [0xA5u8; 32],
-        None,
-    ) {
-        Ok(proof) => proof,
-        Err(e) => {
-            println!("prover refused: {e:?}");
-            return false;
-        }
-    };
-
-    let mut vt = Transcript::<H>::new(b"Keccak_RC");
-    let pinned_id = program_id(&air).unwrap();
-
-    HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-        .unwrap_or(false)
+    assert_schedule_rejected(&scheduled(schedule), fault);
 }
 
 #[test]
@@ -213,9 +223,12 @@ fn harness_matches_generate_keccak_trace() {
 
 #[test]
 fn canonical_schedule_verifies() {
-    assert!(
-        proves_and_verifies(&constant_schedule(&KeccakChiplet::ROUND_CONSTANTS)),
-        "the harness itself is broken, every rejection below is unattributable"
+    let instance = ProgramInstance::new(ROWS, vec![]);
+
+    assert_verifies(
+        &build_program(),
+        (&instance, &scheduled(&canonical())),
+        &config(),
     );
 }
 
@@ -224,7 +237,12 @@ fn canonical_schedule_verifies() {
 /// is not Keccak-f[1600].
 #[test]
 fn zero_schedule_rejected() {
-    assert!(!proves_and_verifies(&constant_schedule(&[0u64; ROUNDS])));
+    let fault = Fault {
+        constraint_tables: &[KECCAK],
+        ..Fault::NONE
+    };
+
+    assert_schedule_rejected(&scheduled(&constant_schedule(&[0u64; ROUNDS])), fault);
 }
 
 #[test]
@@ -232,23 +250,27 @@ fn flipped_constant_rejected() {
     let mut constants = KeccakChiplet::ROUND_CONSTANTS;
     constants[7] ^= 1;
 
-    assert!(!proves_and_verifies(&constant_schedule(&constants)));
+    let fault = Fault {
+        constraint_tables: &[KECCAK],
+        ..Fault::NONE
+    };
+
+    assert_schedule_rejected(&scheduled(&constant_schedule(&constants)), fault);
 }
 
-/// The activity constraint is a char-2 parity:
-/// an odd-weight set of round bits satisfies it,
-/// shifts in lockstep and feeds iota the XOR of its
-/// constants. Held by the input-row exactness pin.
+/// An odd-weight set of round bits shifts in lockstep
+/// and feeds iota the XOR of its constants; the
+/// round-bit pins reject it.
 #[test]
 fn odd_weight_schedule_rejected() {
-    assert!(!proves_and_verifies(&subset_schedule(&[0, 5, 9], 15)));
+    assert_short_schedule_rejected(&subset_schedule(&[0, 5, 9], 15));
 }
 
-/// Nothing forces the chain to reach round 23 unless the
-/// terminal constraint pins `next_s_round` on every round row.
+/// The round-bit and selector pins force
+/// the chain to reach round 23.
 #[test]
 fn truncated_schedule_rejected() {
-    assert!(!proves_and_verifies(&subset_schedule(&[0], 5)));
+    assert_short_schedule_rejected(&subset_schedule(&[0], 5));
 }
 
 /// The host reads the block backwards, `f(x)` in
@@ -256,7 +278,12 @@ fn truncated_schedule_rejected() {
 #[test]
 fn backwards_block_rejected() {
     let x = test_input();
-    let (chiplet, y) = chiplet_trace(x, &constant_schedule(&KeccakChiplet::ROUND_CONSTANTS));
+    let (chiplet, y) = chiplet_trace(x, &canonical());
 
-    assert!(!run(y, x, chiplet));
+    let fault = Fault {
+        buses: &[KeccakChiplet::BUS_ID],
+        ..Fault::NONE
+    };
+
+    assert_schedule_rejected(&witness(y, x, chiplet), fault);
 }

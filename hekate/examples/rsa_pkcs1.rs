@@ -10,7 +10,7 @@ use std::time::Instant;
 use clap::Parser;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::Block128;
+use hekate::math::Block256;
 use hekate_gadgets::chiplets::bignum::modexp::LIMBS32;
 use hekate_program::Air;
 use hekate_prover_sys::prove;
@@ -21,7 +21,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const SHA_ROWS: usize = 512;

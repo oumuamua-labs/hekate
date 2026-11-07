@@ -3,24 +3,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::config::Config;
-use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
+use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::{CpuMemColumns, MemoryEvent, RamChiplet, RamColumns, generate_ram_trace};
-use hekate_math::{Bit, Block32, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block32, Block128, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::constraint::ConstraintAst;
-use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::digest::program_id;
-use hekate_program::permutation::{BUS_LIMBS, PermutationCheckSpec};
-use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
+use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::cell::{set_b32, swap_rows};
+use hekate_testkit::fault::{Check, Fault};
+use hekate_testkit::verdict::assert_rejected;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // =================================================================
@@ -28,7 +28,7 @@ type H = DefaultHasher;
 // CPU-only main trace, RAM as independent chiplet.
 // =================================================================
 
-fn ram_test_air(num_rows: usize, num_events: usize) -> CircuitProgram<F> {
+fn ram_test_air(num_rows: usize, first_event: usize, num_events: usize) -> CircuitProgram<F> {
     let mut cx = Circuit::<F>::new("RamTest", num_rows).unwrap();
     let cpu = cx.schema(&CpuMemColumns::build_layout());
 
@@ -37,7 +37,7 @@ fn ram_test_air(num_rows: usize, num_events: usize) -> CircuitProgram<F> {
         FixedShape::Cadence {
             stride: 1,
             count: num_events,
-            origin: 0,
+            origin: first_event,
             values: vec![F::ONE],
         },
     );
@@ -57,72 +57,6 @@ fn ram_test_air(num_rows: usize, num_events: usize) -> CircuitProgram<F> {
 
     cx.compile().unwrap()
 }
-
-// =================================================================
-// Exploit-only AIR:
-// inline merge (no chiplet path)
-// =================================================================
-
-/// This AIR merges RAM columns into the main trace
-/// for exploit testing. Uses virtual layout directly.
-#[derive(Clone)]
-struct RamExploitAir {
-    num_rows: usize,
-    num_events: usize,
-}
-
-impl Air<F> for RamExploitAir {
-    fn num_columns(&self) -> usize {
-        CpuMemColumns::NUM_COLUMNS + RamColumns::NUM_COLUMNS
-    }
-
-    fn column_layout(&self) -> &[ColumnType] {
-        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
-
-        LAYOUT.get_or_init(|| {
-            let mut cols = CpuMemColumns::build_layout();
-            cols.extend(RamColumns::build_layout());
-
-            cols
-        })
-    }
-
-    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        let cpu_spec = RamChiplet::cpu_linking_spec();
-
-        let mut ram_spec = RamChiplet::linking_spec();
-        ram_spec.shift_column_indices(CpuMemColumns::NUM_COLUMNS);
-
-        vec![
-            ("cpu_mem".to_string(), cpu_spec),
-            ("ram_mem".to_string(), ram_spec),
-        ]
-    }
-
-    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
-        vec![
-            FixedColumn::prefix(CpuMemColumns::SELECTOR, self.num_events),
-            FixedColumn::prefix(
-                CpuMemColumns::NUM_COLUMNS + RamColumns::SELECTOR,
-                self.num_events,
-            ),
-        ]
-    }
-
-    fn constraint_ast(&self) -> ConstraintAst<F> {
-        let ast_cs = ConstraintSystem::<F>::new();
-        let mut ast = ast_cs.build();
-
-        let mut ram_ast = RamChiplet::new(self.num_rows, self.num_rows).constraint_ast();
-        ram_ast.arena.shift_cells(CpuMemColumns::NUM_COLUMNS);
-
-        ast.merge(ram_ast);
-
-        ast
-    }
-}
-
-impl Program<F> for RamExploitAir {}
 
 // =================================================================
 // Trace Generation
@@ -192,7 +126,7 @@ fn ram_cpu_linking() {
     ];
 
     // 1. Setup
-    let air = ram_test_air(num_rows, events.len());
+    let air = ram_test_air(num_rows, 0, events.len());
 
     let cpu_trace = generate_cpu_trace(&events, num_rows);
     let ram_trace = generate_ram_trace(&events, num_rows).unwrap();
@@ -238,9 +172,9 @@ fn ram_cpu_linking() {
     // + chiplet LogUp endpoints. Here we
     // just assert the expected layout:
     // one bus on main, one on the RAM chiplet.
-    assert_eq!(proof.main_logup_aux.claimed_sums.len(), BUS_LIMBS);
+    assert_eq!(proof.main_logup_aux.claimed_sums.len(), 1);
     assert_eq!(proof.chiplet_logup_aux.len(), 1);
-    assert_eq!(proof.chiplet_logup_aux[0].claimed_sums.len(), BUS_LIMBS);
+    assert_eq!(proof.chiplet_logup_aux[0].claimed_sums.len(), 1);
 }
 
 // =================================================================
@@ -251,7 +185,7 @@ fn ram_cpu_linking() {
 /// RAM Consistency Bypass
 ///
 /// Scenario:
-/// We manually construct a malicious trace that violates Memory Consistency.
+/// We construct a malicious trace that violates Memory Consistency.
 /// 1. WRITE: Addr 0x10 -> Val 100
 /// 2. READ:  Addr 0x10 -> Val 200 (INCONSISTENCY!)
 ///
@@ -260,152 +194,41 @@ fn ram_cpu_linking() {
 /// constraints catch the inconsistency.
 #[test]
 fn exploit_ram_consistency_bypass() {
-    let num_vars = 3; // 8 rows
-    let num_rows = 1 << num_vars;
-    let seed = [0xAAu8; 32];
+    let num_rows = 8;
 
-    // Define Malicious Events (Impossible sequence)
-    let events = [
+    let written = [
+        MemoryEvent::write(0x10, 0, 100),
+        MemoryEvent::read(0x10, 1, 100),
+    ];
+
+    let forged_events = [
         MemoryEvent::write(0x10, 0, 100),
         MemoryEvent::read(0x10, 1, 200),
     ];
 
-    // A. CPU Trace (Requests the malicious values)
-    let mut cpu_cols: Vec<Vec<F>> = (0..CpuMemColumns::NUM_COLUMNS)
-        .map(|_| vec![F::ZERO; num_rows])
-        .collect();
-
-    for (i, event) in events.iter().enumerate() {
-        let addr_b = event.addr_bytes();
-        let val_b = event.val_bytes();
-
-        // Addr
-        cpu_cols[CpuMemColumns::ADDR_B0][i] = F::from(addr_b[0]);
-        cpu_cols[CpuMemColumns::ADDR_B1][i] = F::from(addr_b[1]);
-        cpu_cols[CpuMemColumns::ADDR_B2][i] = F::from(addr_b[2]);
-        cpu_cols[CpuMemColumns::ADDR_B3][i] = F::from(addr_b[3]);
-
-        // Val
-        cpu_cols[CpuMemColumns::VAL_B0][i] = F::from(val_b[0]);
-        cpu_cols[CpuMemColumns::VAL_B1][i] = F::from(val_b[1]);
-        cpu_cols[CpuMemColumns::VAL_B2][i] = F::from(val_b[2]);
-        cpu_cols[CpuMemColumns::VAL_B3][i] = F::from(val_b[3]);
-
-        // Flags
-        cpu_cols[CpuMemColumns::IS_WRITE][i] = if event.is_write { F::ONE } else { F::ZERO };
-        cpu_cols[CpuMemColumns::SELECTOR][i] = F::ONE;
-    }
-
-    let mut cpu_trace = ColumnTrace::new(num_vars).unwrap();
-    for (i, col) in cpu_cols.into_iter().enumerate() {
-        let t = if i == CpuMemColumns::IS_WRITE || i == CpuMemColumns::SELECTOR {
-            ColumnType::Bit
-        } else {
-            ColumnType::B32
-        };
-
-        cpu_trace
-            .add_column(TraceColumn::from_data(col, t))
-            .unwrap();
-    }
-
-    // B. RAM Trace (Malicious, records inconsistent values)
-    let mut ram_cols: Vec<Vec<F>> = (0..RamColumns::NUM_COLUMNS)
-        .map(|_| vec![F::ZERO; num_rows])
-        .collect();
-
-    for (i, event) in events.iter().enumerate() {
-        let addr_b = event.addr_bytes();
-        let clk_b = event.clk_bytes();
-        let val_b = event.val_bytes();
-
-        // Addr
-        ram_cols[RamColumns::ADDR_B0][i] = F::from(addr_b[0]);
-        ram_cols[RamColumns::ADDR_B1][i] = F::from(addr_b[1]);
-        ram_cols[RamColumns::ADDR_B2][i] = F::from(addr_b[2]);
-        ram_cols[RamColumns::ADDR_B3][i] = F::from(addr_b[3]);
-
-        // Clk
-        ram_cols[RamColumns::CLK_B0][i] = F::from(clk_b[0]);
-        ram_cols[RamColumns::CLK_B1][i] = F::from(clk_b[1]);
-        ram_cols[RamColumns::CLK_B2][i] = F::from(clk_b[2]);
-        ram_cols[RamColumns::CLK_B3][i] = F::from(clk_b[3]);
-
-        // Val
-        ram_cols[RamColumns::VAL_B0][i] = F::from(val_b[0]);
-        ram_cols[RamColumns::VAL_B1][i] = F::from(val_b[1]);
-        ram_cols[RamColumns::VAL_B2][i] = F::from(val_b[2]);
-        ram_cols[RamColumns::VAL_B3][i] = F::from(val_b[3]);
-
-        // Flags
-        ram_cols[RamColumns::IS_WRITE][i] = if event.is_write { F::ONE } else { F::ZERO };
-        ram_cols[RamColumns::SELECTOR][i] = F::ONE;
-    }
-
-    // Build RAM trace using virtual layout types
-    let virtual_layout = RamColumns::build_layout();
-    let mut ram_trace = ColumnTrace::new(num_vars).unwrap();
-
-    for (i, col) in ram_cols.into_iter().enumerate() {
-        ram_trace
-            .add_column(TraceColumn::from_data(col, virtual_layout[i]))
-            .unwrap();
-    }
-
-    // 3. Prove & Verify (RAM as inline, no
-    // chiplet path, uses virtual layout directly).
-    // This exploit test uses the old inline pattern
-    // to inject malicious data. The ram_test_air
-    // for this test merges RAM into main trace.
-    let air = RamExploitAir {
-        num_rows,
-        num_events: events.len(),
-    };
-
-    let mut combined = cpu_trace;
-    for col in ram_trace.into_columns() {
-        combined.add_column(col).unwrap();
-    }
-
+    let air = ram_test_air(num_rows, 0, written.len());
     let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(combined);
 
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        zero_knowledge: false, // No ZK to simplify debugging
-        ..Config::default()
+    let honest = ProgramWitness::new(generate_cpu_trace(&written, num_rows))
+        .with_chiplets(vec![generate_ram_trace(&written, num_rows).unwrap()]);
+
+    let mut ram_trace = generate_ram_trace(&written, num_rows).unwrap();
+    write_ram_value(&mut ram_trace, 1, 200);
+
+    let forged = ProgramWitness::new(generate_cpu_trace(&forged_events, num_rows))
+        .with_chiplets(vec![ram_trace]);
+
+    let fault = Fault {
+        constraint_rows: &[(TableId::Chiplet(0), 0, Some("zero_when"))],
+        ..Fault::NONE
     };
 
-    let proof = prove(
-        b"ExploitTest",
+    assert_rejected(
         &air,
-        &instance,
-        &witness,
-        &config,
-        seed,
-        None,
-    )
-    .expect("Prover should succeed (it simply proves the trace it was given)");
-
-    let mut verifier_transcript = Transcript::<H>::new(b"ExploitTest");
-    let pinned_id = program_id(&air).unwrap();
-
-    let result = HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        &air,
-        &instance,
-        &proof,
-        &mut verifier_transcript,
-        &config,
-    );
-
-    // SECURITY CHECK:
-    // Verification must FAIL, RAM
-    // constraints catch the inconsistency.
-    assert!(
-        result.is_err() || !result.unwrap(),
-        "CRITICAL: Verifier accepted a trace with inconsistent memory reads"
+        (&instance, &honest),
+        (&instance, &forged),
+        fault,
+        &config(),
     );
 }
 
@@ -499,6 +322,25 @@ fn malicious_uninitialised_read_ram_trace(
     tb.build()
 }
 
+fn write_ram_value(trace: &mut ColumnTrace, row: usize, val: u32) {
+    for (j, byte) in val.to_le_bytes().into_iter().enumerate() {
+        set_b32(trace, PHY_VAL_B0 + j, row, byte as u32);
+    }
+
+    set_b32(trace, PHY_VAL_PACKED, row, val);
+    set_b32(trace, PHY_PACK_VAL, row, val);
+}
+
+fn config() -> Config {
+    Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
+        min_security_bits: 0,
+        ..Config::default()
+    }
+}
+
 fn cpu_trace_one_read(addr: u32, val: u32, read_row: usize, num_rows: usize) -> ColumnTrace {
     let num_vars = num_rows.trailing_zeros() as usize;
     let mut tb = TraceBuilder::new(&CpuMemColumns::build_layout(), num_vars).unwrap();
@@ -533,53 +375,49 @@ fn cpu_trace_one_read(addr: u32, val: u32, read_row: usize, num_rows: usize) -> 
 fn exploit_ram_uninitialised_read_via_q_last_chain() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
-    let seed = [0xAAu8; 32];
 
     let addr: u32 = 0x42;
     let clk_real: u32 = 1;
     let val: u32 = 0xDEAD_BEEF;
+    let read_row = clk_real as usize;
 
-    let air = ram_test_air(num_rows, 1);
-    let cpu_trace = cpu_trace_one_read(addr, val, clk_real as usize, num_rows);
-    let ram_trace = malicious_uninitialised_read_ram_trace(addr, clk_real, val, num_rows);
-
+    let air = ram_test_air(num_rows, read_row, 1);
     let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![ram_trace]);
 
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        zero_knowledge: false,
-        ..Config::default()
+    let fresh_read = [MemoryEvent::read(addr, clk_real, 0)];
+    let honest = ProgramWitness::new(cpu_trace_one_read(addr, 0, read_row, num_rows))
+        .with_chiplets(vec![generate_ram_trace(&fresh_read, num_rows).unwrap()]);
+
+    let forged = ProgramWitness::new(cpu_trace_one_read(addr, val, read_row, num_rows))
+        .with_chiplets(vec![malicious_uninitialised_read_ram_trace(
+            addr, clk_real, val, num_rows,
+        )]);
+
+    let chiplet = TableId::Chiplet(0);
+    let last = num_rows - 1;
+
+    let fault = Fault {
+        constraint_rows: &[
+            (chiplet, 0, None),
+            (chiplet, 0, None),
+            (chiplet, 0, None),
+            (chiplet, 0, None),
+            (chiplet, last, None),
+        ],
+        pin_cells: &[
+            (chiplet, RamColumns::Q_FIRST, 0),
+            (chiplet, RamColumns::Q_STEP, last),
+        ],
+        first_check: Some(Check::Zerocheck),
+        ..Fault::NONE
     };
 
-    let proof = prove(
-        b"QLastExploit",
+    assert_rejected(
         &air,
-        &instance,
-        &witness,
-        &config,
-        seed,
-        None,
-    )
-    .expect("Prover accepts the malicious trace (all AIR identities pass under q_last ≡ 0)");
-
-    let mut verifier_transcript = Transcript::<H>::new(b"QLastExploit");
-    let pinned_id = program_id(&air).unwrap();
-
-    let result = HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        &air,
-        &instance,
-        &proof,
-        &mut verifier_transcript,
-        &config,
-    );
-
-    assert!(
-        result.is_err() || !result.unwrap(),
-        "CRITICAL: verifier accepted a RAM trace with q_last ≡ 0, exfiltrating \
-         val=0x{val:08X} from uninitialised addr=0x{addr:X}"
+        (&instance, &honest),
+        (&instance, &forged),
+        fault,
+        &config(),
     );
 }
 
@@ -587,15 +425,17 @@ fn exploit_ram_uninitialised_read_via_q_last_chain() {
 fn exploit_ram_clock_out_of_order() {
     let num_vars = 3;
     let num_rows = 1 << num_vars;
-    let seed = [0xAAu8; 32];
 
     let events = vec![
         MemoryEvent::write(0x1000, 0, 42),
         MemoryEvent::write(0x1000, 1, 7),
     ];
 
-    let air = ram_test_air(num_rows, events.len());
+    let air = ram_test_air(num_rows, 0, events.len());
     let cpu_trace = generate_cpu_trace(&events, num_rows);
+
+    let honest = ProgramWitness::new(cpu_trace.clone())
+        .with_chiplets(vec![generate_ram_trace(&events, num_rows).unwrap()]);
 
     let mut ram_trace = generate_ram_trace(&events, num_rows).unwrap();
 
@@ -604,69 +444,30 @@ fn exploit_ram_clock_out_of_order() {
         .chain([PHY_VAL_PACKED, PHY_PACK_VAL]);
 
     for col in traded {
-        match &mut ram_trace.columns[col] {
-            TraceColumn::B32(data) => data.swap(0, 1),
-            _ => panic!("expected B32 column at {col}"),
-        }
+        swap_rows(&mut ram_trace, col, 0, 1);
     }
 
     // pack_sort for the descending pair:
     // DIFF_BYTE_IDX[7]=1 (CLK_B0 slot), DIFF_BIT_IDX[0]=1,
     // a_decomp = next CLK_B0 = 0, b_decomp = curr CLK_B0 = 1.
     let pack_sort = (1u32 << 7) | (1 << 8) | (1 << 24);
-
-    match &mut ram_trace.columns[PHY_PACK_SORT] {
-        TraceColumn::B32(data) => data[0] = Block32::from(pack_sort).to_hardware(),
-        _ => panic!("expected B32 column at PHY_PACK_SORT"),
-    }
+    set_b32(&mut ram_trace, PHY_PACK_SORT, 0, pack_sort);
 
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![ram_trace]);
 
-    let report = preflight(&air, &instance, &witness).unwrap();
-
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(!report.constraint_violations.is_empty());
-    assert!(
-        report
-            .constraint_violations
-            .iter()
-            .all(|v| v.table == preflight::TableId::Chiplet(0) && v.row_idx == 0)
-    );
-
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        zero_knowledge: false,
-        ..Config::default()
+    let fault = Fault {
+        constraint_rows: &[(TableId::Chiplet(0), 0, Some("zero_when"))],
+        ..Fault::NONE
     };
 
-    let proof = prove(
-        b"ClockOrderExploit",
+    assert_rejected(
         &air,
-        &instance,
-        &witness,
-        &config,
-        seed,
-        None,
-    )
-    .expect("Prover should succeed (it simply proves the trace it was given)");
-
-    let mut verifier_transcript = Transcript::<H>::new(b"ClockOrderExploit");
-    let pinned_id = program_id(&air).unwrap();
-
-    let result = HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        &air,
-        &instance,
-        &proof,
-        &mut verifier_transcript,
-        &config,
+        (&instance, &honest),
+        (&instance, &witness),
+        fault,
+        &config(),
     );
-
-    assert!(result.is_err() || !result.unwrap());
 }
 
 #[test]
@@ -681,7 +482,7 @@ fn scribble_ram_flip_selector_caught() {
         MemoryEvent::read(0x2000, 3, 99),
     ];
 
-    let air = ram_test_air(num_rows, events.len());
+    let air = ram_test_air(num_rows, 0, events.len());
     let cpu_trace = generate_cpu_trace(&events, num_rows);
     let ram_trace = generate_ram_trace(&events, num_rows).unwrap();
 

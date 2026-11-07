@@ -22,7 +22,7 @@ pub fn serialize_proof<'a, F: TowerField>(
     proof: &InnerProof<F>,
 ) -> flatbuffers::WIPOffset<fb::Proof<'a>> {
     let trace_root = fbb.create_vector(&proof.trace_root);
-    let h_root = proof.h_root.map(|r| fbb.create_vector(&r));
+    let h_root = proof.h_root.as_ref().map(|r| fbb.create_vector(r));
     let zc = serialize_sumcheck(fbb, &proof.zerocheck_proof);
     let mla = serialize_logup_aux(fbb, &proof.main_logup_aux);
     let mpe = serialize_point_evaluation(fbb, &proof.main_point_evaluation);
@@ -52,7 +52,7 @@ pub fn serialize_proof<'a, F: TowerField>(
         .collect();
     let cpe = fbb.create_vector(&cpe_offsets);
 
-    let pad_root = proof.pad_root.map(|r| fbb.create_vector(&r));
+    let pad_root = proof.pad_root.as_ref().map(|r| fbb.create_vector(r));
     let outer = proof.outer.as_ref().map(|o| serialize_outer(fbb, o));
 
     fb::Proof::create(
@@ -81,11 +81,7 @@ fn serialize_outer_opening<'a, F: TowerField>(
 ) -> flatbuffers::WIPOffset<fb::OuterOpening<'a>> {
     let columns = fbb.create_vector(&opening.columns);
 
-    let values: Vec<fb::Block128> = opening
-        .values
-        .iter()
-        .map(|f| block128_from_field(f))
-        .collect();
+    let values: Vec<fb::Block256> = opening.values.iter().map(|f| block_from_field(f)).collect();
     let values = fbb.create_vector(&values);
     let multiproof = serialize_multiproof(fbb, &opening.multiproof);
 
@@ -103,8 +99,8 @@ fn serialize_multiproof<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
     multiproof: &Multiproof,
 ) -> flatbuffers::WIPOffset<fb::Multiproof<'a>> {
-    let siblings = fbb.create_vector(multiproof.siblings.as_flattened());
-    let unreached = fbb.create_vector(multiproof.unreached.as_flattened());
+    let siblings = fbb.create_vector(&multiproof.siblings);
+    let unreached = fbb.create_vector(&multiproof.unreached);
 
     fb::Multiproof::create(
         fbb,
@@ -122,7 +118,7 @@ fn serialize_outer<'a, F: TowerField>(
     let aux_root = fbb.create_vector(&outer.aux_root);
 
     let field_vec = |fbb: &mut FlatBufferBuilder<'a>, values: &[F]| {
-        let blocks: Vec<fb::Block128> = values.iter().map(|f| block128_from_field(f)).collect();
+        let blocks: Vec<fb::Block256> = values.iter().map(|f| block_from_field(f)).collect();
 
         fbb.create_vector(&blocks)
     };
@@ -164,10 +160,9 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
         return Err(wire_err("proof wire format version mismatch"));
     }
 
-    let trace_root = deserialize_root(fb_proof.trace_root(), "trace_root must be 32 bytes")?
-        .ok_or(wire_err("missing trace_root"))?;
-
-    let h_root = deserialize_root(fb_proof.h_root(), "h_root must be 32 bytes")?;
+    let trace_root =
+        deserialize_bytes(fb_proof.trace_root()).ok_or(wire_err("missing trace_root"))?;
+    let h_root = deserialize_bytes(fb_proof.h_root());
 
     let zerocheck_proof = fb_proof
         .zerocheck_proof()
@@ -237,7 +232,7 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
         None => Vec::new(),
     };
 
-    let pad_root = deserialize_root(fb_proof.pad_root(), "pad_root must be 32 bytes")?;
+    let pad_root = deserialize_bytes(fb_proof.pad_root());
 
     let outer = fb_proof
         .outer()
@@ -261,13 +256,13 @@ pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
 }
 
 fn deserialize_field_vec<F: TowerField>(
-    v: Option<flatbuffers::Vector<'_, fb::Block128>>,
+    v: Option<flatbuffers::Vector<'_, fb::Block256>>,
 ) -> Result<Vec<F>> {
     match v {
         Some(v) => {
             let mut out = Vec::with_capacity(v.len());
             for i in 0..v.len() {
-                out.push(field_from_block128::<F>(*v.get(i))?);
+                out.push(field_from_block::<F>(*v.get(i))?);
             }
 
             Ok(out)
@@ -276,35 +271,8 @@ fn deserialize_field_vec<F: TowerField>(
     }
 }
 
-fn deserialize_hashes(
-    data: Option<flatbuffers::Vector<'_, u8>>,
-    what: &'static str,
-) -> Result<Vec<[u8; 32]>> {
-    match data {
-        Some(data) => {
-            let bytes = data.bytes();
-            if !bytes.len().is_multiple_of(32) {
-                return Err(wire_err(what));
-            }
-
-            Ok(bytes.as_chunks::<32>().0.to_vec())
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-fn deserialize_root(
-    bytes: Option<flatbuffers::Vector<'_, u8>>,
-    message: &'static str,
-) -> Result<Option<[u8; 32]>> {
-    match bytes {
-        None => Ok(None),
-        Some(bytes) => {
-            let root: [u8; 32] = bytes.bytes().try_into().map_err(|_| wire_err(message))?;
-
-            Ok(Some(root))
-        }
-    }
+fn deserialize_bytes(data: Option<flatbuffers::Vector<'_, u8>>) -> Option<Vec<u8>> {
+    data.map(|data| data.bytes().to_vec())
 }
 
 fn deserialize_outer_opening<F: TowerField>(fb: fb::OuterOpening<'_>) -> Result<OuterOpening<F>> {
@@ -324,27 +292,13 @@ fn deserialize_multiproof(fb: Option<fb::Multiproof<'_>>) -> Result<Multiproof> 
     let fb = fb.ok_or(wire_err("missing multiproof"))?;
 
     Ok(Multiproof {
-        siblings: deserialize_hashes(
-            fb.siblings(),
-            "multiproof siblings length not a multiple of 32",
-        )?,
-        unreached: deserialize_hashes(
-            fb.unreached(),
-            "multiproof unreached length not a multiple of 32",
-        )?,
+        siblings: deserialize_bytes(fb.siblings()).unwrap_or_default(),
+        unreached: deserialize_bytes(fb.unreached()).unwrap_or_default(),
     })
 }
 
 fn deserialize_outer<F: TowerField>(fb: fb::OuterProof<'_>) -> Result<OuterProof<F>> {
-    let aux_root = match fb.aux_root() {
-        Some(bytes) if bytes.len() == 32 => {
-            let mut root = [0u8; 32];
-            root.copy_from_slice(bytes.bytes());
-
-            root
-        }
-        _ => return Err(wire_err("outer aux_root must be 32 bytes")),
-    };
+    let aux_root = deserialize_bytes(fb.aux_root()).ok_or(wire_err("missing outer aux_root"))?;
 
     let pad_opening = fb
         .pad_opening()
@@ -368,20 +322,21 @@ fn deserialize_outer<F: TowerField>(fb: fb::OuterProof<'_>) -> Result<OuterProof
     })
 }
 
-fn block128_from_field<F: TowerField>(f: &F) -> fb::Block128 {
-    let (lo, hi) = super::field::field_to_lo_hi(f);
-    fb::Block128::new(lo, hi)
+fn block_from_field<F: TowerField>(f: &F) -> fb::Block256 {
+    let [w0, w1, w2, w3] = super::field::field_to_words(f);
+
+    fb::Block256::new(w0, w1, w2, w3)
 }
 
-fn field_from_block128<F: TowerField>(block: fb::Block128) -> Result<F> {
-    super::field::lo_hi_to_field(block.lo(), block.hi())
+fn field_from_block<F: TowerField>(block: fb::Block256) -> Result<F> {
+    super::field::words_to_field([block.w0(), block.w1(), block.w2(), block.w3()])
 }
 
 fn serialize_univariate<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     poly: &UnivariatePoly<F>,
 ) -> flatbuffers::WIPOffset<fb::UnivariatePoly<'a>> {
-    let coeffs: Vec<fb::Block128> = poly.evals.iter().map(|c| block128_from_field(c)).collect();
+    let coeffs: Vec<fb::Block256> = poly.evals.iter().map(|c| block_from_field(c)).collect();
     let vec = fbb.create_vector(&coeffs);
 
     fb::UnivariatePoly::create(
@@ -402,13 +357,17 @@ fn serialize_sumcheck<'a, F: TowerField>(
         .map(|rp| serialize_univariate(fbb, rp))
         .collect();
     let rounds = fbb.create_vector(&round_offsets);
-    let eval = block128_from_field(&proof.claimed_evaluation);
+    let eval = block_from_field(&proof.claimed_evaluation);
+
+    let skip_values: Vec<fb::Block256> = proof.skip.iter().map(block_from_field).collect();
+    let skip = fbb.create_vector(&skip_values);
 
     fb::SumcheckProof::create(
         fbb,
         &fb::SumcheckProofArgs {
             round_polys: Some(rounds),
             claimed_evaluation: Some(&eval),
+            skip: Some(skip),
         },
     )
 }
@@ -437,7 +396,7 @@ fn serialize_fold_eval<'a, F: TowerField>(
     let masters = serialize_field_vec(fbb, &proof.masters);
     let mask_masters = serialize_field_vec(fbb, &proof.mask_masters);
     let fold_rounds = serialize_field_vec(fbb, &proof.fold_rounds);
-    let round_roots = fbb.create_vector(proof.round_roots.as_flattened());
+    let round_roots = fbb.create_vector(&proof.round_roots);
     let final_layer = serialize_field_vec(fbb, &proof.final_layer);
 
     let opening_offsets: Vec<_> = proof
@@ -465,8 +424,8 @@ fn serialize_fold_eval<'a, F: TowerField>(
 fn serialize_field_vec<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     values: &[F],
-) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, fb::Block128>> {
-    let blocks: Vec<fb::Block128> = values.iter().map(block128_from_field).collect();
+) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, fb::Block256>> {
+    let blocks: Vec<fb::Block256> = values.iter().map(block_from_field).collect();
 
     fbb.create_vector(&blocks)
 }
@@ -475,10 +434,10 @@ fn serialize_point_evaluation<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     (point, vals): &(Vec<F>, Vec<F>),
 ) -> flatbuffers::WIPOffset<fb::PointEvaluation<'a>> {
-    let pt: Vec<fb::Block128> = point.iter().map(|f| block128_from_field(f)).collect();
+    let pt: Vec<fb::Block256> = point.iter().map(|f| block_from_field(f)).collect();
     let pt_vec = fbb.create_vector(&pt);
 
-    let cv: Vec<fb::Block128> = vals.iter().map(|f| block128_from_field(f)).collect();
+    let cv: Vec<fb::Block256> = vals.iter().map(|f| block_from_field(f)).collect();
     let cv_vec = fbb.create_vector(&cv);
 
     fb::PointEvaluation::create(
@@ -494,14 +453,14 @@ fn serialize_logup_aux<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     aux: &LogUpAux<F>,
 ) -> flatbuffers::WIPOffset<fb::LogUpAux<'a>> {
-    let hv: Vec<fb::Block128> = aux.h_evals.iter().map(|f| block128_from_field(f)).collect();
+    let hv: Vec<fb::Block256> = aux.h_evals.iter().map(|f| block_from_field(f)).collect();
 
     let h_evals = fbb.create_vector(&hv);
 
-    let cv: Vec<fb::Block128> = aux
+    let cv: Vec<fb::Block256> = aux
         .claimed_sums
         .iter()
-        .map(|f| block128_from_field(f))
+        .map(|f| block_from_field(f))
         .collect();
 
     let claimed_sums = fbb.create_vector(&cv);
@@ -529,11 +488,20 @@ fn deserialize_sumcheck<F: TowerField>(fb: fb::SumcheckProof<'_>) -> Result<Sumc
     };
 
     let claimed_evaluation = match fb.claimed_evaluation() {
-        Some(b) => field_from_block128::<F>(*b)?,
+        Some(b) => field_from_block::<F>(*b)?,
         None => F::ZERO,
     };
 
+    let skip = match fb.skip() {
+        Some(values) => values
+            .iter()
+            .map(|b| field_from_block::<F>(*b))
+            .collect::<Result<Vec<F>>>()?,
+        None => Vec::new(),
+    };
+
     Ok(SumcheckProof {
+        skip,
         round_polys,
         claimed_evaluation,
     })
@@ -544,7 +512,7 @@ fn deserialize_univariate<F: TowerField>(fb: fb::UnivariatePoly<'_>) -> Result<U
         Some(v) => {
             let mut c = Vec::with_capacity(v.len());
             for i in 0..v.len() {
-                c.push(field_from_block128::<F>(*v.get(i))?);
+                c.push(field_from_block::<F>(*v.get(i))?);
             }
 
             c
@@ -579,10 +547,7 @@ fn deserialize_fold_eval<F: TowerField>(fb: fb::FoldEvalProof<'_>) -> Result<Fol
         masters: deserialize_field_vec::<F>(fb.masters())?,
         mask_masters: deserialize_field_vec::<F>(fb.mask_masters())?,
         fold_rounds: deserialize_field_vec::<F>(fb.fold_rounds())?,
-        round_roots: deserialize_hashes(
-            fb.round_roots(),
-            "round_roots length not a multiple of 32",
-        )?,
+        round_roots: deserialize_bytes(fb.round_roots()).unwrap_or_default(),
         final_layer: deserialize_field_vec::<F>(fb.final_layer())?,
         openings,
     })
@@ -641,19 +606,37 @@ mod tests {
     }
 
     #[test]
-    fn trace_root_of_wrong_length_rejected() {
-        let rejected = |len: usize| {
-            matches!(
+    fn trace_root_of_any_width_passes_the_codec() {
+        for len in [32usize, 64] {
+            assert!(matches!(
                 proof_with_trace_root(&vec![7u8; len]),
                 Err(Error::Protocol {
-                    message: "trace_root must be 32 bytes",
+                    message: "missing zerocheck_proof",
                     ..
                 })
-            )
-        };
+            ));
+        }
+    }
 
-        assert!(rejected(31));
-        assert!(rejected(33));
-        assert!(!rejected(32));
+    #[test]
+    fn missing_trace_root_rejected() {
+        let mut fbb = FlatBufferBuilder::new();
+        let proof = fb::Proof::create(
+            &mut fbb,
+            &fb::ProofArgs {
+                version: WIRE_PROOF_VERSION,
+                ..Default::default()
+            },
+        );
+
+        fbb.finish_minimal(proof);
+
+        assert!(matches!(
+            deserialize_proof::<Block128>(fbb.finished_data()),
+            Err(Error::Protocol {
+                message: "missing trace_root",
+                ..
+            })
+        ));
     }
 }

@@ -833,46 +833,48 @@ pub mod hekate {
         }
 
         impl ::flatbuffers::SimpleToVerifyInSlice for FixedShapeKind {}
-        // struct Block128, aligned to 8
+        // struct Block256, aligned to 8
         #[repr(transparent)]
         #[derive(Clone, Copy, PartialEq)]
-        pub struct Block128(pub [u8; 16]);
-        impl Default for Block128 {
+        pub struct Block256(pub [u8; 32]);
+        impl Default for Block256 {
             fn default() -> Self {
-                Self([0; 16])
+                Self([0; 32])
             }
         }
-        impl ::core::fmt::Debug for Block128 {
+        impl ::core::fmt::Debug for Block256 {
             fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-                f.debug_struct("Block128")
-                    .field("lo", &self.lo())
-                    .field("hi", &self.hi())
+                f.debug_struct("Block256")
+                    .field("w0", &self.w0())
+                    .field("w1", &self.w1())
+                    .field("w2", &self.w2())
+                    .field("w3", &self.w3())
                     .finish()
             }
         }
 
-        impl ::flatbuffers::SimpleToVerifyInSlice for Block128 {}
-        impl<'a> ::flatbuffers::Follow<'a> for Block128 {
-            type Inner = &'a Block128;
+        impl ::flatbuffers::SimpleToVerifyInSlice for Block256 {}
+        impl<'a> ::flatbuffers::Follow<'a> for Block256 {
+            type Inner = &'a Block256;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                unsafe { <&'a Block128>::follow(buf, loc) }
+                unsafe { <&'a Block256>::follow(buf, loc) }
             }
         }
-        impl<'a> ::flatbuffers::Follow<'a> for &'a Block128 {
-            type Inner = &'a Block128;
+        impl<'a> ::flatbuffers::Follow<'a> for &'a Block256 {
+            type Inner = &'a Block256;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                unsafe { ::flatbuffers::follow_cast_ref::<Block128>(buf, loc) }
+                unsafe { ::flatbuffers::follow_cast_ref::<Block256>(buf, loc) }
             }
         }
-        impl<'b> ::flatbuffers::Push for Block128 {
-            type Output = Block128;
+        impl<'b> ::flatbuffers::Push for Block256 {
+            type Output = Block256;
             #[inline]
             unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
                 let src = unsafe {
                     ::core::slice::from_raw_parts(
-                        self as *const Block128 as *const u8,
+                        self as *const Block256 as *const u8,
                         <Self as ::flatbuffers::Push>::size(),
                     )
                 };
@@ -884,7 +886,7 @@ pub mod hekate {
             }
         }
 
-        impl<'a> ::flatbuffers::Verifiable for Block128 {
+        impl<'a> ::flatbuffers::Verifiable for Block256 {
             #[inline]
             fn run_verifier(
                 v: &mut ::flatbuffers::Verifier,
@@ -894,16 +896,18 @@ pub mod hekate {
             }
         }
 
-        impl<'a> Block128 {
+        impl<'a> Block256 {
             #[allow(clippy::too_many_arguments)]
-            pub fn new(lo: u64, hi: u64) -> Self {
-                let mut s = Self([0; 16]);
-                s.set_lo(lo);
-                s.set_hi(hi);
+            pub fn new(w0: u64, w1: u64, w2: u64, w3: u64) -> Self {
+                let mut s = Self([0; 32]);
+                s.set_w0(w0);
+                s.set_w1(w1);
+                s.set_w2(w2);
+                s.set_w3(w3);
                 s
             }
 
-            pub fn lo(&self) -> u64 {
+            pub fn w0(&self) -> u64 {
                 let mut mem = ::core::mem::MaybeUninit::<
                     <u64 as ::flatbuffers::EndianScalar>::Scalar,
                 >::uninit();
@@ -920,7 +924,7 @@ pub mod hekate {
                 })
             }
 
-            pub fn set_lo(&mut self, x: u64) {
+            pub fn set_w0(&mut self, x: u64) {
                 let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
                 // Safety:
                 // Created from a valid Table for this object
@@ -934,7 +938,7 @@ pub mod hekate {
                 }
             }
 
-            pub fn hi(&self) -> u64 {
+            pub fn w1(&self) -> u64 {
                 let mut mem = ::core::mem::MaybeUninit::<
                     <u64 as ::flatbuffers::EndianScalar>::Scalar,
                 >::uninit();
@@ -951,7 +955,7 @@ pub mod hekate {
                 })
             }
 
-            pub fn set_hi(&mut self, x: u64) {
+            pub fn set_w1(&mut self, x: u64) {
                 let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
                 // Safety:
                 // Created from a valid Table for this object
@@ -960,6 +964,68 @@ pub mod hekate {
                     ::core::ptr::copy_nonoverlapping(
                         &x_le as *const _ as *const u8,
                         self.0[8..].as_mut_ptr(),
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                }
+            }
+
+            pub fn w2(&self) -> u64 {
+                let mut mem = ::core::mem::MaybeUninit::<
+                    <u64 as ::flatbuffers::EndianScalar>::Scalar,
+                >::uninit();
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        self.0[16..].as_ptr(),
+                        mem.as_mut_ptr() as *mut u8,
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                    mem.assume_init()
+                })
+            }
+
+            pub fn set_w2(&mut self, x: u64) {
+                let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        &x_le as *const _ as *const u8,
+                        self.0[16..].as_mut_ptr(),
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                }
+            }
+
+            pub fn w3(&self) -> u64 {
+                let mut mem = ::core::mem::MaybeUninit::<
+                    <u64 as ::flatbuffers::EndianScalar>::Scalar,
+                >::uninit();
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        self.0[24..].as_ptr(),
+                        mem.as_mut_ptr() as *mut u8,
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                    mem.assume_init()
+                })
+            }
+
+            pub fn set_w3(&mut self, x: u64) {
+                let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        &x_le as *const _ as *const u8,
+                        self.0[24..].as_mut_ptr(),
                         ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
                     );
                 }
@@ -1059,11 +1125,11 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn const_value(&self) -> Option<&'a Block128> {
+            pub fn const_value(&self) -> Option<&'a Block256> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
-                unsafe { self._tab.get::<Block128>(AstNode::VT_CONST_VALUE, None) }
+                unsafe { self._tab.get::<Block256>(AstNode::VT_CONST_VALUE, None) }
             }
             #[inline]
             pub fn left(&self) -> u32 {
@@ -1093,11 +1159,11 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn scalar(&self) -> Option<&'a Block128> {
+            pub fn scalar(&self) -> Option<&'a Block256> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
-                unsafe { self._tab.get::<Block128>(AstNode::VT_SCALAR, None) }
+                unsafe { self._tab.get::<Block256>(AstNode::VT_SCALAR, None) }
             }
         }
 
@@ -1111,7 +1177,7 @@ pub mod hekate {
                     .visit_field::<NodeTag>("tag", Self::VT_TAG, false)?
                     .visit_field::<u32>("col_index", Self::VT_COL_INDEX, false)?
                     .visit_field::<bool>("next_row", Self::VT_NEXT_ROW, false)?
-                    .visit_field::<Block128>("const_value", Self::VT_CONST_VALUE, false)?
+                    .visit_field::<Block256>("const_value", Self::VT_CONST_VALUE, false)?
                     .visit_field::<u32>("left", Self::VT_LEFT, false)?
                     .visit_field::<u32>("right", Self::VT_RIGHT, false)?
                     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u32>>>(
@@ -1119,7 +1185,7 @@ pub mod hekate {
                         Self::VT_SUM_CHILDREN,
                         false,
                     )?
-                    .visit_field::<Block128>("scalar", Self::VT_SCALAR, false)?
+                    .visit_field::<Block256>("scalar", Self::VT_SCALAR, false)?
                     .finish();
                 Ok(())
             }
@@ -1128,11 +1194,11 @@ pub mod hekate {
             pub tag: NodeTag,
             pub col_index: u32,
             pub next_row: bool,
-            pub const_value: Option<&'a Block128>,
+            pub const_value: Option<&'a Block256>,
             pub left: u32,
             pub right: u32,
             pub sum_children: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
-            pub scalar: Option<&'a Block128>,
+            pub scalar: Option<&'a Block256>,
         }
         impl<'a> Default for AstNodeArgs<'a> {
             #[inline]
@@ -1171,9 +1237,9 @@ pub mod hekate {
                     .push_slot::<bool>(AstNode::VT_NEXT_ROW, next_row, false);
             }
             #[inline]
-            pub fn add_const_value(&mut self, const_value: &Block128) {
+            pub fn add_const_value(&mut self, const_value: &Block256) {
                 self.fbb_
-                    .push_slot_always::<&Block128>(AstNode::VT_CONST_VALUE, const_value);
+                    .push_slot_always::<&Block256>(AstNode::VT_CONST_VALUE, const_value);
             }
             #[inline]
             pub fn add_left(&mut self, left: u32) {
@@ -1194,9 +1260,9 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_scalar(&mut self, scalar: &Block128) {
+            pub fn add_scalar(&mut self, scalar: &Block256) {
                 self.fbb_
-                    .push_slot_always::<&Block128>(AstNode::VT_SCALAR, scalar);
+                    .push_slot_always::<&Block256>(AstNode::VT_SCALAR, scalar);
             }
             #[inline]
             pub fn new(
@@ -1529,13 +1595,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn constant_value(&self) -> Option<&'a Block128> {
+            pub fn constant_value(&self) -> Option<&'a Block256> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<Block128>(BoundaryConstraint::VT_CONSTANT_VALUE, None)
+                        .get::<Block256>(BoundaryConstraint::VT_CONSTANT_VALUE, None)
                 }
             }
         }
@@ -1551,7 +1617,7 @@ pub mod hekate {
                     .visit_field::<u64>("row_idx", Self::VT_ROW_IDX, false)?
                     .visit_field::<BoundaryTargetKind>("kind", Self::VT_KIND, false)?
                     .visit_field::<u32>("public_input_idx", Self::VT_PUBLIC_INPUT_IDX, false)?
-                    .visit_field::<Block128>("constant_value", Self::VT_CONSTANT_VALUE, false)?
+                    .visit_field::<Block256>("constant_value", Self::VT_CONSTANT_VALUE, false)?
                     .finish();
                 Ok(())
             }
@@ -1561,7 +1627,7 @@ pub mod hekate {
             pub row_idx: u64,
             pub kind: BoundaryTargetKind,
             pub public_input_idx: u32,
-            pub constant_value: Option<&'a Block128>,
+            pub constant_value: Option<&'a Block256>,
         }
         impl<'a> Default for BoundaryConstraintArgs<'a> {
             #[inline]
@@ -1608,8 +1674,8 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_constant_value(&mut self, constant_value: &Block128) {
-                self.fbb_.push_slot_always::<&Block128>(
+            pub fn add_constant_value(&mut self, constant_value: &Block256) {
+                self.fbb_.push_slot_always::<&Block256>(
                     BoundaryConstraint::VT_CONSTANT_VALUE,
                     constant_value,
                 );
@@ -1742,11 +1808,11 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn constant_value(&self) -> Option<&'a Block128> {
+            pub fn constant_value(&self) -> Option<&'a Block256> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
-                unsafe { self._tab.get::<Block128>(Source::VT_CONSTANT_VALUE, None) }
+                unsafe { self._tab.get::<Block256>(Source::VT_CONSTANT_VALUE, None) }
             }
             #[inline]
             pub fn side(&self) -> EmitSide {
@@ -1776,7 +1842,7 @@ pub mod hekate {
                         false,
                     )?
                     .visit_field::<u32>("byte_index", Self::VT_BYTE_INDEX, false)?
-                    .visit_field::<Block128>("constant_value", Self::VT_CONSTANT_VALUE, false)?
+                    .visit_field::<Block256>("constant_value", Self::VT_CONSTANT_VALUE, false)?
                     .visit_field::<EmitSide>("side", Self::VT_SIDE, false)?
                     .finish();
                 Ok(())
@@ -1787,7 +1853,7 @@ pub mod hekate {
             pub column_index: u32,
             pub column_indices: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
             pub byte_index: u32,
-            pub constant_value: Option<&'a Block128>,
+            pub constant_value: Option<&'a Block256>,
             pub side: EmitSide,
         }
         impl<'a> Default for SourceArgs<'a> {
@@ -1835,9 +1901,9 @@ pub mod hekate {
                     .push_slot::<u32>(Source::VT_BYTE_INDEX, byte_index, 0);
             }
             #[inline]
-            pub fn add_constant_value(&mut self, constant_value: &Block128) {
+            pub fn add_constant_value(&mut self, constant_value: &Block256) {
                 self.fbb_
-                    .push_slot_always::<&Block128>(Source::VT_CONSTANT_VALUE, constant_value);
+                    .push_slot_always::<&Block256>(Source::VT_CONSTANT_VALUE, constant_value);
             }
             #[inline]
             pub fn add_side(&mut self, side: EmitSide) {
@@ -2851,13 +2917,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn values(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn values(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             CadenceSegment::VT_VALUES,
                             None,
                         )
@@ -2875,7 +2941,7 @@ pub mod hekate {
      .visit_field::<u64>("stride", Self::VT_STRIDE, false)?
      .visit_field::<u64>("count", Self::VT_COUNT, false)?
      .visit_field::<u64>("origin", Self::VT_ORIGIN, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("values", Self::VT_VALUES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("values", Self::VT_VALUES, false)?
      .finish();
                 Ok(())
             }
@@ -2884,7 +2950,7 @@ pub mod hekate {
             pub stride: u64,
             pub count: u64,
             pub origin: u64,
-            pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
         }
         impl<'a> Default for CadenceSegmentArgs<'a> {
             #[inline]
@@ -2921,7 +2987,7 @@ pub mod hekate {
             #[inline]
             pub fn add_values(
                 &mut self,
-                values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     CadenceSegment::VT_VALUES,
@@ -3071,13 +3137,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn values(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn values(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             FixedColumn::VT_VALUES,
                             None,
                         )
@@ -3097,13 +3163,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn sparse_values(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn sparse_values(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             FixedColumn::VT_SPARSE_VALUES,
                             None,
                         )
@@ -3169,9 +3235,9 @@ pub mod hekate {
      .visit_field::<FixedShapeKind>("kind", Self::VT_KIND, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("custom_bits", Self::VT_CUSTOM_BITS, false)?
      .visit_field::<u32>("period", Self::VT_PERIOD, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("values", Self::VT_VALUES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("values", Self::VT_VALUES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("sparse_rows", Self::VT_SPARSE_ROWS, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("sparse_values", Self::VT_SPARSE_VALUES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("sparse_values", Self::VT_SPARSE_VALUES, false)?
      .visit_field::<u64>("stride", Self::VT_STRIDE, false)?
      .visit_field::<u64>("count", Self::VT_COUNT, false)?
      .visit_field::<u64>("origin", Self::VT_ORIGIN, false)?
@@ -3185,10 +3251,10 @@ pub mod hekate {
             pub kind: FixedShapeKind,
             pub custom_bits: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
             pub period: u32,
-            pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub sparse_rows: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
             pub sparse_values:
-                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub stride: u64,
             pub count: u64,
             pub origin: u64,
@@ -3253,7 +3319,7 @@ pub mod hekate {
             #[inline]
             pub fn add_values(
                 &mut self,
-                values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     FixedColumn::VT_VALUES,
@@ -3273,7 +3339,7 @@ pub mod hekate {
             #[inline]
             pub fn add_sparse_values(
                 &mut self,
-                sparse_values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                sparse_values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     FixedColumn::VT_SPARSE_VALUES,
@@ -4781,13 +4847,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn public_inputs(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn public_inputs(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             ProgramBundle::VT_PUBLIC_INPUTS,
                             None,
                         )
@@ -4856,7 +4922,7 @@ pub mod hekate {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ChipletDef>>>>("inline_chiplets", Self::VT_INLINE_CHIPLETS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<InlineKernelHint>>>>("inline_chiplet_kernels", Self::VT_INLINE_CHIPLET_KERNELS, false)?
      .visit_field::<u64>("num_rows", Self::VT_NUM_ROWS, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("public_inputs", Self::VT_PUBLIC_INPUTS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("public_inputs", Self::VT_PUBLIC_INPUTS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<ColumnTrace>>("main_trace", Self::VT_MAIN_TRACE, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ColumnTrace>>>>("chiplet_traces", Self::VT_CHIPLET_TRACES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<Config>>("config", Self::VT_CONFIG, false)?
@@ -4910,7 +4976,7 @@ pub mod hekate {
             >,
             pub num_rows: u64,
             pub public_inputs:
-                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub main_trace: Option<::flatbuffers::WIPOffset<ColumnTrace<'a>>>,
             pub chiplet_traces: Option<
                 ::flatbuffers::WIPOffset<
@@ -5101,7 +5167,7 @@ pub mod hekate {
             #[inline]
             pub fn add_public_inputs(
                 &mut self,
-                public_inputs: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                public_inputs: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     ProgramBundle::VT_PUBLIC_INPUTS,

@@ -5,7 +5,7 @@
 use crate::poly::variant;
 use crate::{config, trace};
 use core::fmt;
-use hekate_crypto::{merkle, transcript};
+use hekate_crypto::{DefaultHasher, Hasher, merkle, transcript};
 
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -27,7 +27,7 @@ pub enum Error {
     /// The program the verifier holds is not
     /// the audited artifact the caller pinned.
     ProgramIdMismatch {
-        actual: [u8; 32],
+        actual: <DefaultHasher as Hasher>::Digest,
     },
 
     /// Internal invariant breach; a bug,
@@ -37,8 +37,8 @@ pub enum Error {
     },
 }
 
-/// Not `#[derive(Debug)]`: `unwrap` and `{:?}` render a
-/// `[u8; 32]` id as decimal integers nobody can paste back.
+/// Not `#[derive(Debug)]`: `unwrap` and `{:?}` render
+/// an id as decimal integers nobody can paste back.
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
@@ -58,7 +58,7 @@ impl fmt::Display for Error {
             }
             Self::ProgramIdMismatch { actual } => {
                 write!(f, "program_id mismatch: this build computes ")?;
-                write_hex(f, actual)
+                write_hex(f, actual.as_ref())
             }
             Self::InvariantViolation { message } => {
                 write!(f, "Invariant violation: {message}")
@@ -99,7 +99,7 @@ impl From<variant::Error> for Error {
     }
 }
 
-fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8; 32]) -> fmt::Result {
+fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     for byte in bytes {
         write!(f, "{byte:02x}")?;
     }

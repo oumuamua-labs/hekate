@@ -5,16 +5,19 @@
 mod common;
 
 use common::{
-    AES_ROWS, FIPS256_CIPHER, FIPS256_KEY, FREE_CIPHER, IN_ROW, OUT_ROW, assert_air_clean,
-    assert_air_violated, build_cpu_trace_256, copy_b8_block, deactivate_rom, fips_call_256,
-    make_program_256, prove_and_verify, set_b8, set_b16, set_bit, whitened_256,
+    AES_ROWS, Aes256Program, FIPS256_CIPHER, FIPS256_KEY, FREE_CIPHER, HOST, IN_ROW, OUT_ROW, ROM,
+    ROUND, assert_rejected, assert_verifies, build_cpu_trace_256, deactivate_rom, fips_call_256,
+    make_program_256, whitened_256,
 };
 use hekate_aes::{
-    CpuAes256Columns, PhysAes256Columns,
+    Aes256Columns, AesRound256Air, CpuAes256Columns, PhysAes256Columns, SboxRomColumns,
     trace::{aes256_encrypt_block, expand_key_256},
 };
 use hekate_core::trace::ColumnTrace;
 use hekate_math::{Bit, TowerField};
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::cell::{copy_row, set_b8, set_b16, set_bit};
+use hekate_testkit::fault::{Check, Fault};
 
 const ACTIVE_ROWS: usize = 14;
 const OUTPUT_ROW: usize = 14;
@@ -55,7 +58,12 @@ fn make_bare_emit(aes: &mut ColumnTrace, row: usize) {
 
 /// Moves the key bytes and their emit to row `to`.
 fn move_key_row(cpu: &mut ColumnTrace, from: usize, to: usize) {
-    copy_b8_block(cpu, CpuAes256Columns::KEY, 32, from, to);
+    copy_row(
+        cpu,
+        CpuAes256Columns::KEY..CpuAes256Columns::KEY + 32,
+        from,
+        to,
+    );
 
     for j in 0..32 {
         set_b8(cpu, CpuAes256Columns::KEY + j, from, 0);
@@ -65,18 +73,35 @@ fn move_key_row(cpu: &mut ColumnTrace, from: usize, to: usize) {
     set_bit(cpu, CpuAes256Columns::KEY_SELECTOR, to, Bit::ONE);
 }
 
+fn honest(air: &Aes256Program) -> (ColumnTrace, Vec<ColumnTrace>) {
+    (
+        build_cpu_trace_256(&whitened_256(), &FIPS256_CIPHER),
+        air.aes.generate_traces(&[fips_call_256()]).unwrap(),
+    )
+}
+
+fn schedule_pins() -> Vec<(TableId, usize)> {
+    let selectors = [
+        Aes256Columns::S_ROUND,
+        Aes256Columns::S_FINAL,
+        Aes256Columns::S_IN_OUT,
+        Aes256Columns::S_ACTIVE,
+    ];
+
+    (1..ACTIVE_ROWS)
+        .map(|k| (ROUND, Aes256Columns::ROUND_BITS + k))
+        .chain(selectors.map(|col| (ROUND, col)))
+        .chain([(ROM, SboxRomColumns::SELECTOR)])
+        .collect()
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn honest_block_verifies() {
     let air = make_program_256(AES_ROWS, 1);
-    let chiplet_traces = air.aes.generate_traces(&[fips_call_256()]).unwrap();
-    let cpu_trace = build_cpu_trace_256(&whitened_256(), &FIPS256_CIPHER);
+    let (cpu_trace, chiplet_traces) = honest(&air);
 
-    match prove_and_verify(&air.program, cpu_trace, chiplet_traces) {
-        Ok(true) => {}
-        Ok(false) => panic!("rejected"),
-        Err(e) => panic!("error: {e}"),
-    }
+    assert_verifies(&air.program, cpu_trace, chiplet_traces);
 }
 
 #[test]
@@ -92,7 +117,8 @@ fn free_ciphertext_rejected() {
         make_bare_emit(aes, 1);
         make_bare_emit(aes, 2);
 
-        copy_b8_block(aes, PhysAes256Columns::P_STATE_IN, 16, 1, 2);
+        let state = PhysAes256Columns::P_STATE_IN;
+        copy_row(aes, state..state + 16, 1, 2);
 
         make_bare_emit(aes, 3);
 
@@ -110,12 +136,16 @@ fn free_ciphertext_rejected() {
     assert_ne!(FREE_CIPHER, FIPS256_CIPHER);
 
     let cpu_trace = build_cpu_trace_256(&whitened_256(), &FREE_CIPHER);
-    assert_air_violated(&air.program, &cpu_trace, &traces);
+    let pins = schedule_pins();
+    let fault = Fault {
+        constraint_tables: &[ROUND, ROM],
+        pin_columns: &pins,
+        buses: &[AesRound256Air::LINK_BUS_ID],
+        first_check: Some(Check::FixedColumn),
+        ..Fault::NONE
+    };
 
-    match prove_and_verify(&air.program, cpu_trace, traces) {
-        Ok(false) | Err(_) => {}
-        Ok(true) => panic!("accepted"),
-    }
+    assert_rejected(&air.program, honest(&air), (cpu_trace, traces), fault);
 }
 
 #[test]
@@ -128,12 +158,12 @@ fn backwards_block_rejected() {
     assert_ne!(aes_rounds(&FIPS256_CIPHER), whitened);
 
     let cpu_trace = build_cpu_trace_256(&FIPS256_CIPHER, &whitened);
-    assert_air_clean(&air.program, &cpu_trace, &traces);
+    let fault = Fault {
+        buses: &[AesRound256Air::LINK_BUS_ID],
+        ..Fault::NONE
+    };
 
-    match prove_and_verify(&air.program, cpu_trace, traces) {
-        Ok(false) | Err(_) => {}
-        Ok(true) => panic!("accepted"),
-    }
+    assert_rejected(&air.program, honest(&air), (cpu_trace, traces), fault);
 }
 
 /// The key emit follows the reversed block to
@@ -149,10 +179,12 @@ fn backwards_block_with_moved_key_rejected() {
 
     move_key_row(&mut cpu_trace, IN_ROW, OUT_ROW);
 
-    assert_air_violated(&air.program, &cpu_trace, &traces);
+    let fault = Fault {
+        pin_columns: &[(HOST, CpuAes256Columns::KEY_SELECTOR)],
+        buses: &[AesRound256Air::KEY_BUS_ID, AesRound256Air::LINK_BUS_ID],
+        first_check: Some(Check::FixedColumn),
+        ..Fault::NONE
+    };
 
-    match prove_and_verify(&air.program, cpu_trace, traces) {
-        Ok(false) | Err(_) => {}
-        Ok(true) => panic!("accepted"),
-    }
+    assert_rejected(&air.program, honest(&air), (cpu_trace, traces), fault);
 }

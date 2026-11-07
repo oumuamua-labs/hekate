@@ -3,23 +3,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::config::Config;
+use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::chiplets::bignum::modexp::{
     self, BUS_ID, LIMBS32, Modexp, ModexpChiplet, NUM_ROWS, RESULT_ROW,
 };
-use hekate_math::{Bit, Block32, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight;
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::cell::xor_b32;
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 const CPU_ROWS: usize = 16;
 const CPU_N: usize = 0;
@@ -160,8 +158,8 @@ fn chiplet_trace(st: &Statement) -> ColumnTrace {
     st.chiplet.trace(&st.modexp).unwrap()
 }
 
-fn instance(st: &Statement) -> ProgramInstance<F> {
-    let public: Vec<F> = st.modexp.result().iter().map(|&l| F::from(l)).collect();
+fn instance(result: &[u32; LIMBS32]) -> ProgramInstance<F> {
+    let public: Vec<F> = result.iter().map(|&l| F::from(l)).collect();
 
     ProgramInstance::new(CPU_ROWS, public)
 }
@@ -170,70 +168,18 @@ fn witness(cpu: ColumnTrace, chiplet: ColumnTrace) -> ProgramWitness<F, ColumnTr
     ProgramWitness::new(cpu).with_chiplets(vec![chiplet])
 }
 
-fn prove_and_verify(
-    st: &Statement,
-    cpu: ColumnTrace,
-    chiplet: ColumnTrace,
-) -> Result<bool, String> {
-    let instance = instance(st);
-    let witness = witness(cpu, chiplet);
-
-    let report =
-        preflight(&st.program, &instance, &witness).map_err(|e| format!("preflight: {e:?}"))?;
-
-    if !report.is_clean() {
-        for v in &report.constraint_violations {
-            eprintln!("constraint={} row={}", v.constraint_idx, v.row_idx);
-        }
-
-        return Err("preflight violations".into());
-    }
-
-    verdict_without_preflight(st, instance, witness)
-}
-
-fn verdict_without_preflight(
-    st: &Statement,
-    instance: ProgramInstance<F>,
-    witness: ProgramWitness<F, ColumnTrace>,
-) -> Result<bool, String> {
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::dev()
-    };
-
-    let proof = prove(
-        b"Modexp_E2E",
-        &st.program,
-        &instance,
-        &witness,
-        &config,
-        [7u8; 32],
-        None,
+fn honest(st: &Statement) -> (ProgramInstance<F>, ProgramWitness<F>) {
+    (
+        instance(st.modexp.result()),
+        witness(cpu_trace(st), chiplet_trace(st)),
     )
-    .map_err(|e| format!("prover: {e:?}"))?;
-
-    let mut vt = Transcript::<H>::new(b"Modexp_E2E");
-    let pinned_id = program_id(&st.program).unwrap();
-
-    HekateVerifier::<F, H>::verify(&pinned_id, &st.program, &instance, &proof, &mut vt, &config)
-        .map_err(|e| format!("verifier: {e:?}"))
 }
 
-fn flip_b32(trace: &mut ColumnTrace, col: usize, row: usize, mask: u32) {
-    let TraceColumn::B32(data) = &mut trace.columns[col] else {
-        panic!("expected B32 column at {col}");
-    };
+fn forged_result(st: &Statement) -> [u32; LIMBS32] {
+    let mut result = *st.modexp.result();
+    result[0] ^= 1;
 
-    let original = data[row].to_tower().0;
-    data[row] = Block32(original ^ mask).to_hardware();
-}
-
-fn assert_verifier_rejects(st: &Statement, cpu: ColumnTrace, chiplet: ColumnTrace) {
-    assert_eq!(
-        verdict_without_preflight(st, instance(st), witness(cpu, chiplet)),
-        Ok(false)
-    );
+    result
 }
 
 #[test]
@@ -244,7 +190,13 @@ fn result_matches_reference_exponentiation() {
 
 #[test]
 fn unreduced_base_rejected() {
-    assert!(Modexp::new(&S, &N).is_err());
+    assert!(matches!(
+        Modexp::new(&S, &N),
+        Err(errors::Error::Protocol {
+            message: "base must be reduced: s < N",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -284,22 +236,37 @@ fn one_emit_on_result_row() {
 #[test]
 fn honest_proof_verifies() {
     let st = build();
+    let (instance, witness) = honest(&st);
 
-    match prove_and_verify(&st, cpu_trace(&st), chiplet_trace(&st)) {
-        Ok(true) => {}
-        Ok(false) => panic!("verifier rejected an honest proof"),
-        Err(e) => panic!("{e}"),
-    }
+    assert_verifies(&st.program, (&instance, &witness), &Config::dev());
 }
 
 #[test]
 fn flipped_remainder_bit_rejected() {
     let st = build();
+
+    let mut cpu = cpu_trace(&st);
     let mut chiplet = chiplet_trace(&st);
 
-    flip_b32(&mut chiplet, st.chiplet.result_column(0), RESULT_ROW, 1);
+    xor_b32(&mut cpu, CPU_R, 0, 1);
+    xor_b32(&mut chiplet, st.chiplet.result_column(0), RESULT_ROW, 1);
 
-    assert_verifier_rejects(&st, cpu_trace(&st), chiplet);
+    let (honest_instance, honest) = honest(&st);
+    let instance = instance(&forged_result(&st));
+    let witness = witness(cpu, chiplet);
+
+    let fault = Fault {
+        constraint_tables: &[TableId::Chiplet(0)],
+        ..Fault::NONE
+    };
+
+    assert_rejected(
+        &st.program,
+        (&honest_instance, &honest),
+        (&instance, &witness),
+        fault,
+        &Config::dev(),
+    );
 }
 
 #[test]
@@ -307,9 +274,24 @@ fn forged_cpu_result_rejected() {
     let st = build();
     let mut cpu = cpu_trace(&st);
 
-    flip_b32(&mut cpu, CPU_R, 0, 1);
+    xor_b32(&mut cpu, CPU_R, 0, 1);
 
-    assert_verifier_rejects(&st, cpu, chiplet_trace(&st));
+    let (honest_instance, honest) = honest(&st);
+    let instance = instance(&forged_result(&st));
+    let witness = witness(cpu, chiplet_trace(&st));
+
+    let fault = Fault {
+        buses: &[BUS_ID],
+        ..Fault::NONE
+    };
+
+    assert_rejected(
+        &st.program,
+        (&honest_instance, &honest),
+        (&instance, &witness),
+        fault,
+        &Config::dev(),
+    );
 }
 
 #[test]
@@ -318,7 +300,7 @@ fn scribble_flip_selector_caught() {
 
     assert_all_caught_all_targets(
         &st.program,
-        &instance(&st),
+        &instance(st.modexp.result()),
         &witness(cpu_trace(&st), chiplet_trace(&st)),
         ScribbleConfig::default()
             .cases(64)

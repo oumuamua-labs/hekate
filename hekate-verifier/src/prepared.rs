@@ -8,18 +8,19 @@ use hekate_core::errors;
 use hekate_core::ligero::RowEncoder;
 use hekate_core::outer::OuterGeometry;
 use hekate_math::{BinaryFieldExtras, HardwareField, TowerField};
+use hekate_program::Program;
 use hekate_program::chiplet::ChipletDef;
+use hekate_program::digest::{self, ProgramId};
 use hekate_program::expander::RingSwitchPlan;
 use hekate_program::outer::{TableShape, table_plan};
-use hekate_program::permutation::validate_fixed_selectors;
-use hekate_program::{Program, digest};
+use hekate_program::permutation::{validate_bus_tags, validate_fixed_selectors};
 
 /// What verifying `program` under one `Config` needs before
 /// any proof: chiplet definitions, table parts, ring-switch
 /// plans, shapes without heights, and the program id.
 pub struct PreparedProgram<F: TowerField> {
     pub(crate) config: Config,
-    pub(crate) program_id: [u8; 32],
+    pub(crate) program_id: ProgramId,
     pub(crate) num_public_inputs: usize,
     pub(crate) main: ChipletDef<F>,
     pub(crate) main_plan: RingSwitchPlan,
@@ -41,6 +42,14 @@ impl<F: TowerField> PreparedProgram<F> {
         for def in &chiplets {
             validate_fixed_selectors(&def.permutation_checks, def.pins())?;
         }
+
+        let endpoints = main
+            .permutation_checks
+            .iter()
+            .chain(chiplets.iter().flat_map(|def| &def.permutation_checks))
+            .map(|(bus_id, spec)| (bus_id.as_str(), spec));
+
+        validate_bus_tags::<F>(endpoints)?;
 
         let main_shape = TableShape::from_air(&main, &main.statics())?;
         let main_plan = table_plan(&main, &main_shape, config)?;
@@ -76,7 +85,7 @@ impl<F: TowerField> PreparedProgram<F> {
         })
     }
 
-    pub fn program_id(&self) -> &[u8; 32] {
+    pub fn program_id(&self) -> &ProgramId {
         &self.program_id
     }
 }

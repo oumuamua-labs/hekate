@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use hekate_core::errors;
 use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::SumcheckProof;
+use hekate_core::skip::SkipDomain;
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{Flat, HardwareField};
@@ -79,7 +80,7 @@ pub fn verify<F: HardwareField, H: Hasher>(
         if poly.evals.len() != expected_len {
             return Err(errors::Error::Protocol {
                 protocol: "sumcheck",
-                message: "polynomial degree mismatch - potential forgery attempt",
+                message: "round polynomial degree mismatch",
             });
         }
 
@@ -115,4 +116,40 @@ pub fn verify<F: HardwareField, H: Hasher>(
     transcript.append_field(b"final_val", proof.claimed_evaluation);
 
     Ok(Some((challenges, current_claim)))
+}
+
+/// Replays a skip round: rebuilds the first domain value
+/// from the claim, absorbs the univariate, draws the challenge
+/// and returns it with the claim the tail continues from.
+pub fn verify_skip<F: HardwareField, H: Hasher>(
+    domain: &SkipDomain<F>,
+    initial_claim: Flat<F>,
+    sent: &[F],
+    transcript: &mut Transcript<H>,
+) -> errors::Result<(Flat<F>, Flat<F>)> {
+    let plan = domain.plan();
+
+    if sent.len() != plan.sent_scalars() {
+        return Err(errors::Error::Protocol {
+            protocol: "sumcheck",
+            message: "skip round scalar count mismatch",
+        });
+    }
+
+    let rest_of_block = sent[..plan.block_rows() - 1]
+        .iter()
+        .fold(Flat::from_raw(F::ZERO), |acc, v| acc + v.to_hardware());
+
+    let mut values = Vec::with_capacity(plan.domain_points());
+    values.push((initial_claim - rest_of_block).to_tower());
+    values.extend_from_slice(sent);
+
+    transcript.append_field_list(b"skip_poly", &values);
+
+    let r_skip = transcript.challenge_field::<F>(b"skip_r")?.to_hardware();
+
+    let flat: Vec<Flat<F>> = values.iter().map(|v| v.to_hardware()).collect();
+    let claim = domain.interpolate(&flat, r_skip)?;
+
+    Ok((r_skip, claim))
 }

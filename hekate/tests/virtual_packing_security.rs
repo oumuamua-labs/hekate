@@ -6,7 +6,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::ColumnType;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::trace::TraceBuilder;
 use hekate_math::{Bit, Block32, HardwareField};
 use hekate_program::chiplet::ChipletDef;
@@ -17,9 +17,11 @@ use hekate_program::digest::program_id;
 use hekate_program::expander::VirtualExpander;
 use hekate_program::{Air, FixedColumn, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::site::ZEROCHECK;
+use hekate_testkit::verdict::{rejected_at, verify_logged};
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const MAGIC: u32 = 0xDEAD_BEEF;
@@ -166,10 +168,7 @@ fn zk_config() -> Config {
 // Virtual Packing Eval Forgery
 //
 // Corrupt a virtual bit column evaluation in
-// the chiplet's point_evaluation. The fold
-// must catch the mismatch between
-// claimed virtual values and the physically
-// committed trace data.
+// the chiplet's point_evaluation.
 // =========================================================
 
 #[test]
@@ -200,15 +199,14 @@ fn virtual_packing_eval_forgery_rejected() {
     // Corrupt virtual bit column 17
     let evals = &mut proof.chiplet_point_evaluations[0].1;
     assert!(evals.len() > 17);
+
     evals[17] += F::ONE;
 
-    let mut at = Transcript::<H>::new(b"VirtualPackEvalForgery");
-    let attack =
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut at, &config);
+    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, b"VirtualPackEvalForgery");
 
     assert!(
-        attack.is_err() || !attack.unwrap(),
-        "forged virtual bit column 17 accepted",
+        rejected_at(&outcome, &log, ZEROCHECK),
+        "got {outcome:?}\n{log}"
     );
 }
 
@@ -265,8 +263,7 @@ fn virtual_expansion_witness_isolation() {
         "ZK enabled but witness bytes leaked in fold openings",
     );
 
-    // The non-systematic code emits no verbatim
-    // cell, no real leak exists to detect.
+    // No real leak exists to detect
     let mut planted = proof_zk.clone();
 
     let target = planted

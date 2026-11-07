@@ -9,8 +9,10 @@
 //! checks its SHA-256 and its Ed25519 and ML-DSA-65
 //! signatures against keys pinned in this crate, and links it.
 //! [`prove`] runs it, and a [`CancelToken`] stops it early.
-//! Exactly one of the `ct` and `public` features picks
-//! the constant-time or the variable-time binary.
+//!
+//! Exactly one of `ct` and `public` picks the arithmetic of
+//! the binary, exactly one of `blake3`, `sha2`, `sha3` and
+//! `shake256` its hash, which [`ProverHasher`] names.
 //!
 //! - [Installation][install]: variants, targets
 //!   and how the binary reaches the build
@@ -34,9 +36,30 @@ use core::ptr;
 
 use hekate_core::config::Config;
 use hekate_core::proofs::InnerProof;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::{Program, ProgramInstance, ProgramWitness};
 use hekate_sdk::{deserialize_proof, serialize_bundle_header};
+
+/// The hash of the linked binary;
+/// its proofs verify with the same type.
+pub type ProverHasher = hekate_crypto::DefaultHasher;
+
+#[cfg(feature = "blake3")]
+const PROVER_HASHER_NAME: &str = "hekate_crypto::blake3::Blake3Hasher";
+
+#[cfg(feature = "sha2")]
+const PROVER_HASHER_NAME: &str = "hekate_crypto::sha256::Sha256Hasher";
+
+#[cfg(feature = "sha3")]
+const PROVER_HASHER_NAME: &str = "hekate_crypto::sha3::Sha3_256Hasher";
+
+#[cfg(feature = "shake256")]
+const PROVER_HASHER_NAME: &str = "hekate_crypto::shake256::Shake256Hasher";
+
+const _: () = assert!(
+    same(hekate_crypto::default_hasher_name(), PROVER_HASHER_NAME),
+    "hash backend enabled elsewhere in this build outranks the one the linked prover uses"
+);
 
 pub fn version() -> &'static str {
     // Safety:
@@ -72,15 +95,15 @@ pub fn init_tracing() {
 /// The cdylib hashes `seed` with 32 fresh OS bytes on
 /// every call and fails without them; a fresh CSPRNG
 /// `seed` still guards the noise if that source is weak.
-pub fn prove<P: Program<Block128>>(
+pub fn prove<P: Program<Block256>>(
     transcript_label: &[u8],
     program: &P,
-    instance: &ProgramInstance<Block128>,
-    witness: &ProgramWitness<Block128>,
+    instance: &ProgramInstance<Block256>,
+    witness: &ProgramWitness<Block256>,
     config: &Config,
     seed: [u8; 32],
     cancel: Option<&CancelToken>,
-) -> Result<InnerProof<Block128>, Error> {
+) -> Result<InnerProof<Block256>, Error> {
     let bundle = serialize_bundle_header(program, instance, config)
         .map_err(|e| Error::bundle(format!("serialize_bundle_header: {e}")))?;
 
@@ -123,7 +146,7 @@ pub fn prove<P: Program<Block128>>(
     // call duration; the four out parameters
     // are caller-owned stack slots.
     let rc = unsafe {
-        ffi::hekate_prove_b128_default(
+        ffi::hekate_prove(
             bundle.as_ptr(),
             bundle.len(),
             main_views.as_ptr(),
@@ -157,7 +180,7 @@ pub fn prove<P: Program<Block128>>(
     //   valid (ptr, len) buffer released
     //   by hekate_free_proof.
     let proof_bytes = unsafe { core::slice::from_raw_parts(out_proof_bytes, out_proof_len) };
-    let proof = deserialize_proof::<Block128>(proof_bytes)
+    let proof = deserialize_proof::<Block256>(proof_bytes)
         .map_err(|e| Error::deserialize(format!("deserialize_proof: {e}")));
 
     // Safety:
@@ -166,4 +189,23 @@ pub fn prove<P: Program<Block128>>(
     unsafe { ffi::hekate_free_proof(out_proof_bytes, out_proof_len) };
 
     proof
+}
+
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+
+        i += 1;
+    }
+
+    true
 }

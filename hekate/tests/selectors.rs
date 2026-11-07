@@ -6,13 +6,15 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128};
+use hekate::math::{Bit, Block32, Block256};
 use hekate_core::trace::IntoTraceColumn;
 use hekate_math::TowerField;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::site::ZEROCHECK;
+use hekate_testkit::verdict::{rejected_at, verify_logged};
 use hekate_verifier::HekateVerifier;
 
 /// Selector Discipline & Ghost Protocol
@@ -21,7 +23,7 @@ use hekate_verifier::HekateVerifier;
 /// - Boolean selectors
 /// - One-hot encoding
 /// - Halt discipline (Ghost Protocol)
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 /// Dummy CPU AIR with halt discipline.
@@ -207,6 +209,45 @@ fn generate_event_while_halted_trace(num_vars: usize) -> ColumnTrace {
     trace
 }
 
+fn halt_violation_rejected(label: &'static [u8], violating: fn(usize) -> ColumnTrace) {
+    let num_vars = 6;
+    let num_rows = 1 << num_vars;
+
+    let config = Config {
+        num_queries: 4,
+        min_security_bits: 0,
+        zero_knowledge: false,
+        ..Config::default()
+    };
+
+    let air = dummy_cpu_air(num_rows);
+    let instance = ProgramInstance::new(num_rows, vec![]);
+
+    let verdict = |trace: ColumnTrace| {
+        let proof = prove(
+            label,
+            &air,
+            &instance,
+            &ProgramWitness::new(trace),
+            &config,
+            [0xAAu8; 32],
+            None,
+        )
+        .expect("halt prove");
+
+        verify_logged(&air, &instance, &config, &proof, label)
+    };
+
+    let (honest, _) = verdict(generate_valid_trace(num_vars));
+    assert!(matches!(honest, Ok(true)), "got {honest:?}");
+
+    let (outcome, log) = verdict(violating(num_vars));
+    assert!(
+        rejected_at(&outcome, &log, ZEROCHECK),
+        "got {outcome:?}\n{log}"
+    );
+}
+
 // =======================================================================
 // TEST 1 (Positive): Valid trace with clean halt passes
 // =======================================================================
@@ -267,64 +308,7 @@ fn valid_halt_trace_passes() {
 // =======================================================================
 #[test]
 fn wakeup_after_halt_rejected() {
-    let num_vars = 6;
-    let num_rows = 1 << num_vars;
-    let seed = [0xAAu8; 32];
-
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        zero_knowledge: false,
-        ..Config::default()
-    };
-
-    let air = dummy_cpu_air(num_rows);
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let trace = generate_wakeup_trace(num_vars);
-    let witness = ProgramWitness::new(trace);
-
-    // Prove should either fail or produce invalid proof
-    let prove_result = prove(
-        b"phase1_wakeup",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        seed,
-        None,
-    );
-
-    match prove_result {
-        Ok(proof) => {
-            // If prover succeeds, verifier MUST reject
-            let mut verifier_transcript = Transcript::<H>::new(b"phase1_wakeup");
-            let pinned_id = program_id(&air).unwrap();
-
-            let verify_result = HekateVerifier::<F, H>::verify(
-                &pinned_id,
-                &air,
-                &instance,
-                &proof,
-                &mut verifier_transcript,
-                &config,
-            );
-
-            match verify_result {
-                Ok(true) => {
-                    panic!("VULNERABILITY: Verifier accepted trace that violates sticky_halt!");
-                }
-                Ok(false) => {
-                    // Correctly rejected
-                }
-                Err(_) => {
-                    // Also acceptable
-                }
-            }
-        }
-        Err(_) => {
-            // Prover rejected the trace (also acceptable)
-        }
-    }
+    halt_violation_rejected(b"phase1_wakeup", generate_wakeup_trace);
 }
 
 // =======================================================================
@@ -332,71 +316,14 @@ fn wakeup_after_halt_rejected() {
 // =======================================================================
 #[test]
 fn event_while_halted_rejected() {
-    let num_vars = 6;
-    let num_rows = 1 << num_vars;
-    let seed = [0xAAu8; 32];
-
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        zero_knowledge: false,
-        ..Config::default()
-    };
-
-    let air = dummy_cpu_air(num_rows);
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let trace = generate_event_while_halted_trace(num_vars);
-    let witness = ProgramWitness::new(trace);
-
-    // Prove should either fail or produce invalid proof
-    let prove_result = prove(
-        b"phase1_event",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        seed,
-        None,
-    );
-
-    match prove_result {
-        Ok(proof) => {
-            // If prover succeeds, verifier MUST reject
-            let mut verifier_transcript = Transcript::<H>::new(b"phase1_event");
-            let pinned_id = program_id(&air).unwrap();
-
-            let verify_result = HekateVerifier::<F, H>::verify(
-                &pinned_id,
-                &air,
-                &instance,
-                &proof,
-                &mut verifier_transcript,
-                &config,
-            );
-
-            match verify_result {
-                Ok(true) => {
-                    panic!("VULNERABILITY: Verifier accepted trace with events while halted!");
-                }
-                Ok(false) => {
-                    // Correctly rejected
-                }
-                Err(_) => {
-                    // Also acceptable
-                }
-            }
-        }
-        Err(_) => {
-            // Prover rejected the trace (also acceptable)
-        }
-    }
+    halt_violation_rejected(b"phase1_event", generate_event_while_halted_trace);
 }
 
 // =======================================================================
-// TEST 4: Boolean constraint enforcement
+// TEST 4: Boolean selector trace verifies
 // =======================================================================
 #[test]
-fn boolean_constraint_enforced() {
+fn boolean_selector_trace_verifies() {
     let num_vars = 4;
     let num_rows = 1 << num_vars;
     let seed = [0xAAu8; 32];
@@ -411,7 +338,6 @@ fn boolean_constraint_enforced() {
     let air = dummy_cpu_air(num_rows);
     let instance = ProgramInstance::new(num_rows, vec![]);
 
-    // Create trace with non-boolean selector (value = 2)
     let pc_col = vec![Block32::ZERO; num_rows];
     let s_halt_col = vec![Bit::ZERO; num_rows];
     let s_memory_col = vec![Bit::ZERO; num_rows];
@@ -420,9 +346,6 @@ fn boolean_constraint_enforced() {
 
     // Last row: q_step = 0
     q_step_col[num_rows - 1] = Bit::ZERO;
-
-    // Manually create invalid Bit value (this would require unsafe in practice)
-    // For testing, we'll just use valid values and trust the constraint check
 
     let mut trace = ColumnTrace::new(num_vars).unwrap();
     trace.add_column(pc_col.into_trace_column()).unwrap();
@@ -433,7 +356,7 @@ fn boolean_constraint_enforced() {
     let witness = ProgramWitness::new(trace);
 
     // This trace is valid (all booleans are 0 or 1)
-    let result = prove(
+    let proof = prove(
         b"phase1_boolean",
         &air,
         &instance,
@@ -441,7 +364,10 @@ fn boolean_constraint_enforced() {
         &config,
         seed,
         None,
-    );
+    )
+    .expect("boolean trace prove");
 
-    assert!(result.is_ok(), "Valid boolean trace should prove");
+    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"phase1_boolean");
+
+    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
 }

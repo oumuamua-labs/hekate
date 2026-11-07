@@ -582,7 +582,7 @@ fn outside() -> Error {
 mod tests {
     use super::*;
     use hekate_core::trace::{ColumnType, TraceBuilder};
-    use hekate_math::{Bit, Block16, Block32, Block128};
+    use hekate_math::{Bit, Block16, Block32, Block256};
     use hekate_program::circuit::Circuit;
     use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
     use hekate_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
@@ -594,7 +594,7 @@ mod tests {
         COEF_BUS_ID, LANE_BUS_ID, WORD_BUS_ID, lane_spec, pinned_shape, word_spec,
     };
 
-    type F = Block128;
+    type F = Block256;
 
     const HOST_LAYOUT: [ColumnType; 10] = [
         ColumnType::B32,

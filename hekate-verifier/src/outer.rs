@@ -7,6 +7,7 @@
 //! and the zk-Ligero segment over the assembled statement.
 
 use crate::prepared::VerifierScratch;
+use crate::root;
 use alloc::vec::Vec;
 use hekate_core::config::Config;
 use hekate_core::errors;
@@ -18,7 +19,7 @@ use hekate_core::proofs::{InnerProof, OuterOpening};
 use hekate_core::protocol;
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, TowerField};
+use hekate_math::{BinaryFieldExtras, Flat, HardwareField, TowerField};
 use hekate_program::outer::{
     EvalRecord, OuterLayout, OuterStatement, TableRecord, linear_tensor_vars, linear_weights,
     statement_rows,
@@ -46,6 +47,7 @@ impl PadCursor {
 #[allow(clippy::too_many_arguments)]
 pub fn verify_outer<F, H>(
     proof: &InnerProof<F>,
+    pad_root: Option<&H::Digest>,
     transcript: &mut Transcript<H>,
     config: &Config,
     statement: OuterStatement,
@@ -55,7 +57,7 @@ pub fn verify_outer<F, H>(
     scratch: &mut VerifierScratch<F>,
 ) -> errors::Result<bool>
 where
-    F: HardwareField + BinaryFieldExtras + TowerField + Into<Block128>,
+    F: HardwareField + BinaryFieldExtras + TowerField,
     H: Hasher,
 {
     if cursor.0 as usize != statement.masked_scalars {
@@ -65,7 +67,7 @@ where
         });
     }
 
-    let (pad_root, outer) = match (proof.pad_root.as_ref(), proof.outer.as_ref()) {
+    let (pad_root, outer) = match (pad_root, proof.outer.as_ref()) {
         (Some(root), Some(outer)) => (root, outer),
         _ => {
             return Err(errors::Error::Protocol {
@@ -74,6 +76,8 @@ where
             });
         }
     };
+
+    let aux_root = root::<H>(&outer.aux_root)?;
 
     let field_bits = F::BITS;
     let geom = config.outer_geom(statement.masked_scalars, statement.mul_wires, field_bits)?;
@@ -131,7 +135,7 @@ where
         trace_span!("openings").in_scope(|| {
             let (pad, aux) = join(
                 || verify_opening::<F, H>(pad_root, &geom, layout.pad_rows, &outer.pad_opening),
-                || verify_opening::<F, H>(&outer.aux_root, &geom, aux_rows, &outer.aux_opening),
+                || verify_opening::<F, H>(&aux_root, &geom, aux_rows, &outer.aux_opening),
             );
 
             pad && aux

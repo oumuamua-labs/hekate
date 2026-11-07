@@ -3,35 +3,37 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::config::Config;
-use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
+use hekate_core::trace::{ColumnTrace, ColumnType, Trace, TraceBuilder, TraceColumn};
 use hekate_gadgets::{
     ArithmeticOpcode, CpuArithColumns, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
     generate_arithmetic_trace,
 };
-use hekate_math::{Bit, Block32, Block64, Block128, Flat, HardwareField, TowerField};
+use hekate_math::{Bit, Block32, Block64, Block256, HardwareField, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
-use hekate_program::{FixedShape, Program, ProgramInstance, ProgramWitness, define_columns};
-use hekate_prover_sys::prove;
+use hekate_program::{FixedShape, ProgramInstance, ProgramWitness, define_columns};
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight;
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::cell::{set_b32, set_bit};
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 // =================================================================
 // 0. PHYSICAL COLUMN INDICES
 // =================================================================
 
-const PHY_VAL_A: usize = 0;
-const PHY_VAL_B: usize = 1;
 const PHY_VAL_RES: usize = 2;
+const PHY_CARRY: usize = 3;
 const PHY_OPCODE: usize = 4;
-const PHY_S_SUB: usize = 8;
+const PHY_S_SUB: usize = 7;
+const PHY_S_XOR: usize = 9;
+
+const BUS_ONLY: Fault<'static> = Fault {
+    buses: &[IntArithmeticChiplet::BUS_ID],
+    ..Fault::NONE
+};
 
 // =================================================================
 // 1. SINGLE-CHIPLET PROGRAM (u32 OR u64)
@@ -277,121 +279,139 @@ fn generate_cpu_trace(ops: &[IntArithmeticOp], num_rows: usize, bit_width: usize
     tb.build()
 }
 
-fn test_config() -> Config {
+fn config() -> Config {
     Config {
         num_queries: 4,
         min_security_bits: 0,
-        zero_knowledge: true,
         fold_arity_log: 1,
         early_stop_vars: 1,
         ..Config::default()
     }
 }
 
-fn run_prover_verifier(
-    program: &impl Program<F>,
-    instance: &ProgramInstance<F>,
-    witness: &ProgramWitness<F>,
-    domain: &'static [u8],
-) -> Result<bool, String> {
-    let config = test_config();
+fn assert_arith_verifies(ops: &[IntArithmeticOp], bit_width: usize) {
+    let (program, instance, witness) = arith_case(ops, bit_width, |_, _| {});
 
-    let proof = prove(
-        domain, program, instance, witness, &config, [0xAA; 32], None,
-    )
-    .map_err(|e| format!("prover: {e:?}"))?;
-
-    let mut vt = Transcript::<H>::new(domain);
-    let pinned_id = program_id(program).unwrap();
-
-    HekateVerifier::<F, H>::verify(&pinned_id, program, instance, &proof, &mut vt, &config)
-        .map_err(|e| format!("verifier: {e:?}"))
+    assert_verifies(&program, (&instance, &witness), &config());
 }
 
-fn prove_and_verify_arithmetic(ops: &[IntArithmeticOp], bit_width: usize) -> Result<bool, String> {
-    let num_rows = ops.len().next_power_of_two().max(2);
-    let arith_num_rows = num_rows;
-
-    let cpu_trace = generate_cpu_trace(ops, num_rows, bit_width);
-    let layout = IntArithmeticLayout::compute(bit_width);
-    let arith_trace = generate_arithmetic_trace(ops, &layout, arith_num_rows)
-        .map_err(|e| format!("arith trace: {e:?}"))?;
-
-    let program = arith_cpu_program(bit_width, arith_num_rows, ops.len());
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![arith_trace]);
-
-    let report =
-        preflight(&program, &instance, &witness).map_err(|e| format!("preflight: {e:?}"))?;
-
-    if !report.is_clean() {
-        return Err(format!(
-            "preflight dirty: {} constraint, {} boundary, {} bus diagnostics",
-            report.constraint_violations.len(),
-            report.boundary_violations.len(),
-            report.bus_diagnostics.len(),
-        ));
-    }
-
-    run_prover_verifier(&program, &instance, &witness, b"ARITH_E2E")
-}
-
-fn prove_and_verify_with_tamper<M>(
+fn arith_case(
     ops: &[IntArithmeticOp],
     bit_width: usize,
-    tamper: M,
-) -> Result<bool, String>
-where
-    M: FnOnce(&mut ColumnTrace, &mut ColumnTrace),
-{
+    tamper: impl FnOnce(&mut ColumnTrace, &mut ColumnTrace),
+) -> (CircuitProgram<F>, ProgramInstance<F>, ProgramWitness<F>) {
     let num_rows = ops.len().next_power_of_two().max(2);
-    let arith_num_rows = num_rows;
-
-    let mut cpu_trace = generate_cpu_trace(ops, num_rows, bit_width);
-
     let layout = IntArithmeticLayout::compute(bit_width);
 
-    let mut arith_trace = generate_arithmetic_trace(ops, &layout, arith_num_rows)
-        .map_err(|e| format!("arith trace: {e:?}"))?;
+    let mut cpu_trace = generate_cpu_trace(ops, num_rows, bit_width);
+    let mut arith_trace = generate_arithmetic_trace(ops, &layout, num_rows).unwrap();
 
     tamper(&mut cpu_trace, &mut arith_trace);
 
-    let program = arith_cpu_program(bit_width, arith_num_rows, ops.len());
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![arith_trace]);
-
-    run_prover_verifier(&program, &instance, &witness, b"ARITH_TAMPER")
+    (
+        arith_cpu_program(bit_width, num_rows, ops.len()),
+        ProgramInstance::new(num_rows, vec![]),
+        ProgramWitness::new(cpu_trace).with_chiplets(vec![arith_trace]),
+    )
 }
 
 fn assert_tamper_rejected(
     ops: &[IntArithmeticOp],
     bit_width: usize,
-    label: &str,
+    fault: Fault<'_>,
     tamper: impl FnOnce(&mut ColumnTrace, &mut ColumnTrace),
 ) {
-    if let Ok(true) = prove_and_verify_with_tamper(ops, bit_width, tamper) {
-        panic!("{label}: tampered proof accepted")
-    }
+    let (program, instance, honest) = arith_case(ops, bit_width, |_, _| {});
+    let (_, _, forged) = arith_case(ops, bit_width, tamper);
+
+    assert_rejected(
+        &program,
+        (&instance, &honest),
+        (&instance, &forged),
+        fault,
+        &config(),
+    );
 }
 
-fn b32_cell(v: u32) -> Flat<Block32> {
-    Block32::from(v).to_hardware()
+fn assert_result_forgery_rejected(op: IntArithmeticOp, claimed: u32) {
+    let (code, a, b) = match op {
+        IntArithmeticOp::U32 { op, a, b } => (op, a, b),
+        IntArithmeticOp::U64 { .. } => panic!("u32 forgeries only"),
+    };
+
+    let wrong_bits = (claimed ^ compute_u32(code, a, b)).count_ones() as usize;
+    let rows = chiplet_rows(wrong_bits, Some("zero_when"));
+    let fault = Fault {
+        constraint_rows: &rows,
+        ..Fault::NONE
+    };
+
+    assert_tamper_rejected(&[op], 32, fault, |cpu, arith| {
+        set_b32(cpu, CpuArithColumns::VAL_RES, 0, claimed);
+        set_b32(arith, PHY_VAL_RES, 0, claimed);
+    });
 }
 
-fn tamper_b32(trace: &mut ColumnTrace, col: usize, row: usize, value: u32) {
-    if let TraceColumn::B32(c) = &mut trace.columns[col] {
-        c[row] = b32_cell(value);
-    } else {
-        panic!("tamper_b32: column {col} is not B32");
-    }
+fn assert_fitted_chain_rejected(op: IntArithmeticOp, forged: u32, carries: u32, broken: usize) {
+    let rows = chiplet_rows(broken, Some("zero_when"));
+    let fault = Fault {
+        constraint_rows: &rows,
+        ..Fault::NONE
+    };
+
+    assert_tamper_rejected(&[op], 32, fault, |cpu, arith| {
+        set_b32(cpu, CpuArithColumns::VAL_RES, 0, forged);
+        set_b32(arith, PHY_VAL_RES, 0, forged);
+        set_b32(arith, PHY_CARRY, 0, carries);
+    });
 }
 
-fn tamper_bit(trace: &mut ColumnTrace, col: usize, row: usize, value: u8) {
-    if let TraceColumn::Bit(c) = &mut trace.columns[col] {
-        c[row] = Bit::new(value);
-    } else {
-        panic!("tamper_bit: column {col} is not Bit");
+fn assert_padding_garbage_rejected(column: usize, garbage: u32) {
+    let ops = padding_test_ops();
+    let row = ops.len();
+    let fault = Fault {
+        constraint_rows: &[(TableId::Main, row, Some("zero_when"))],
+        ..Fault::NONE
+    };
+
+    assert_tamper_rejected(&ops, 32, fault, |cpu, _| {
+        set_b32(cpu, column, row, garbage);
+    });
+}
+
+fn chiplet_rows(
+    count: usize,
+    label: Option<&'static str>,
+) -> Vec<(TableId, usize, Option<&'static str>)> {
+    vec![(TableId::Chiplet(0), 0, label); count]
+}
+
+fn chiplet_answers(arith: &mut ColumnTrace, ops: &[IntArithmeticOp]) {
+    let num_rows = arith.num_rows().unwrap();
+
+    *arith = generate_arithmetic_trace(ops, &IntArithmeticLayout::compute(32), num_rows).unwrap();
+}
+
+fn fitted_carries(a: u32, b: u32, res: u32, out: fn(u32, u32, u32) -> u32) -> (u32, usize) {
+    let fitted = (res ^ a ^ b) >> 1;
+
+    let mut carries = 0;
+    let mut broken = 0;
+    let mut carry_in = 0;
+
+    for k in 0..32 {
+        let want = out((a >> k) & 1, (b >> k) & 1, carry_in);
+        let have = match k {
+            31 => want,
+            _ => (fitted >> k) & 1,
+        };
+
+        broken += usize::from(have != want);
+        carries |= have << k;
+        carry_in = have;
     }
+
+    (carries, broken)
 }
 
 fn op_add(a: u32, b: u32) -> IntArithmeticOp {
@@ -486,7 +506,7 @@ fn arithmetic_chiplet_all_opcodes_basic() {
         op_lt(10, 20),
     ];
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 32), Ok(true));
+    assert_arith_verifies(&ops, 32);
 }
 
 #[test]
@@ -499,7 +519,7 @@ fn arithmetic_chiplet_add_boundary_values() {
         op_add(0xFFFFFFFE, 1),
     ];
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 32), Ok(true));
+    assert_arith_verifies(&ops, 32);
 }
 
 #[test]
@@ -512,7 +532,7 @@ fn arithmetic_chiplet_sub_boundary_values() {
         op_sub(0x80000000, 0x7FFFFFFF),
     ];
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 32), Ok(true));
+    assert_arith_verifies(&ops, 32);
 }
 
 #[test]
@@ -527,7 +547,7 @@ fn arithmetic_chiplet_lt_boundary_values() {
         op_lt(0, u32::MAX),
     ];
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 32), Ok(true));
+    assert_arith_verifies(&ops, 32);
 }
 
 #[test]
@@ -541,7 +561,7 @@ fn arithmetic_chiplet_bitwise_boundary_values() {
         op_not(0x5A5A5A5A),
     ];
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 32), Ok(true));
+    assert_arith_verifies(&ops, 32);
 }
 
 #[test]
@@ -565,7 +585,7 @@ fn arithmetic_chiplet_fibonacci_batch_matches_local_u32() {
         b = sum;
     }
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 32), Ok(true));
+    assert_arith_verifies(&ops, 32);
 
     let mut ra: u32 = 0;
     let mut rb: u32 = 1;
@@ -592,7 +612,7 @@ fn arithmetic_chiplet_u64_add() {
         op_add64(1u64 << 32, 1u64 << 32),
     ];
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 64), Ok(true));
+    assert_arith_verifies(&ops, 64);
 }
 
 #[test]
@@ -604,7 +624,7 @@ fn arithmetic_chiplet_u64_sub() {
         op_sub64(1u64 << 63, (1u64 << 63) - 1),
     ];
 
-    assert_eq!(prove_and_verify_arithmetic(&ops, 64), Ok(true));
+    assert_arith_verifies(&ops, 64);
 }
 
 // =================================================================
@@ -615,8 +635,6 @@ fn arithmetic_chiplet_u64_sub() {
 fn arithmetic_chiplet_mixed_widths_isolated() {
     let ops32 = vec![op_add(10, 20), op_sub(100, 50)];
     let ops64 = vec![op_add64(u64::MAX, 1), op_add64(1u64 << 40, 1u64 << 40)];
-
-    let config = test_config();
 
     let cpu_rows: usize = 4;
     let chip32_rows: usize = ops32.len().next_power_of_two().max(2);
@@ -684,35 +702,7 @@ fn arithmetic_chiplet_mixed_widths_isolated() {
     let instance = ProgramInstance::new(cpu_rows, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![arith32, arith64]);
 
-    let report = preflight(&program, &instance, &witness).expect("preflight mixed_widths");
-
-    assert!(
-        report.is_clean(),
-        "preflight dirty: {} constraint, {} boundary, {} bus",
-        report.constraint_violations.len(),
-        report.boundary_violations.len(),
-        report.bus_diagnostics.len(),
-    );
-
-    let proof = prove(
-        b"ARITH_MIXED",
-        &program,
-        &instance,
-        &witness,
-        &config,
-        [0xAA; 32],
-        None,
-    )
-    .expect("prove mixed_widths");
-
-    let mut vt = Transcript::<H>::new(b"ARITH_MIXED");
-    let pinned_id = program_id(&program).unwrap();
-
-    let result =
-        HekateVerifier::<F, H>::verify(&pinned_id, &program, &instance, &proof, &mut vt, &config)
-            .expect("verify mixed_widths");
-
-    assert!(result, "mixed-width prove/verify failed");
+    assert_verifies(&program, (&instance, &witness), &config());
 }
 
 // =================================================================
@@ -721,37 +711,34 @@ fn arithmetic_chiplet_mixed_widths_isolated() {
 
 #[test]
 fn untampered_bus_forgery_ops_verify() {
-    assert_eq!(
-        prove_and_verify_with_tamper(&bus_forgery_ops(), 32, |_, _| {}),
-        Ok(true)
-    );
+    assert_arith_verifies(&bus_forgery_ops(), 32);
 }
 
 #[test]
 fn reject_cpu_val_a_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "cpu VAL_A", |cpu, _| {
-        tamper_b32(cpu, CpuArithColumns::VAL_A, 0, 11);
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |cpu, _| {
+        set_b32(cpu, CpuArithColumns::VAL_A, 0, 11);
     });
 }
 
 #[test]
 fn reject_cpu_val_b_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "cpu VAL_B", |cpu, _| {
-        tamper_b32(cpu, CpuArithColumns::VAL_B, 1, 8);
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |cpu, _| {
+        set_b32(cpu, CpuArithColumns::VAL_B, 1, 8);
     });
 }
 
 #[test]
 fn reject_cpu_val_res_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "cpu VAL_RES", |cpu, _| {
-        tamper_b32(cpu, CpuArithColumns::VAL_RES, 2, 51);
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |cpu, _| {
+        set_b32(cpu, CpuArithColumns::VAL_RES, 2, 51);
     });
 }
 
 #[test]
 fn reject_cpu_opcode_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "cpu OPCODE", |cpu, _| {
-        tamper_b32(
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |cpu, _| {
+        set_b32(
             cpu,
             CpuArithColumns::OPCODE,
             0,
@@ -765,36 +752,31 @@ fn reject_cpu_midrow_forgery() {
     let ops = bus_forgery_ops();
     let mid = ops.len() / 2;
 
-    assert_tamper_rejected(&ops, 32, "cpu VAL_A mid-row", move |cpu, _| {
-        tamper_b32(cpu, CpuArithColumns::VAL_A, mid, 0xDEADBEEF);
+    assert_tamper_rejected(&ops, 32, BUS_ONLY, move |cpu, _| {
+        set_b32(cpu, CpuArithColumns::VAL_A, mid, 0xDEADBEEF);
     });
 }
 
 #[test]
 fn exploit_int_arith_duplicate_cpu_request_rejected() {
-    assert_tamper_rejected(
-        &bus_forgery_ops(),
-        32,
-        "duplicate cpu request without chiplet partner",
-        |cpu, _| {
-            tamper_b32(cpu, CpuArithColumns::VAL_A, 1, 10);
-            tamper_b32(cpu, CpuArithColumns::VAL_B, 1, 20);
-            tamper_b32(cpu, CpuArithColumns::VAL_RES, 1, 30);
-            tamper_b32(
-                cpu,
-                CpuArithColumns::OPCODE,
-                1,
-                ArithmeticOpcode::ADD as u32,
-            );
-        },
-    );
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |cpu, _| {
+        set_b32(cpu, CpuArithColumns::VAL_A, 1, 10);
+        set_b32(cpu, CpuArithColumns::VAL_B, 1, 20);
+        set_b32(cpu, CpuArithColumns::VAL_RES, 1, 30);
+        set_b32(
+            cpu,
+            CpuArithColumns::OPCODE,
+            1,
+            ArithmeticOpcode::ADD as u32,
+        );
+    });
 }
 
 #[test]
 fn reject_cpu_traded_results() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "cpu results traded", |cpu, _| {
-        tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 12);
-        tamper_b32(cpu, CpuArithColumns::VAL_RES, 1, 30);
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |cpu, _| {
+        set_b32(cpu, CpuArithColumns::VAL_RES, 0, 12);
+        set_b32(cpu, CpuArithColumns::VAL_RES, 1, 30);
     });
 }
 
@@ -804,11 +786,9 @@ fn reject_cpu_traded_results() {
 fn reject_cpu_identical_forged_results() {
     let ops = [op_add(1, 1), op_add(1, 1)];
 
-    assert_eq!(prove_and_verify_with_tamper(&ops, 32, |_, _| {}), Ok(true));
-
-    assert_tamper_rejected(&ops, 32, "identical forged results", |cpu, _| {
-        tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 3);
-        tamper_b32(cpu, CpuArithColumns::VAL_RES, 1, 3);
+    assert_tamper_rejected(&ops, 32, BUS_ONLY, |cpu, _| {
+        set_b32(cpu, CpuArithColumns::VAL_RES, 0, 3);
+        set_b32(cpu, CpuArithColumns::VAL_RES, 1, 3);
     });
 }
 
@@ -818,37 +798,57 @@ fn reject_cpu_identical_forged_results() {
 
 #[test]
 fn reject_chiplet_val_a_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "chiplet VAL_A", |_, arith| {
-        tamper_b32(arith, PHY_VAL_A, 0, 11);
+    let mut answered = bus_forgery_ops();
+    answered[0] = op_add(11, 20);
+
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |_, arith| {
+        chiplet_answers(arith, &answered);
     });
 }
 
 #[test]
 fn reject_chiplet_val_b_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "chiplet VAL_B", |_, arith| {
-        tamper_b32(arith, PHY_VAL_B, 0, 21);
+    let mut answered = bus_forgery_ops();
+    answered[0] = op_add(10, 21);
+
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |_, arith| {
+        chiplet_answers(arith, &answered);
     });
 }
 
 #[test]
 fn reject_chiplet_val_res_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "chiplet VAL_RES", |_, arith| {
-        tamper_b32(arith, PHY_VAL_RES, 0, 31);
+    let rows = chiplet_rows((31u32 ^ 30).count_ones() as usize, Some("zero_when"));
+    let fault = Fault {
+        constraint_rows: &rows,
+        buses: &[IntArithmeticChiplet::BUS_ID],
+        ..Fault::NONE
+    };
+
+    assert_tamper_rejected(&bus_forgery_ops(), 32, fault, |_, arith| {
+        set_b32(arith, PHY_VAL_RES, 0, 31);
     });
 }
 
 #[test]
 fn reject_chiplet_opcode_forgery() {
-    assert_tamper_rejected(&bus_forgery_ops(), 32, "chiplet OPCODE", |_, arith| {
-        tamper_b32(arith, PHY_OPCODE, 0, ArithmeticOpcode::SUB as u32);
+    let mut answered = bus_forgery_ops();
+    answered[0] = op_xor(10, 20);
+
+    assert_eq!(10 ^ 20, 10 + 20);
+
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |_, arith| {
+        chiplet_answers(arith, &answered);
     });
 }
 
 #[test]
 fn reject_chiplet_second_op_forgery() {
-    let ops = bus_forgery_ops();
-    assert_tamper_rejected(&ops, 32, "chiplet VAL_A second op", |_, arith| {
-        tamper_b32(arith, PHY_VAL_A, 1, 99);
+    let mut answered = bus_forgery_ops();
+    answered[1] = op_add(99, 7);
+
+    assert_tamper_rejected(&bus_forgery_ops(), 32, BUS_ONLY, |_, arith| {
+        chiplet_answers(arith, &answered);
     });
 }
 
@@ -858,182 +858,112 @@ fn reject_chiplet_second_op_forgery() {
 
 #[test]
 fn reject_wrong_result_via_carry_chain() {
-    let ops = vec![op_add(10, 20)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "ADD: both sides claim VAL_RES = 31 (correct = 30); carry chain catches",
-        |cpu, arith| {
-            tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 31);
-            tamper_b32(arith, PHY_VAL_RES, 0, 31);
-        },
-    );
+    assert_result_forgery_rejected(op_add(10, 20), 31);
 }
 
 #[test]
 fn reject_wrong_borrow_via_sub_chain() {
-    let ops = vec![op_sub(100, 50)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "SUB: both sides claim VAL_RES = 51 (correct = 50); borrow chain catches",
-        |cpu, arith| {
-            tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 51);
-            tamper_b32(arith, PHY_VAL_RES, 0, 51);
-        },
-    );
+    assert_result_forgery_rejected(op_sub(100, 50), 51);
 }
 
 #[test]
 fn reject_wrong_result_via_and_constraint() {
-    let ops = vec![op_and(0xFF, 0x0F)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "AND: both sides claim VAL_RES = 0x10 (correct = 0x0F); AND constraint catches",
-        |cpu, arith| {
-            tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 0x10);
-            tamper_b32(arith, PHY_VAL_RES, 0, 0x10);
-        },
-    );
+    assert_result_forgery_rejected(op_and(0xFF, 0x0F), 0x10);
 }
 
 #[test]
 fn reject_wrong_result_via_xor_constraint() {
-    let ops = vec![op_xor(0xAAAA, 0x5555)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "XOR: both sides claim VAL_RES = 0xFFFE (correct = 0xFFFF); XOR constraint catches",
-        |cpu, arith| {
-            tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 0xFFFE);
-            tamper_b32(arith, PHY_VAL_RES, 0, 0xFFFE);
-        },
-    );
+    assert_result_forgery_rejected(op_xor(0xAAAA, 0x5555), 0xFFFE);
 }
 
 #[test]
 fn reject_wrong_result_via_not_constraint() {
-    let ops = vec![op_not(0)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "NOT: both sides claim VAL_RES = 0xFFFFFFFE (correct = 0xFFFFFFFF); NOT constraint catches",
-        |cpu, arith| {
-            tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 0xFFFFFFFE);
-            tamper_b32(arith, PHY_VAL_RES, 0, 0xFFFFFFFE);
-        },
-    );
+    assert_result_forgery_rejected(op_not(0), 0xFFFFFFFE);
 }
 
 #[test]
 fn reject_wrong_result_via_lt_constraint() {
-    let ops = vec![op_lt(10, 20)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "LT: both sides claim VAL_RES = 0 (correct = 1); LT borrow chain catches",
-        |cpu, arith| {
-            tamper_b32(cpu, CpuArithColumns::VAL_RES, 0, 0);
-            tamper_b32(arith, PHY_VAL_RES, 0, 0);
-        },
-    );
+    assert_result_forgery_rejected(op_lt(10, 20), 0);
 }
 
 #[test]
-fn reject_two_selectors_set() {
-    let ops = vec![op_add(10, 20)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "two selectors set: s_add=1 AND s_sub=1; pairwise mutex catches",
-        |_, arith| {
-            tamper_bit(arith, PHY_S_SUB, 0, 1);
-        },
-    );
+fn reject_wrong_sum_with_fitted_carries() {
+    let (a, b) = (10u32, 20u32);
+    let forged = a.wrapping_add(b) ^ 2;
+    let (carries, broken) = fitted_carries(a, b, forged, |a, b, c| (a & b) | (c & (a ^ b)));
+
+    assert_fitted_chain_rejected(op_add(a, b), forged, carries, broken);
+}
+
+#[test]
+fn reject_wrong_difference_with_fitted_borrows() {
+    let (a, b) = (100u32, 50u32);
+    let forged = a.wrapping_sub(b) ^ 2;
+    let (borrows, broken) =
+        fitted_carries(a, b, forged, |a, b, w| ((a ^ 1) & b) | (w & (a ^ b ^ 1)));
+
+    assert_fitted_chain_rejected(op_sub(a, b), forged, borrows, broken);
+}
+
+#[test]
+fn reject_three_selectors_set() {
+    let opcode = ArithmeticOpcode::AND as u32;
+    let rows = chiplet_rows(3, None);
+    let fault = Fault {
+        constraint_rows: &rows,
+        ..Fault::NONE
+    };
+
+    assert_tamper_rejected(&[op_add(0, 0)], 32, fault, |cpu, arith| {
+        set_bit(arith, PHY_S_SUB, 0, Bit::ONE);
+        set_bit(arith, PHY_S_XOR, 0, Bit::ONE);
+        set_b32(arith, PHY_OPCODE, 0, opcode);
+        set_b32(cpu, CpuArithColumns::OPCODE, 0, opcode);
+    });
 }
 
 #[test]
 fn reject_opcode_mismatch() {
     let ops = vec![op_add(10, 20)];
-    assert_tamper_rejected(
-        &ops,
-        32,
-        "OPCODE bound: chiplet OPCODE=SUB but s_add=1 (both sides forge); opcode-bind catches",
-        |cpu, arith| {
-            tamper_b32(
-                cpu,
-                CpuArithColumns::OPCODE,
-                0,
-                ArithmeticOpcode::SUB as u32,
-            );
-            tamper_b32(arith, PHY_OPCODE, 0, ArithmeticOpcode::SUB as u32);
-        },
-    );
+    let rows = chiplet_rows(1, None);
+    let fault = Fault {
+        constraint_rows: &rows,
+        ..Fault::NONE
+    };
+
+    assert_tamper_rejected(&ops, 32, fault, |cpu, arith| {
+        set_b32(
+            cpu,
+            CpuArithColumns::OPCODE,
+            0,
+            ArithmeticOpcode::SUB as u32,
+        );
+        set_b32(arith, PHY_OPCODE, 0, ArithmeticOpcode::SUB as u32);
+    });
 }
 
 // =================================================================
 // 10. PADDING ROWS - BUS GATE ALLOWS GARBAGE
 // =================================================================
 
-fn prove_and_verify_with_padding_tamper<T>(
-    ops: &[IntArithmeticOp],
-    tamper: T,
-) -> Result<bool, String>
-where
-    T: FnOnce(&mut ColumnTrace, usize),
-{
-    let num_rows = ops.len().next_power_of_two().max(2);
-    let arith_num_rows = num_rows;
-
-    let mut cpu_trace = generate_cpu_trace(ops, num_rows, 32);
-
-    let layout = IntArithmeticLayout::compute(32);
-    let arith_trace = generate_arithmetic_trace(ops, &layout, arith_num_rows)
-        .map_err(|e| format!("arith trace: {e:?}"))?;
-
-    let padding_row = ops.len();
-    assert!(padding_row < num_rows);
-
-    tamper(&mut cpu_trace, padding_row);
-
-    let program = arith_cpu_program(32, arith_num_rows, ops.len());
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![arith_trace]);
-
-    run_prover_verifier(&program, &instance, &witness, b"ARITH_PADDING")
-}
-
 #[test]
 fn padding_val_a_garbage_rejected() {
-    let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
-        tamper_b32(cpu, CpuArithColumns::VAL_A, row, 0xDEADBEEF);
-    });
-    assert_eq!(r, Ok(false));
+    assert_padding_garbage_rejected(CpuArithColumns::VAL_A, 0xDEADBEEF);
 }
 
 #[test]
 fn padding_val_b_garbage_rejected() {
-    let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
-        tamper_b32(cpu, CpuArithColumns::VAL_B, row, 0xCAFEBABE);
-    });
-    assert_eq!(r, Ok(false));
+    assert_padding_garbage_rejected(CpuArithColumns::VAL_B, 0xCAFEBABE);
 }
 
 #[test]
 fn padding_val_res_garbage_rejected() {
-    let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
-        tamper_b32(cpu, CpuArithColumns::VAL_RES, row, 0xBADF00D);
-    });
-    assert_eq!(r, Ok(false));
+    assert_padding_garbage_rejected(CpuArithColumns::VAL_RES, 0xBADF00D);
 }
 
 #[test]
 fn padding_opcode_garbage_rejected() {
-    let r = prove_and_verify_with_padding_tamper(&padding_test_ops(), |cpu, row| {
-        tamper_b32(cpu, CpuArithColumns::OPCODE, row, 0xFFFFFFFF);
-    });
-    assert_eq!(r, Ok(false));
+    assert_padding_garbage_rejected(CpuArithColumns::OPCODE, 0xFFFFFFFF);
 }
 
 #[test]
@@ -1086,7 +1016,10 @@ fn attached_composite_proves_through_wire() {
 
         if extra {
             arith_trace
-                .add_column(TraceColumn::B32(vec![b32_cell(0); num_rows]))
+                .add_column(TraceColumn::B32(vec![
+                    Block32::ZERO.to_hardware();
+                    num_rows
+                ]))
                 .unwrap();
         }
 
@@ -1101,10 +1034,6 @@ fn attached_composite_proves_through_wire() {
         let witness = ProgramWitness::new(generate_cpu_trace(&ops, num_rows, 32))
             .with_chiplets(vec![arith_trace]);
 
-        assert!(preflight(&program, &instance, &witness).unwrap().is_clean());
-        assert_eq!(
-            run_prover_verifier(&program, &instance, &witness, b"ARITH_COMPOSITE"),
-            Ok(true)
-        );
+        assert_verifies(&program, (&instance, &witness), &config());
     }
 }

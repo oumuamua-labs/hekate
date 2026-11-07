@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Hash abstraction for the Hekate ZK proving system: Blake3, SHA-256, SHA-3-256."
+description = "Hash abstraction for the Hekate ZK proving system: Blake3, SHA-256, SHA-3-256, SHAKE256."
 keywords = ["zk", "cryptography", "hash", "blake3", "no-std"]
 categories = ["cryptography", "no-std"]
 readme = "README.md"
@@ -21,6 +21,7 @@ std = ["hekate-math/std"]
 blake3 = ["dep:blake3"]
 sha2 = ["dep:sha2"]
 sha3 = ["dep:sha3", "dep:keccak"]
+shake256 = ["dep:keccak"]
 parallel = ["dep:rayon", "hekate-math/parallel"]
 transcript-trace = []
 

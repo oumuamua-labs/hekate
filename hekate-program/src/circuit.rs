@@ -19,12 +19,12 @@ use hekate_math::{HardwareField, TowerField};
 use crate::chiplet::ChipletDef;
 use crate::constraint::builder::ConstraintSystem;
 use crate::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
-use crate::digest;
+use crate::digest::{self, ProgramId};
 use crate::expander::VirtualExpander;
 use crate::outer::TableStatics;
 use crate::permutation::{
     PermutationCheckSpec, RankTable, Service, Source, TableHeight, validate_bus_set,
-    validate_fixed_selectors, validate_ordered_emits,
+    validate_bus_tags, validate_fixed_selectors, validate_ordered_emits,
 };
 use crate::{Air, FixedColumn, FixedShape, InlineKernelHint, Program, validate_fixed_columns};
 
@@ -605,7 +605,8 @@ impl<F: TowerField + HardwareField> Circuit<F> {
             .chain(chiplet_specs.iter().flatten())
             .map(|(id, s)| (id.as_str(), s));
 
-        validate_bus_set(endpoints)?;
+        validate_bus_set(endpoints.clone())?;
+        validate_bus_tags::<F>(endpoints)?;
 
         let mut rank_tables = Vec::with_capacity(1 + self.chiplet_defs.len());
 
@@ -752,19 +753,19 @@ pub struct CircuitProgram<F: TowerField> {
     /// Memo of `compute_id`;
     /// whatever mutates a field above must reset it.
     #[cfg(feature = "std")]
-    id: std::sync::OnceLock<[u8; 32]>,
+    id: std::sync::OnceLock<ProgramId>,
 }
 
 impl<F: TowerField> CircuitProgram<F> {
     /// [`digest::program_id`] of this program, hashed on the first call and kept.
     #[cfg(feature = "std")]
-    pub fn program_id(&self) -> [u8; 32] {
+    pub fn program_id(&self) -> ProgramId {
         *self.id.get_or_init(|| self.compute_id())
     }
 
     /// [`digest::program_id`] of this program, hashed on every call.
     #[cfg(not(feature = "std"))]
-    pub fn program_id(&self) -> [u8; 32] {
+    pub fn program_id(&self) -> ProgramId {
         self.compute_id()
     }
 
@@ -773,7 +774,7 @@ impl<F: TowerField> CircuitProgram<F> {
         self.table.statics()
     }
 
-    fn compute_id(&self) -> [u8; 32] {
+    fn compute_id(&self) -> ProgramId {
         digest::program_id_from_parts(
             &self.table,
             self.num_public_inputs,

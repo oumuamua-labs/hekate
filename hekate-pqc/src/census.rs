@@ -9,7 +9,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::Col;
 use hekate_program::permutation::Source;
@@ -18,11 +18,13 @@ use hekate_program::{Air, FixedShape};
 use crate::sampler::{SIB_BUS_ID, SamplerChiplet};
 use crate::wiring::{COEF_BUS_ID, LANE_BUS_ID, N, WORD_BUS_ID};
 
-type F = Block128;
+type F = Block256;
 
 pub(crate) type Key = (String, u128, u128);
 
 pub(crate) type Producers = [(String, Vec<(&'static str, u16)>)];
+
+type WitnessColumn = (&'static str, usize);
 
 /// Emitters of every key the `coef`, `word`, `lane` and sib endpoints
 /// of `defs` pin, by table and whether it produces the key, with the keys
@@ -32,7 +34,7 @@ pub(crate) fn census(
     sampler: &SamplerChiplet<F>,
     producers: &Producers,
 ) -> Result<BTreeMap<Key, Vec<(String, bool)>>, String> {
-    let (witness, forced) = sampler_keys(sampler);
+    let (witness, forced) = sampler_keys(sampler)?;
 
     let mut keys = pinned_keys(defs, &witness)?;
     for key in forced {
@@ -102,7 +104,7 @@ pub(crate) fn unbalanced(keys: &BTreeMap<Key, Vec<(String, bool)>>) -> Vec<&Key>
 
 fn pinned_keys(
     defs: &[ChipletDef<F>],
-    witness: &[(&str, usize)],
+    witness: &[WitnessColumn],
 ) -> Result<BTreeMap<Key, Vec<String>>, String> {
     let mut keys: BTreeMap<Key, Vec<String>> = BTreeMap::new();
     for def in defs {
@@ -146,11 +148,11 @@ fn pinned_keys(
                 .ok_or_else(|| format!("{name}: {bus} selector is not pinned"))?;
 
             for row in 0..extent(selector)? {
-                if value(selector, row) == 0 {
+                if value(selector, row)? == 0 {
                     continue;
                 }
 
-                keys.entry((bus.clone(), value(label, row), value(index, row)))
+                keys.entry((bus.clone(), value(label, row)?, value(index, row)?))
                     .or_default()
                     .push(name.clone());
             }
@@ -163,27 +165,29 @@ fn pinned_keys(
 /// The Sampler's witness-keyed columns, and the keys its
 /// AIR forces them to carry: positions 0..N of each rejection
 /// polynomial and N + i, i ≥ 256 − τ, of each challenge link.
-fn sampler_keys(sampler: &SamplerChiplet<F>) -> (Vec<(&'static str, usize)>, Vec<Key>) {
+fn sampler_keys(sampler: &SamplerChiplet<F>) -> Result<(Vec<WitnessColumn>, Vec<Key>), String> {
     let ly = sampler.layout();
     let def = sampler.def().unwrap();
 
     let pins: BTreeMap<usize, &FixedShape<F>> =
         def.pins().iter().map(|p| (p.col_idx, &p.shape)).collect();
 
-    let labels = |work: Col| -> Vec<u128> {
+    let labels = |work: Col| -> Result<Vec<u128>, String> {
         let (Some(work), Some(poly)) = (pins.get(&work.index()), pins.get(&ly.poly.index())) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
-        let mut labels: Vec<u128> = (0..extent(work).unwrap())
-            .filter(|&row| value(work, row) != 0)
-            .map(|row| value(poly, row))
-            .collect();
+        let mut labels = Vec::new();
+        for row in 0..extent(work)? {
+            if value(work, row)? != 0 {
+                labels.push(value(poly, row)?);
+            }
+        }
 
         labels.sort_unstable();
         labels.dedup();
 
-        labels
+        Ok(labels)
     };
 
     let (mut witness, mut keys) = (Vec::new(), Vec::new());
@@ -198,7 +202,7 @@ fn sampler_keys(sampler: &SamplerChiplet<F>) -> (Vec<(&'static str, usize)>, Vec
                 .map(|col| ("SamplerChiplet", col.index())),
         );
 
-        for label in labels(rc.work) {
+        for label in labels(rc.work)? {
             keys.extend((0..N).map(|pos| coef(label, pos)));
         }
     }
@@ -210,12 +214,12 @@ fn sampler_keys(sampler: &SamplerChiplet<F>) -> (Vec<(&'static str, usize)>, Vec
 
         let first = bb.shape.first_cell();
 
-        for label in labels(bc.work) {
+        for label in labels(bc.work)? {
             keys.extend((first..N).map(|i| coef(label, N + i)));
         }
     }
 
-    (witness, keys)
+    Ok((witness, keys))
 }
 
 fn extent(shape: &FixedShape<F>) -> Result<usize, String> {
@@ -238,6 +242,11 @@ fn extent(shape: &FixedShape<F>) -> Result<usize, String> {
     }
 }
 
-fn value(shape: &FixedShape<F>, row: usize) -> u128 {
-    shape.value_at_row(row, 0).to_tower().0
+fn value(shape: &FixedShape<F>, row: usize) -> Result<u128, String> {
+    let (lo, hi) = shape.value_at_row(row, 0).to_tower().split();
+
+    match hi.0 {
+        0 => Ok(lo.0),
+        _ => Err(format!("pinned value at row {row} does not fit 128 bits")),
+    }
 }

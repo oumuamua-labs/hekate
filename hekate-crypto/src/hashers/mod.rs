@@ -5,23 +5,70 @@
 use core::fmt::Debug;
 use hekate_math::TowerField;
 
+#[cfg(any(all(feature = "sha3", target_arch = "aarch64"), feature = "shake256"))]
+mod sponge;
+
 #[cfg(feature = "blake3")]
 pub mod blake3;
 #[cfg(feature = "sha2")]
 pub mod sha256;
 #[cfg(feature = "sha3")]
 pub mod sha3;
+#[cfg(feature = "shake256")]
+pub mod shake256;
 
-#[cfg(not(any(feature = "blake3", feature = "sha2", feature = "sha3")))]
-compile_error!("At least one hashing feature must be enabled: 'blake3', 'sha2' or 'sha3'");
+#[cfg(not(any(
+    feature = "blake3",
+    feature = "sha2",
+    feature = "sha3",
+    feature = "shake256"
+)))]
+compile_error!(
+    "At least one hashing feature must be enabled: 'blake3', 'sha2', 'sha3' or 'shake256'"
+);
+
+mod sealed {
+    /// The widths `Digest::leading` and the node buffers are sized for.
+    pub trait Sealed {}
+
+    impl Sealed for [u8; 32] {}
+    impl Sealed for [u8; 64] {}
+}
+
+pub trait Digest:
+    sealed::Sealed + Copy + Eq + Debug + Send + Sync + 'static + AsRef<[u8]> + AsMut<[u8]>
+{
+    const BYTES: usize;
+    const ZERO: Self;
+
+    /// Returns the digest `bytes` spell, `None` off its width.
+    fn from_slice(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTES {
+            return None;
+        }
+
+        let mut digest = Self::ZERO;
+        digest.as_mut().copy_from_slice(bytes);
+
+        Some(digest)
+    }
+
+    /// The leading 32 bytes: tags and seeds are that wide.
+    fn leading(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&self.as_ref()[..32]);
+
+        out
+    }
+}
 
 /// Defines a cryptographic hash function
 /// interface for Fiat-Shamir and Merkle Trees.
 /// Allows switching between SHA-3, SHA-256,
 /// Blake3, etc. without changing core logic.
 pub trait Hasher: Clone + Debug + Send + Sync + 'static {
-    /// The size of the hash output in bytes.
-    const OUTPUT_SIZE: usize;
+    /// The output; its width sizes every Merkle node and transcript squeeze.
+    type Digest: Digest;
 
     /// Create a new hasher instance.
     fn new() -> Self;
@@ -31,13 +78,13 @@ pub trait Hasher: Clone + Debug + Send + Sync + 'static {
 
     /// Finalize the hash and return the result.
     /// Resets the internal state if needed or consumes it.
-    fn finalize(self) -> [u8; 32];
+    fn finalize(self) -> Self::Digest;
 
     /// Finalize and reset.
-    fn finalize_reset(&mut self) -> [u8; 32];
+    fn finalize_reset(&mut self) -> Self::Digest;
 
     /// Hash of `data` in one call.
-    fn digest(data: &[u8]) -> [u8; 32] {
+    fn digest(data: &[u8]) -> Self::Digest {
         let mut hasher = Self::new();
         hasher.update(data);
 
@@ -46,7 +93,7 @@ pub trait Hasher: Clone + Debug + Send + Sync + 'static {
 
     /// Hashes each `len`-byte message of `data`
     /// into `out`, matching `digest` on every one.
-    fn digest_many(data: &[u8], len: usize, out: &mut [[u8; 32]]) {
+    fn digest_many(data: &[u8], len: usize, out: &mut [Self::Digest]) {
         for (i, slot) in out.iter_mut().enumerate() {
             *slot = Self::digest(&data[i * len..(i + 1) * len]);
         }
@@ -87,31 +134,60 @@ pub trait Hasher: Clone + Debug + Send + Sync + 'static {
 
 const FIELD_BUFFER_BYTES: usize = 16 * 1024;
 
-#[cfg(feature = "sha3")]
+#[cfg(feature = "shake256")]
+pub type DefaultHasher = shake256::Shake256Hasher;
+
+#[cfg(all(feature = "sha3", not(feature = "shake256")))]
 pub type DefaultHasher = sha3::Sha3_256Hasher;
 
-#[cfg(all(feature = "sha2", not(feature = "sha3")))]
+#[cfg(all(feature = "sha2", not(feature = "sha3"), not(feature = "shake256")))]
 pub type DefaultHasher = sha256::Sha256Hasher;
 
-#[cfg(all(feature = "blake3", not(feature = "sha3"), not(feature = "sha2")))]
+#[cfg(all(
+    feature = "blake3",
+    not(feature = "sha3"),
+    not(feature = "sha2"),
+    not(feature = "shake256")
+))]
 pub type DefaultHasher = blake3::Blake3Hasher;
 
-#[cfg(feature = "sha3")]
+#[cfg(feature = "shake256")]
+#[inline]
+pub const fn default_hasher_name() -> &'static str {
+    "hekate_crypto::shake256::Shake256Hasher"
+}
+
+#[cfg(all(feature = "sha3", not(feature = "shake256")))]
 #[inline]
 pub const fn default_hasher_name() -> &'static str {
     "hekate_crypto::sha3::Sha3_256Hasher"
 }
 
-#[cfg(all(feature = "sha2", not(feature = "sha3")))]
+#[cfg(all(feature = "sha2", not(feature = "sha3"), not(feature = "shake256")))]
 #[inline]
 pub const fn default_hasher_name() -> &'static str {
     "hekate_crypto::sha256::Sha256Hasher"
 }
 
-#[cfg(all(feature = "blake3", not(feature = "sha3"), not(feature = "sha2")))]
+#[cfg(all(
+    feature = "blake3",
+    not(feature = "sha3"),
+    not(feature = "sha2"),
+    not(feature = "shake256")
+))]
 #[inline]
 pub const fn default_hasher_name() -> &'static str {
     "hekate_crypto::blake3::Blake3Hasher"
+}
+
+impl Digest for [u8; 32] {
+    const BYTES: usize = 32;
+    const ZERO: Self = [0; 32];
+}
+
+impl Digest for [u8; 64] {
+    const BYTES: usize = 64;
+    const ZERO: Self = [0; 64];
 }
 
 #[cfg(test)]
@@ -120,14 +196,14 @@ mod tests {
     use alloc::vec::Vec;
     use hekate_math::{Block32, Block128};
 
-    fn incremental<H: Hasher>(data: &[u8]) -> [u8; 32] {
+    fn incremental<H: Hasher>(data: &[u8]) -> H::Digest {
         let mut hasher = H::new();
         hasher.update(data);
 
         hasher.finalize()
     }
 
-    fn per_element<H: Hasher, F: TowerField>(elements: &[F]) -> [u8; 32] {
+    fn per_element<H: Hasher, F: TowerField>(elements: &[F]) -> H::Digest {
         let mut hasher = H::new();
         for element in elements {
             hasher.update(&element.to_bytes());
@@ -136,7 +212,7 @@ mod tests {
         hasher.finalize()
     }
 
-    fn buffered<H: Hasher, F: TowerField>(elements: &[F]) -> [u8; 32] {
+    fn buffered<H: Hasher, F: TowerField>(elements: &[F]) -> H::Digest {
         let mut hasher = H::new();
         hasher.update_fields(elements.iter().copied());
 
@@ -180,7 +256,7 @@ mod tests {
             for count in [0, 1, 2, 3, 63, 64, 65] {
                 let msgs = &data[..count * len];
 
-                let mut out = alloc::vec![[0u8; 32]; count];
+                let mut out = alloc::vec![H::Digest::ZERO; count];
                 H::digest_many(msgs, len, &mut out);
 
                 for (i, digest) in out.iter().enumerate() {
@@ -228,5 +304,30 @@ mod tests {
     #[test]
     fn sha3_digest_many_matches_digest() {
         check_many::<sha3::Sha3_256Hasher>();
+    }
+
+    #[cfg(feature = "shake256")]
+    #[test]
+    fn shake256_one_shot_and_buffered_fields_match_incremental() {
+        check::<shake256::Shake256Hasher>();
+    }
+
+    #[cfg(feature = "shake256")]
+    #[test]
+    fn shake256_digest_many_matches_digest() {
+        check_many::<shake256::Shake256Hasher>();
+    }
+
+    #[test]
+    fn digest_from_slice_takes_its_width_only() {
+        let bytes: [u8; 64] = core::array::from_fn(|i| i as u8);
+
+        assert_eq!(
+            <[u8; 32]>::from_slice(&bytes[..32]),
+            Some(bytes[..32].try_into().unwrap())
+        );
+        assert_eq!(<[u8; 64]>::from_slice(&bytes), Some(bytes));
+        assert_eq!(<[u8; 32]>::from_slice(&bytes), None);
+        assert_eq!(<[u8; 64]>::from_slice(&bytes[..63]), None);
     }
 }

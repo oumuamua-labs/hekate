@@ -13,11 +13,13 @@
 mod common;
 
 use common::{
-    FIPS128_CIPHER, SBOX_ROM_ROWS, assert_air_clean, build_cpu_trace_128, fips_call_128,
-    make_program_128, prove_and_verify, whitened_128, xor_b8,
+    FIPS128_CIPHER, SBOX_128, SBOX_ROM_ROWS, assert_rejected, assert_verifies, build_cpu_trace_128,
+    fips_call_128, make_program_128, whitened_128,
 };
 use hekate_aes::PhysAes128Columns;
 use hekate_core::trace::ColumnTrace;
+use hekate_testkit::cell::xor_b8;
+use hekate_testkit::fault::Fault;
 
 const AES_ROWS: usize = 32;
 
@@ -74,11 +76,7 @@ fn two_identical_calls_e2e() {
 
     let cpu_trace = build_cpu_trace_128(&[(whitened, FIPS128_CIPHER), (whitened, FIPS128_CIPHER)]);
 
-    match prove_and_verify(&air.program, cpu_trace, two_call_traces()) {
-        Ok(true) => {}
-        Ok(false) => panic!("rejected two honest identical calls"),
-        Err(e) => panic!("error: {e}"),
-    }
+    assert_verifies(&air.program, cpu_trace, two_call_traces());
 }
 
 #[test]
@@ -96,13 +94,17 @@ fn exploit_aes128_sbox_even_multiplicity_rejected() {
 
     let whitened = whitened_128();
     let cpu_trace = build_cpu_trace_128(&[(whitened, forged), (whitened, forged)]);
+    let honest_cpu = build_cpu_trace_128(&[(whitened, FIPS128_CIPHER), (whitened, FIPS128_CIPHER)]);
 
-    assert_air_clean(&air.program, &cpu_trace, &traces);
+    let fault = Fault {
+        buses: &[SBOX_128],
+        ..Fault::NONE
+    };
 
-    match prove_and_verify(&air.program, cpu_trace, traces) {
-        Ok(false) | Err(_) => {}
-        Ok(true) => {
-            panic!("accepted a ciphertext with SBOX_OUT[{FORGED_BYTE}] off by {FORGED_DELTA:#04x}")
-        }
-    }
+    assert_rejected(
+        &air.program,
+        (honest_cpu, two_call_traces()),
+        (cpu_trace, traces),
+        fault,
+    );
 }

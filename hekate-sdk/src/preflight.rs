@@ -13,7 +13,7 @@ use hashbrown::HashMap;
 use hekate_core::errors;
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{Trace, TraceColumn, TraceCompatibleField};
-use hekate_math::{Block128, Flat, TowerField};
+use hekate_math::{Flat, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::permutation::{
@@ -118,7 +118,7 @@ pub struct BusEndpoint<F> {
     pub claimed_sum: Flat<F>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TableId {
     Main,
     Chiplet(usize),
@@ -788,10 +788,9 @@ where
 
     let constant = match spec.kind {
         BusKind::Permutation => {
-            let (tag, _) = bus_tag(bus_id).split();
             let top = spec.slots().fold(one, |power, _| power * beta);
 
-            gamma + F::from(tag.0).to_hardware() * top
+            gamma + bus_tag::<F>(bus_id).to_hardware() * top
         }
         BusKind::Lookup => gamma,
     };
@@ -1179,7 +1178,7 @@ pub fn preflight<F, P, T>(
     witness: &ProgramWitness<F, T>,
 ) -> errors::Result<PreflightReport<F>>
 where
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
     P: Program<F>,
     T: Trace,
 {
@@ -1522,7 +1521,7 @@ fn invert_batch<F: TraceCompatibleField>(values: &mut [Flat<F>], prefix: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hekate_math::HardwareField;
+    use hekate_math::{Block128, HardwareField};
 
     #[test]
     fn invert_batch_matches_single_inversions_around_zeros() {

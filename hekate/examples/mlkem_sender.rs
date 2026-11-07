@@ -15,7 +15,7 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block8, Block16, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block8, Block16, Block32, Block256, TowerField};
 use hekate_aes::trace::{Aes256Call, aes256_encrypt_block, expand_key_256};
 use hekate_aes::{Aes256Chiplet, AesRound256Air, host_key_selector_shape, host_selector_shape};
 use hekate_core::errors;
@@ -34,7 +34,7 @@ use ml_kem::{Ciphertext, Decapsulate, Generate, Kem, KeyExport, MlKem512, MlKem7
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const SEED_WORDS: usize = 8;

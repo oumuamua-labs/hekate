@@ -4,12 +4,12 @@
 License, version 3.
 
   The copyright holders of Hekate grant you permission to combine Hekate
-with the Hekate prover shared library (libhekate_prover_cdylib)
-distributed in binary form by Oumuamua Labs, and to convey the resulting
-combined work under terms of your choice, provided that you comply with
-the GNU Affero General Public License, version 3, in all respects for
-Hekate and for every other portion of the combined work that is not the
-Hekate prover shared library.
+with the Hekate prover shared library (libhekate_prover) distributed
+in binary form by Oumuamua Labs, and to convey the resulting combined
+work under terms of your choice, provided that you comply with the
+GNU Affero General Public License, version 3, in all respects for Hekate
+and for every other portion of the combined work that is not the Hekate
+prover shared library.
 
   This permission covers the Hekate prover shared library and nothing
 else. It grants no right in that library, which is distributed under its

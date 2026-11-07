@@ -9,8 +9,8 @@
 mod common;
 
 use common::{
-    CPU_ROWS, F, FIPS128_CIPHER, H, assert_air_violated, build_cpu_trace_128, fips_call_128,
-    make_program_128, prove_and_verify, whitened_128,
+    CPU_ROWS, F, FIPS128_CIPHER, H, HOST, assert_rejected, build_cpu_trace_128, fips_call_128,
+    make_program_128, whitened_128,
 };
 use hekate_aes::{Aes128Chiplet, AesRound128Air, CpuAes128Columns};
 use hekate_core::config::Config;
@@ -24,6 +24,7 @@ use hekate_program::digest::program_id;
 use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::fault::{Check, Fault};
 use hekate_verifier::HekateVerifier;
 
 const LABEL: &[u8] = b"AES_Direction_Pin";
@@ -191,12 +192,28 @@ fn unpinned_host_is_rejected_at_verify() {
 #[cfg_attr(debug_assertions, ignore)]
 fn cadence_pins_reject_unbound_ciphertext() {
     let air = make_program_128(AES_ROWS, 2);
-    let (cpu_trace, traces) = unbound_ciphertext_witness(&air.aes);
 
-    assert_air_violated(&air.program, &cpu_trace, &traces);
+    let call = fips_call_128();
+    let whitened = whitened_128();
+    let honest = (
+        build_cpu_trace_128(&[(whitened, FIPS128_CIPHER), (whitened, FIPS128_CIPHER)]),
+        air.aes.generate_traces(&[call.clone(), call]).unwrap(),
+    );
 
-    match prove_and_verify(&air.program, cpu_trace, traces) {
-        Ok(false) | Err(_) => {}
-        Ok(true) => panic!("accepted a ciphertext bound to no CPU request row"),
-    }
+    let fault = Fault {
+        pin_columns: &[
+            (HOST, CpuAes128Columns::KEY_SELECTOR),
+            (HOST, CpuAes128Columns::SELECTOR),
+        ],
+        buses: &[AesRound128Air::LINK_BUS_ID, AesRound128Air::KEY_BUS_ID],
+        first_check: Some(Check::FixedColumn),
+        ..Fault::NONE
+    };
+
+    assert_rejected(
+        &air.program,
+        honest,
+        unbound_ciphertext_witness(&air.aes),
+        fault,
+    );
 }

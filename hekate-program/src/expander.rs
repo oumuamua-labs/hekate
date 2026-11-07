@@ -10,15 +10,16 @@ use hekate_core::errors::Error;
 use hekate_core::fold::PolyKind;
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{ColumnType, Trace, TraceColumn, TraceCompatibleField};
-use hekate_math::{
-    Bit, Block8, Block16, Block32, Block64, Block128, Flat, HardwareField, TowerField,
-};
+use hekate_math::{Bit, Block8, Block16, Block32, Block64, Flat, HardwareField, TowerField};
 
 use crate::fold_pool::UnitWeights;
-use crate::linearized::{BITS, LinearMap};
+use crate::linearized::{LinearMap, MAX_BYTES, width_error};
 
 pub const RING_BLIND_BITS: usize = 128;
 pub const EVAL_SUMCHECK_DEGREE: usize = 2;
+
+/// Bits of a code symbol: the width a unit packs into.
+const BITS: usize = 128;
 
 /// Serializable expansion step descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -874,27 +875,24 @@ impl RingSwitchPlan {
 /// tabulated on first use and indexed by the claims'
 /// raw bits: variable-time, for public claims only.
 pub struct RingMaps<'a, F> {
-    r_mix: &'a [Block128],
-    fields: Vec<(ColumnType, LinearMap<F, Block128>)>,
-    basis: Vec<Flat<Block128>>,
+    r_mix: &'a [F],
+    fields: Vec<(ColumnType, LinearMap<F, F>)>,
+    basis: Vec<Flat<F>>,
 }
 
-impl<'a, F> RingMaps<'a, F>
-where
-    F: HardwareField + Into<Block128>,
-{
-    pub fn new(r_mix: &'a [Block128]) -> Self {
+impl<'a, F: TowerField + HardwareField + From<u128>> RingMaps<'a, F> {
+    pub fn new(r_mix: &'a [F]) -> Self {
         Self {
             r_mix,
             fields: Vec::new(),
             basis: (0..BITS)
-                .map(|v| Block128(1u128 << v).to_hardware())
+                .map(|v| F::from(1u128 << v).to_hardware())
                 .collect(),
         }
     }
 
-    fn tabulate(&mut self, plan: &RingSwitchPlan) {
-        let zero = Flat::from_raw(Block128::ZERO);
+    fn tabulate(&mut self, plan: &RingSwitchPlan) -> Result<(), Error> {
+        let zero = Flat::from_raw(F::ZERO);
 
         for unit in &plan.units {
             if unit.field == ColumnType::B128
@@ -903,26 +901,32 @@ where
                 continue;
             }
 
-            let coeffs: Vec<Flat<Block128>> = field_coeffs(unit.field, self.r_mix)
+            let coeffs: Vec<Flat<F>> = field_coeffs(unit.field, self.r_mix)
                 .iter()
                 .map(|m| m.to_hardware())
                 .collect();
 
             let map = LinearMap::new(|x: Flat<F>| {
-                let tower: Block128 = x.to_tower().into();
-
+                let mut tower = [0u8; MAX_BYTES];
                 let mut acc = zero;
+
+                x.to_tower()
+                    .serialize(&mut tower[..F::BITS / 8])
+                    .map_err(|()| width_error())?;
+
                 for (u, &m) in coeffs.iter().enumerate() {
-                    if (tower.0 >> u) & 1 == 1 {
+                    if (tower[u / 8] >> (u % 8)) & 1 == 1 {
                         acc += m;
                     }
                 }
 
-                acc
-            });
+                Ok(acc)
+            })?;
 
             self.fields.push((unit.field, map));
         }
+
+        Ok(())
     }
 }
 
@@ -1148,14 +1152,14 @@ fn expand_pass_through<F: TraceCompatibleField>(
     }
 }
 
-pub fn eq_tensor_b(r: &[Block128]) -> Vec<Block128> {
-    let mut t = vec![Block128::ONE];
+pub fn eq_tensor_b<F: TowerField>(r: &[F]) -> Vec<F> {
+    let mut t = vec![F::ONE];
     for &ri in r {
         let len = t.len();
         let mut nt = Vec::with_capacity(len * 2);
 
         for &v in &t {
-            nt.push(v * (Block128::ONE + ri));
+            nt.push(v * (F::ONE + ri));
         }
 
         for &v in &t {
@@ -1170,40 +1174,37 @@ pub fn eq_tensor_b(r: &[Block128]) -> Vec<Block128> {
 
 /// `m_u` with `φ_K(x) = Σ_u m_u·bit_u(x)` over the tower bits,
 /// `K` the field of `field`: `eq(r'', ⌊u/w⌋)·π_{u mod w}`
-/// on the first `log2(128/w)` coordinates of `r''`.
-pub fn field_coeffs(field: ColumnType, r_mix: &[Block128]) -> Vec<Block128> {
+/// on the first `log2(F::BITS/w)` coordinates of `r''`.
+pub fn field_coeffs<F: TowerField + From<u128>>(field: ColumnType, r_mix: &[F]) -> Vec<F> {
     let width = field_bits(field);
-    let eq = eq_tensor_b(&r_mix[..mix_vars(field)]);
+    let eq = eq_tensor_b(&r_mix[..mix_vars::<F>(field)]);
 
-    (0..BITS)
-        .map(|u| eq[u / width] * Block128(1u128 << (u % width)))
+    (0..F::BITS)
+        .map(|u| eq[u / width] * F::from(1u128 << (u % width)))
         .collect()
 }
 
 /// Reconstructs the sumcheck's initial claim from the claimed
 /// virtual evals, in the tower basis: under its layout weight
 /// `a` a unit over `K` adds `a·Σ_m π_{m·w}·φ_K(c_m)`.
-pub fn ring_target<F>(
+pub fn ring_target<F: TowerField + HardwareField + From<u128>>(
     plan: &RingSwitchPlan,
-    weights: &UnitWeights<Block128>,
+    weights: &UnitWeights<F>,
     claims: &[Flat<F>],
     maps: &mut RingMaps<'_, F>,
     shifted_claims: bool,
-) -> Block128
-where
-    F: HardwareField + Into<Block128>,
-{
-    maps.tabulate(plan);
+) -> Result<F, Error> {
+    maps.tabulate(plan)?;
 
-    let zero = Flat::from_raw(Block128::ZERO);
-    let one = Flat::from_raw(Block128::ONE);
+    let zero = Flat::from_raw(F::ZERO);
+    let one = Flat::from_raw(F::ONE);
 
     let half = plan.total_claims();
 
     let base = [(0usize, one)];
     let base_and_shift = [(0usize, one), (half, weights.shift)];
 
-    let offsets: &[(usize, Flat<Block128>)] = if shifted_claims {
+    let offsets: &[(usize, Flat<F>)] = if shifted_claims {
         &base_and_shift
     } else {
         &base
@@ -1223,8 +1224,8 @@ where
             for (m, &c) in unit.claims.iter().enumerate() {
                 let claim = claims[offset + c];
                 let image = match map {
-                    Some(map) => map.apply(claim),
-                    None => Into::<Block128>::into(claim.to_tower()).to_hardware(),
+                    Some(map) => map.apply(claim)?,
+                    None => claim,
                 };
 
                 value += maps.basis[m * width] * image;
@@ -1234,32 +1235,32 @@ where
         }
     }
 
-    target.to_tower()
+    Ok(target.to_tower())
 }
 
 /// Per-claim `(field, a_c)` with `ring_target = Σ_c a_c·φ_K(c_c)`,
 /// `K` the field of the claim's unit, `φ` the identity on GF(2^128).
-pub fn claim_weights(
+pub fn claim_weights<F: TowerField + HardwareField + From<u128>>(
     plan: &RingSwitchPlan,
-    unit_weights: &UnitWeights<Block128>,
+    unit_weights: &UnitWeights<F>,
     shifted_claims: bool,
-) -> Vec<(ColumnType, Block128)> {
-    let shifts: &[Block128] = if shifted_claims {
-        &[Block128::ONE, unit_weights.shift.to_tower()]
+) -> Vec<(ColumnType, F)> {
+    let shifts: &[F] = if shifted_claims {
+        &[F::ONE, unit_weights.shift.to_tower()]
     } else {
-        &[Block128::ONE]
+        &[F::ONE]
     };
 
     let half = plan.total_claims();
 
-    let mut weights = vec![(ColumnType::B128, Block128::ZERO); half * shifts.len()];
+    let mut weights = vec![(ColumnType::B128, F::ZERO); half * shifts.len()];
     for (s, &shift_mul) in shifts.iter().enumerate() {
         for (unit, unit_weight) in plan.units.iter().zip(&unit_weights.units) {
             let weight = unit_weight.to_tower() * shift_mul;
             let width = field_bits(unit.field);
 
             for (m, &c) in unit.claims.iter().enumerate() {
-                weights[s * half + c] = (unit.field, weight * Block128(1u128 << (m * width)));
+                weights[s * half + c] = (unit.field, weight * F::from(1u128 << (m * width)));
             }
         }
     }
@@ -1364,8 +1365,8 @@ fn unit_ops(
     Ok(ops)
 }
 
-fn mix_vars(field: ColumnType) -> usize {
-    (BITS / field_bits(field)).trailing_zeros() as usize
+fn mix_vars<F: TowerField>(field: ColumnType) -> usize {
+    (F::BITS / field_bits(field)).trailing_zeros() as usize
 }
 
 #[cfg(test)]
@@ -1407,7 +1408,10 @@ mod tests {
         let width = field_bits(field);
 
         let mut acc = Block128::ZERO;
-        for (j, &m) in eq_tensor_b(&r_mix[..mix_vars(field)]).iter().enumerate() {
+        for (j, &m) in eq_tensor_b(&r_mix[..mix_vars::<Block128>(field)])
+            .iter()
+            .enumerate()
+        {
             let mut shat = 0u128;
             for (k, c) in claims.iter().enumerate() {
                 shat |= chunk(c.0, j, width) << (k * width);
@@ -1824,7 +1828,8 @@ mod tests {
 
             let r_mix: Vec<Block128> = (0..7).map(|_| next()).collect();
             let flat: Vec<Flat<Block128>> = claims.iter().map(|c| c.to_hardware()).collect();
-            let target = ring_target(&plan, &weights, &flat, &mut RingMaps::new(&r_mix), true);
+            let target =
+                ring_target(&plan, &weights, &flat, &mut RingMaps::new(&r_mix), true).unwrap();
 
             let mut sum = Block128::ZERO;
             for ((field, weight), claim) in claim_weights(&plan, &weights, true)
@@ -1894,7 +1899,8 @@ mod tests {
                         &claims,
                         &mut RingMaps::new(&r_mix),
                         shifted
-                    ),
+                    )
+                    .unwrap(),
                     ring_target_transposed(&plan, &weights, &claims, &r_mix, shifted)
                 );
             }
@@ -2076,8 +2082,8 @@ mod tests {
             };
 
             assert_eq!(
-                ring_target(plan, &weights, &claims, &mut shared, true),
-                ring_target(plan, &weights, &claims, &mut RingMaps::new(&r_mix), true)
+                ring_target(plan, &weights, &claims, &mut shared, true).unwrap(),
+                ring_target(plan, &weights, &claims, &mut RingMaps::new(&r_mix), true).unwrap()
             );
         }
     }

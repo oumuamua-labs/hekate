@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InnerProof<F: TowerField> {
     /// Root over every table's trace codewords.
-    pub trace_root: [u8; 32],
+    pub trace_root: Vec<u8>,
 
     /// Root of the helper tree: every table's `h` and, with
     /// zero knowledge, the two masks; absorbed before any `α`.
-    pub h_root: Option<[u8; 32]>,
+    pub h_root: Option<Vec<u8>>,
 
     /// Sumcheck proving
     /// `Σ_x ( Σ α_i · C_i(x) ) · eq(r, x) = 0`
@@ -44,7 +44,7 @@ pub struct InnerProof<F: TowerField> {
     pub chiplet_point_evaluations: Vec<(Vec<F>, Vec<F>)>,
 
     /// Absorbed before the first challenge.
-    pub pad_root: Option<[u8; 32]>,
+    pub pad_root: Option<Vec<u8>>,
 
     /// Present iff `pad_root` is.
     pub outer: Option<OuterProof<F>>,
@@ -53,8 +53,8 @@ pub struct InnerProof<F: TowerField> {
 impl<F: TowerField> InnerProof<F> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        trace_root: [u8; 32],
-        h_root: Option<[u8; 32]>,
+        trace_root: Vec<u8>,
+        h_root: Option<Vec<u8>>,
         zerocheck_proof: SumcheckProof<F>,
         main_logup_aux: LogUpAux<F>,
         main_point_evaluation: (Vec<F>, Vec<F>),
@@ -63,7 +63,7 @@ impl<F: TowerField> InnerProof<F> {
         chiplet_zerocheck_proofs: Vec<SumcheckProof<F>>,
         chiplet_logup_aux: Vec<LogUpAux<F>>,
         chiplet_point_evaluations: Vec<(Vec<F>, Vec<F>)>,
-        pad_root: Option<[u8; 32]>,
+        pad_root: Option<Vec<u8>>,
         outer: Option<OuterProof<F>>,
     ) -> Self {
         Self {
@@ -102,7 +102,7 @@ pub struct OuterOpening<F: TowerField> {
 /// oracles opened at the same query columns.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OuterProof<F: TowerField> {
-    pub aux_root: [u8; 32],
+    pub aux_root: Vec<u8>,
     pub interleaved: Vec<F>,
     pub linear: Vec<F>,
     pub quadratic: Vec<F>,
@@ -118,6 +118,10 @@ pub struct OuterProof<F: TowerField> {
 /// terminal evaluation at the random challenge point `r`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SumcheckProof<F: TowerField> {
+    /// The skip round's univariate on its domain
+    /// less the first point; empty without a skip.
+    pub skip: Vec<F>,
+
     /// Per-round univariate `g_j(X)`.
     pub round_polys: Vec<UnivariatePoly<F>>,
 
@@ -159,8 +163,8 @@ pub struct FoldEvalProof<F: TowerField> {
     /// fold field, as `F` limbs; `g(0)` comes from the claim.
     pub fold_rounds: Vec<F>,
 
-    /// Roots of the round codewords `H_1 .. H_{R−1}`.
-    pub round_roots: Vec<[u8; 32]>,
+    /// Roots of the round codewords `H_1 .. H_{R−1}`, back to back.
+    pub round_roots: Vec<u8>,
 
     /// `H_R`'s message, `2^s` fold-field symbols as `F` limbs.
     pub final_layer: Vec<F>,

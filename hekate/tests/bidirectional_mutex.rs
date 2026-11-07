@@ -6,7 +6,8 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block256, TowerField};
+use hekate_core::errors::{self, Error};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::constraint::builder::ConstraintSystem;
@@ -16,11 +17,14 @@ use hekate_program::{
     Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness, define_columns,
 };
 use hekate_prover_sys::prove;
+use hekate_testkit::site::FIXED_COLUMN;
+use hekate_testkit::verdict::{rejected_at, verify_logged};
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::prepared::PreparedProgram;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const BUS_ID: &str = "forgery_bus";
@@ -158,7 +162,7 @@ impl Air<F> for ForgeryHost {
 }
 
 impl Program<F> for ForgeryHost {
-    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
         Ok(vec![ChipletDef::from_air(&self.partner)?])
     }
 }
@@ -194,7 +198,7 @@ fn run(
     program: &ForgeryHost,
     cpu_rows: &[(Block32, Bit, Bit)],
     partner_rows: &[(Block32, Bit)],
-) -> bool {
+) -> (errors::Result<bool>, String) {
     let num_rows: usize = 4;
     let seed = [0xC3u8; 32];
 
@@ -211,7 +215,7 @@ fn run(
         ..Config::default()
     };
 
-    let proof = match prove(
+    let proof = prove(
         b"BIDIR_FORGERY",
         program,
         &instance,
@@ -219,23 +223,10 @@ fn run(
         &config,
         seed,
         None,
-    ) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    let mut verifier_t = Transcript::<H>::new(b"BIDIR_FORGERY");
-    let pinned_id = program_id(program).unwrap();
-
-    HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        program,
-        &instance,
-        &proof,
-        &mut verifier_t,
-        &config,
     )
-    .unwrap_or(false)
+    .expect("paired bus prove");
+
+    verify_logged(program, &instance, &config, &proof, b"BIDIR_FORGERY")
 }
 
 #[test]
@@ -264,10 +255,9 @@ fn paired_bus_disjoint_selectors_honest_accepts() {
         (Block32::ZERO, Bit::ZERO),
     ];
 
-    assert!(
-        run(&program, &cpu_rows, &partner_rows),
-        "honest disjoint fixed selectors must verify"
-    );
+    let (outcome, _) = run(&program, &cpu_rows, &partner_rows);
+
+    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
 }
 
 #[test]
@@ -296,9 +286,11 @@ fn exploit_paired_bus_both_selectors_high_permutation() {
         (Block32::ZERO, Bit::ZERO),
     ];
 
+    let (outcome, log) = run(&program, &cpu_rows, &partner_rows);
+
     assert!(
-        !run(&program, &cpu_rows, &partner_rows),
-        "paired permutation bus must reject row with both selectors high"
+        rejected_at(&outcome, &log, FIXED_COLUMN),
+        "got {outcome:?}\n{log}"
     );
 }
 
@@ -314,6 +306,13 @@ fn exploit_paired_bus_both_selectors_high_lookup() {
         },
     };
 
+    let honest_rows = [
+        (Block32::from(0xA1A1_A1A1u32), Bit::ONE, Bit::ZERO),
+        (Block32::ZERO, Bit::ZERO, Bit::ZERO),
+        (Block32::ZERO, Bit::ZERO, Bit::ZERO),
+        (Block32::ZERO, Bit::ZERO, Bit::ZERO),
+    ];
+
     let cpu_rows = [
         (Block32::from(0xA1A1_A1A1u32), Bit::ONE, Bit::ZERO),
         (Block32::from(0xDEAD_BEEFu32), Bit::ONE, Bit::ONE),
@@ -328,9 +327,14 @@ fn exploit_paired_bus_both_selectors_high_lookup() {
         (Block32::ZERO, Bit::ZERO),
     ];
 
+    let (honest, _) = run(&program, &honest_rows, &partner_rows);
+    assert!(matches!(honest, Ok(true)), "got {honest:?}");
+
+    let (outcome, log) = run(&program, &cpu_rows, &partner_rows);
+
     assert!(
-        !run(&program, &cpu_rows, &partner_rows),
-        "paired lookup bus must reject row with both selectors high"
+        rejected_at(&outcome, &log, FIXED_COLUMN),
+        "got {outcome:?}\n{log}"
     );
 }
 
@@ -560,7 +564,7 @@ impl Air<F> for MaliciousHost {
 }
 
 impl Program<F> for MaliciousHost {
-    fn chiplet_defs(&self) -> hekate_core::errors::Result<Vec<ChipletDef<F>>> {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
         let mut def = ChipletDef::from_air(&PinnedChipletA)?;
 
         def.permutation_checks.push((
@@ -585,25 +589,6 @@ impl Program<F> for MaliciousHost {
 
 #[test]
 fn chiplet_witness_selector_spec_injected_post_construction_rejected() {
-    let num_vars = 4;
-    let num_rows = 1 << num_vars;
-
-    let air = MaliciousHost;
-
-    let main_trace = TraceBuilder::new(&[ColumnType::Bit], num_vars)
-        .unwrap()
-        .build();
-
-    let mut tb = TraceBuilder::new(&EvilChipletCols::build_layout(), num_vars).unwrap();
-
-    tb.set_bit(EvilChipletCols::S_SEND_B, 0, Bit::ONE).unwrap();
-    tb.set_bit(EvilChipletCols::S_RECV_B, 0, Bit::ONE).unwrap();
-
-    let chiplet_trace = tb.build();
-
-    let instance = ProgramInstance::new(num_rows, vec![]);
-    let witness = ProgramWitness::new(main_trace).with_chiplets(vec![chiplet_trace]);
-
     let config = Config {
         num_queries: 2,
         fold_arity_log: 1,
@@ -613,29 +598,16 @@ fn chiplet_witness_selector_spec_injected_post_construction_rejected() {
         ..Config::default()
     };
 
-    let proof_res = prove(
-        b"EvilHost",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        [0xC3; 32],
-        None,
-    );
-
-    let accepted = match proof_res {
-        Ok(proof) => {
-            let mut vt = Transcript::<H>::new(b"EvilHost");
-            let pinned_id = program_id(&air).unwrap();
-
-            HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-                .unwrap_or(false)
-        }
-        Err(_) => false,
-    };
+    let error = PreparedProgram::<F>::new(&MaliciousHost, &config).err();
 
     assert!(
-        !accepted,
-        "SECURITY FAILURE: injected paired spec with witness selectors accepted"
+        matches!(
+            &error,
+            Some(Error::Protocol { message, .. }) if *message
+                == "bus selector or clock phase reads a witness column; every selector, \
+                    recv_selector and PhaseColumn must be None or a member of the table's \
+                    fixed_columns"
+        ),
+        "got {error:?}"
     );
 }

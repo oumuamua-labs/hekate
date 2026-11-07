@@ -7,7 +7,7 @@ use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
@@ -22,7 +22,7 @@ use hekate_program::{
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const BUS: &str = "square_link";

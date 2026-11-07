@@ -34,6 +34,7 @@ use constraint::{BoundaryConstraint, Constraint, ConstraintAst};
 use core::marker::PhantomData;
 use expander::VirtualExpander;
 use hekate_core::errors;
+use hekate_core::skip::SkipPoint;
 use hekate_core::trace::{ColumnTrace, ColumnType, Trace, TraceCompatibleField};
 use hekate_math::{Flat, HardwareField, TowerField};
 use permutation::PermutationCheckSpec;
@@ -368,46 +369,26 @@ impl<F> FixedShape<F> {
 }
 
 impl<F: HardwareField> FixedShape<F> {
-    /// MLE of the shape at point `r` (LSB-first),
-    /// in flat basis. `r.len()` must equal `num_vars`.
-    pub fn evaluate(&self, r: &[Flat<F>]) -> Flat<F> {
-        let one = Flat::from_raw(F::ONE);
+    /// Evaluates the shape's MLE at `point` in the flat basis;
+    /// the point must span the table's variables.
+    pub fn evaluate(&self, point: &SkipPoint<F>) -> Flat<F> {
         match self {
-            FixedShape::LastRow => {
-                let mut prod = one;
-                for &r_k in r {
-                    prod *= r_k;
-                }
-
-                one - prod
-            }
-            FixedShape::FirstRow => {
-                let mut prod = one;
-                for &r_k in r {
-                    prod *= one - r_k;
-                }
-
-                prod
-            }
+            FixedShape::LastRow => point.total() - point.weight((1 << point.num_vars()) - 1),
+            FixedShape::FirstRow => point.weight(0),
             FixedShape::Custom(bits) => {
-                debug_assert_eq!(bits.len(), r.len(), "Custom point bit width != r.len()");
+                let row = bits
+                    .iter()
+                    .enumerate()
+                    .fold(0usize, |acc, (k, &b)| acc | ((b as usize) << k));
 
-                let mut prod = one;
-                for (k, &b) in bits.iter().enumerate() {
-                    let factor = if b { r[k] } else { one - r[k] };
-                    prod *= factor;
-                }
-
-                prod
+                point.weight(row)
             }
             FixedShape::Periodic { period, values } => {
-                // Low p = log2(period) coords only;
-                // high coords each sum to 1.
                 let p = period.trailing_zeros() as usize;
 
                 let mut acc = Flat::from_raw(F::ZERO);
                 for (j, &v) in values.iter().enumerate() {
-                    acc += v.to_hardware() * eq_index(&r[..p], j);
+                    acc += v.to_hardware() * point.low_bits_marginal(p, j);
                 }
 
                 acc
@@ -415,7 +396,7 @@ impl<F: HardwareField> FixedShape<F> {
             FixedShape::Sparse(entries) => {
                 let mut acc = Flat::from_raw(F::ZERO);
                 for &(row, v) in entries {
-                    acc += v.to_hardware() * eq_index(r, row);
+                    acc += v.to_hardware() * point.weight(row);
                 }
 
                 acc
@@ -423,7 +404,7 @@ impl<F: HardwareField> FixedShape<F> {
             FixedShape::Dense(values) => {
                 let mut acc = Flat::from_raw(F::ZERO);
                 for (i, &v) in values.iter().enumerate() {
-                    acc += v.to_hardware() * eq_index(r, i);
+                    acc += v.to_hardware() * point.weight(i);
                 }
 
                 acc
@@ -433,11 +414,11 @@ impl<F: HardwareField> FixedShape<F> {
                 count,
                 origin,
                 values,
-            } => cadence_mle(r, *stride, *count, *origin, values),
+            } => cadence_mle(point, *stride, *count, *origin, values),
             FixedShape::Segments(segments) => {
                 let mut acc = Flat::from_raw(F::ZERO);
                 for seg in segments {
-                    acc += cadence_mle(r, seg.stride, seg.count, seg.origin, &seg.values);
+                    acc += cadence_mle(point, seg.stride, seg.count, seg.origin, &seg.values);
                 }
 
                 acc
@@ -586,17 +567,19 @@ impl<F> FixedColumn<F> {
 
 /// One table's fixed shapes at one point, sharing
 /// residue sums and eq tables across the shapes.
-pub struct ShapeEvaluator<'a, F> {
-    r: &'a [Flat<F>],
+pub struct ShapeEvaluator<'a, F: HardwareField> {
+    point: &'a SkipPoint<F>,
     eq: Option<EqTables<F>>,
     sums: BTreeMap<(usize, usize), Vec<Flat<F>>>,
 }
 
 impl<'a, F: HardwareField> ShapeEvaluator<'a, F> {
-    pub fn new(r: &'a [Flat<F>]) -> Self {
+    pub fn new(point: &'a SkipPoint<F>) -> Self {
         Self {
-            r,
-            eq: (r.len() <= EQ_TABLE_MAX_VARS).then(|| EqTables::new(r)),
+            point,
+            eq: (point.num_vars() <= EQ_TABLE_MAX_VARS)
+                .then(|| EqTables::new(point))
+                .flatten(),
             sums: BTreeMap::new(),
         }
     }
@@ -640,16 +623,15 @@ impl<'a, F: HardwareField> ShapeEvaluator<'a, F> {
             FixedShape::LastRow
             | FixedShape::FirstRow
             | FixedShape::Custom(_)
-            | FixedShape::Periodic { .. } => shape.evaluate(self.r),
+            | FixedShape::Periodic { .. } => shape.evaluate(self.point),
         }
     }
 
-    /// `eq(r, row)`, ignoring the bits of
-    /// `row` past `r.len()` as `eq_index` does.
+    /// Returns the weight of `row`, its bits past the point ignored.
     fn eq(&self, row: usize) -> Flat<F> {
         match &self.eq {
             Some(tables) => tables.eq(row),
-            None => eq_index(self.r, row),
+            None => self.point.weight(row),
         }
     }
 
@@ -664,14 +646,14 @@ impl<'a, F: HardwareField> ShapeEvaluator<'a, F> {
 
         let end = origin.saturating_add(stride.saturating_mul(count));
 
-        let Self { r, eq, sums } = self;
+        let Self { point, eq, sums } = self;
 
         match (stride, eq) {
             (1, Some(tables)) => scaled(values[0], tables.below(end) + tables.below(origin)),
             _ => {
                 for limit in [end, origin] {
                     sums.entry((stride, limit))
-                        .or_insert_with(|| residue_sums(r, limit, stride, None));
+                        .or_insert_with(|| residue_sums(point, limit, stride, None));
                 }
 
                 let upper = &sums[&(stride, end)];
@@ -700,18 +682,17 @@ struct EqTables<F> {
 }
 
 impl<F: HardwareField> EqTables<F> {
-    fn new(r: &[Flat<F>]) -> Self {
-        let low_bits = r.len() / 2;
-        let eq_low = eq_table(&r[..low_bits]);
-        let eq_high = eq_table(&r[low_bits..]);
+    fn new(point: &SkipPoint<F>) -> Option<Self> {
+        let low_bits = (point.num_vars() / 2).max(point.skip_vars());
+        let halves = point.halves(low_bits).ok()?;
 
-        Self {
+        Some(Self {
             low_bits,
-            below_low: running_sums(&eq_low),
-            below_high: running_sums(&eq_high),
-            eq_low,
-            eq_high,
-        }
+            below_low: running_sums(&halves.low),
+            below_high: running_sums(&halves.high),
+            eq_low: halves.low,
+            eq_high: halves.high,
+        })
     }
 
     /// `eq(r, row)`, ignoring the bits of `row` past `r.len()`.
@@ -722,17 +703,19 @@ impl<F: HardwareField> EqTables<F> {
         self.eq_low[low] * self.eq_high[high]
     }
 
-    /// `Σ_{x < limit} eq(r, x)`; one once `limit` reaches `2^r.len()`.
+    /// Sums the weights of the rows below `limit`;
+    /// every row's once `limit` reaches the height.
     fn below(&self, limit: usize) -> Flat<F> {
         let high = limit >> self.low_bits;
+        let total_low = self.below_low[self.eq_low.len()];
 
         if high >= self.eq_high.len() {
-            return Flat::from_raw(F::ONE);
+            return total_low;
         }
 
         let low = limit & (self.eq_low.len() - 1);
 
-        self.below_high[high] + self.eq_high[high] * self.below_low[low]
+        self.below_high[high] * total_low + self.eq_high[high] * self.below_low[low]
     }
 }
 
@@ -772,21 +755,35 @@ pub fn validate_fixed_columns<F: TowerField>(
     Ok(())
 }
 
-/// `Σ_{x < limit, x ≡ c (mod stride)} eq(r, x) · W^⌊x / stride⌋`
-/// per residue `c`, from `steps[t] = W^(2^t)`; `W = 1` without steps.
+/// Sums `w(x) · W^⌊x / stride⌋` over `x < limit` per residue
+/// `x mod stride`, `w` the point's weights; `W = 1` without a step.
 fn residue_sums<F: HardwareField>(
-    r: &[Flat<F>],
+    point: &SkipPoint<F>,
     limit: usize,
     stride: usize,
-    steps: Option<&[Flat<F>]>,
+    step: Option<Flat<F>>,
 ) -> Vec<Flat<F>> {
     let one = Flat::from_raw(F::ONE);
     let zero = Flat::from_raw(F::ZERO);
 
-    let full = match 1usize.checked_shl(r.len() as u32) {
+    let num_vars = point.num_vars();
+    let block_vars = point.skip_vars();
+
+    let full = match 1usize.checked_shl(num_vars as u32) {
         Some(cap) => limit >= cap,
         None => false,
     };
+
+    let squares: Vec<Flat<F>> = step.map_or_else(Vec::new, |w| {
+        (0..num_vars)
+            .scan(w, |power, _| {
+                let current = *power;
+                *power *= *power;
+
+                Some(current)
+            })
+            .collect()
+    });
 
     let mut free = vec![zero; stride];
     let mut next = vec![zero; stride];
@@ -798,9 +795,9 @@ fn residue_sums<F: HardwareField>(
         free[0] = one;
     }
 
-    for t in (0..r.len()).rev() {
-        let r_t = r[t];
-        let step = steps.map(|steps| steps[t]);
+    for t in (block_vars..num_vars).rev() {
+        let r_t = point.tail()[t - block_vars];
+        let step = step.map(|_| squares[t]);
 
         next.fill(zero);
 
@@ -831,7 +828,45 @@ fn residue_sums<F: HardwareField>(
         core::mem::swap(&mut free, &mut next);
     }
 
-    free
+    let block = point.low();
+
+    let powers: Vec<Flat<F>> = step.map_or_else(Vec::new, |w| {
+        (0..block.len())
+            .scan(one, |power, _| {
+                let current = *power;
+                *power *= w;
+
+                Some(current)
+            })
+            .collect()
+    });
+
+    let quotient_power = |q: usize| powers.get(q).copied().unwrap_or(one);
+
+    let gcd = block.len().min(1 << stride.trailing_zeros());
+
+    let mut groups = vec![zero; stride / gcd];
+    for (residue, &weight) in free.iter().enumerate() {
+        let shifted = residue * block.len();
+        groups[shifted % stride / gcd] += weight * quotient_power(shifted / stride);
+    }
+
+    next.fill(zero);
+
+    for (group, &weight) in groups.iter().enumerate() {
+        for (x, &low) in block.iter().enumerate() {
+            let value = group * gcd + x;
+            next[value % stride] += weight * low * quotient_power(value / stride);
+        }
+    }
+
+    let limit_low = limit & (block.len() - 1);
+    for (x, &low) in block.iter().enumerate().take(limit_low) {
+        let value = tight_residue * block.len() + x;
+        next[value % stride] += tight * low * quotient_power(value / stride);
+    }
+
+    next
 }
 
 fn division_step<F: HardwareField>(
@@ -848,7 +883,7 @@ fn division_step<F: HardwareField>(
 }
 
 fn cadence_mle<F: HardwareField>(
-    r: &[Flat<F>],
+    point: &SkipPoint<F>,
     stride: usize,
     count: usize,
     origin: usize,
@@ -860,8 +895,8 @@ fn cadence_mle<F: HardwareField>(
 
     let end = origin.saturating_add(stride.saturating_mul(count));
 
-    let mut class_sums = residue_sums(r, end, stride, None);
-    let start_sums = residue_sums(r, origin, stride, None);
+    let mut class_sums = residue_sums(point, end, stride, None);
+    let start_sums = residue_sums(point, origin, stride, None);
 
     for (c, s) in start_sums.iter().enumerate() {
         class_sums[c] += *s;
@@ -894,41 +929,6 @@ fn cadence_value_at<F: HardwareField>(
     } else {
         values[(row - origin) % stride].to_hardware()
     }
-}
-
-fn eq_index<F: HardwareField>(r: &[Flat<F>], index: usize) -> Flat<F> {
-    let one = Flat::from_raw(F::ONE);
-    let mut prod = one;
-
-    for (k, &r_k) in r.iter().enumerate() {
-        let factor = if (index >> k) & 1 == 1 {
-            r_k
-        } else {
-            one - r_k
-        };
-
-        prod *= factor;
-    }
-
-    prod
-}
-
-/// `eq(r, x)` for every `x < 2^r.len()`,
-/// bit `k` of `x` paired with `r[k]`.
-fn eq_table<F: HardwareField>(r: &[Flat<F>]) -> Vec<Flat<F>> {
-    let mut table = Vec::with_capacity(1 << r.len());
-    table.push(Flat::from_raw(F::ONE));
-
-    for &r_k in r {
-        for i in 0..table.len() {
-            let hi = table[i] * r_k;
-
-            table[i] += hi;
-            table.push(hi);
-        }
-    }
-
-    table
 }
 
 /// `sums[k] = Σ_{i < k} values[i]` for `k = 0..=len`.

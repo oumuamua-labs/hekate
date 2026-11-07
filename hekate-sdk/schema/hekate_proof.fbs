@@ -6,20 +6,23 @@ namespace hekate.wire;
 
 // ===== Field Elements =====
 
-struct Block128 {
-  lo: uint64;
-  hi: uint64;
+struct Block256 {
+  w0: uint64;
+  w1: uint64;
+  w2: uint64;
+  w3: uint64;
 }
 
 // ===== Sumcheck =====
 
 table UnivariatePoly {
-  coefficients: [Block128];
+  coefficients: [Block256];
 }
 
 table SumcheckProof {
   round_polys: [UnivariatePoly];
-  claimed_evaluation: Block128;
+  claimed_evaluation: Block256;
+  skip: [Block256];
 }
 
 // ===== Merkle Opening =====
@@ -39,40 +42,40 @@ table TreeOpening {
 // ===== Evaluation Argument =====
 
 table PointEvaluation {
-  point: [Block128];
-  column_values: [Block128];
+  point: [Block256];
+  column_values: [Block256];
 }
 
 table FoldEvalProof {
   sumcheck_proof: SumcheckProof;
-  masters: [Block128];
-  mask_masters: [Block128];
-  fold_rounds: [Block128];
+  masters: [Block256];
+  mask_masters: [Block256];
+  fold_rounds: [Block256];
   round_roots: [ubyte];
-  final_layer: [Block128];
+  final_layer: [Block256];
   openings: [TreeOpening];
 }
 
 // ===== LogUp Auxiliary =====
 
 table LogUpAux {
-  h_evals: [Block128];
-  claimed_sums: [Block128];
+  h_evals: [Block256];
+  claimed_sums: [Block256];
 }
 
 // ===== Outer Argument =====
 
 table OuterOpening {
   columns: [uint32];
-  values: [Block128];
+  values: [Block256];
   multiproof: Multiproof;
 }
 
 table OuterProof {
   aux_root: [ubyte];
-  interleaved: [Block128];
-  linear: [Block128];
-  quadratic: [Block128];
+  interleaved: [Block256];
+  linear: [Block256];
+  quadratic: [Block256];
   pad_opening: OuterOpening;
   aux_opening: OuterOpening;
 }

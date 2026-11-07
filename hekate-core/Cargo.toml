@@ -22,6 +22,7 @@ parallel = ["dep:rayon", "hekate-crypto/parallel", "hekate-math/parallel"]
 blake3 = ["hekate-crypto/blake3"]
 sha2 = ["hekate-crypto/sha2"]
 sha3 = ["hekate-crypto/sha3"]
+shake256 = ["hekate-crypto/shake256"]
 secure-memory = []
 
 [dependencies]

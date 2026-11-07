@@ -52,7 +52,7 @@ pub struct Blake3Hasher {
 
 #[cfg(feature = "blake3")]
 impl Hasher for Blake3Hasher {
-    const OUTPUT_SIZE: usize = 32;
+    type Digest = [u8; 32];
 
     fn new() -> Self {
         Self {

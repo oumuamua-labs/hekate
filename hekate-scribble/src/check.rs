@@ -81,22 +81,29 @@ impl<'a, F: TraceCompatibleField> Drop for RestoreGuard<'a, F> {
     }
 }
 
+/// One tamper's outcome on a witness that passes preflight.
+pub enum Verdict<F> {
+    /// Preflight reports the violations that catch it.
+    Caught(PreflightReport<F>),
+
+    /// Preflight is clean: a soundness gap in the AIR.
+    Escaped,
+
+    /// The tamper rewrites every cell to its own value.
+    Unchanged,
+}
+
 /// Apply `mutation` to a fresh copy of `witness`
 /// and run preflight. `witness` must pass preflight.
-///
-/// `Ok(report)`, the mutation was caught (`report` carries
-/// the violations that proved it). `Err(report)`, the
-/// mutation escaped (`report.is_clean()` is true);
-/// this is a soundness gap in the AIR.
 pub fn check_single_mutation<P, F>(
     air: &P,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F, ColumnTrace>,
     mutation: &Mutation,
-) -> Result<PreflightReport<F>, PreflightReport<F>>
+) -> Verdict<F>
 where
     P: Program<F>,
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
 {
     let mut scratch = clone_witness(witness);
     check_in_place(&mut scratch, mutation, |tampered, _| {
@@ -116,7 +123,7 @@ pub fn assert_all_caught<P, F>(
     config: ScribbleConfig,
 ) where
     P: Program<F>,
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
 {
     assert_clean_baseline(air, instance, witness);
     assert_cases_caught(air, instance, witness, config);
@@ -138,7 +145,7 @@ pub fn assert_all_caught_all_targets<P, F>(
     config: ScribbleConfig,
 ) where
     P: Program<F>,
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
 {
     assert_clean_baseline(air, instance, witness);
 
@@ -154,7 +161,7 @@ fn assert_clean_baseline<P, F>(
     witness: &ProgramWitness<F, ColumnTrace>,
 ) where
     P: Program<F>,
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
 {
     let report = preflight(air, instance, witness).expect("preflight failed on the clean witness");
 
@@ -171,7 +178,7 @@ fn assert_cases_caught<P, F>(
     config: ScribbleConfig,
 ) where
     P: Program<F>,
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
 {
     let strategy = mutation_strategy(witness, &config);
     let mut runner = TestRunner::new(PtConfig {
@@ -188,7 +195,7 @@ fn assert_cases_caught<P, F>(
 
     let result = runner.run(&strategy, |mutation: Mutation| {
         let mut tampered = scratch.borrow_mut();
-        check_in_place(&mut tampered, &mutation, |witness, patches| {
+        let verdict = check_in_place(&mut tampered, &mutation, |witness, patches| {
             judge_case(
                 air,
                 instance,
@@ -198,9 +205,16 @@ fn assert_cases_caught<P, F>(
                 patches,
                 &mutation,
             )
-        })
-        .map(|_| ())
-        .map_err(|_report| TestCaseError::fail("mutation escaped preflight"))
+        });
+
+        match verdict {
+            Verdict::Caught(report) if pinned_only(&mutation, &report) => {
+                Err(TestCaseError::reject("the pin alone catches the flip"))
+            }
+            Verdict::Caught(_) => Ok(()),
+            Verdict::Escaped => Err(TestCaseError::fail("mutation escaped preflight")),
+            Verdict::Unchanged => Err(TestCaseError::reject("mutation changes no cell")),
+        }
     });
 
     if let Err(err) = result {
@@ -212,7 +226,7 @@ fn check_in_place<F>(
     witness: &mut ProgramWitness<F, ColumnTrace>,
     mutation: &Mutation,
     judge: impl FnOnce(&ProgramWitness<F, ColumnTrace>, &[CellPatch]) -> PreflightReport<F>,
-) -> Result<PreflightReport<F>, PreflightReport<F>>
+) -> Verdict<F>
 where
     F: TraceCompatibleField,
 {
@@ -222,17 +236,16 @@ where
     apply_mutation(guard.witness, mutation);
 
     if is_noop(guard.witness, &guard.patches) {
-        return Ok(PreflightReport::new());
+        return Verdict::Unchanged;
     }
 
     let report = judge(guard.witness, &guard.patches);
 
     drop(guard);
 
-    if report.is_clean() {
-        Err(report)
-    } else {
-        Ok(report)
+    match report.is_clean() {
+        true => Verdict::Escaped,
+        false => Verdict::Caught(report),
     }
 }
 
@@ -247,7 +260,7 @@ fn judge_case<P, F>(
 ) -> PreflightReport<F>
 where
     P: Program<F>,
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
 {
     let local =
         local_report(air, instance, chiplet_defs, witness, patches).expect(PREFLIGHT_FAILED);
@@ -277,7 +290,7 @@ fn local_report<P, F>(
 ) -> errors::Result<PreflightReport<F>>
 where
     P: Program<F>,
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
 {
     let chiplet_instance = ProgramInstance::new(1, vec![]);
 
@@ -514,6 +527,13 @@ fn write_cell(column: &mut TraceColumn, row: usize, value: CellValue) {
         (TraceColumn::B128(v), CellValue::B128(x)) => v[row] = x,
         _ => unreachable!("cell type mismatch in snapshot/restore"),
     }
+}
+
+fn pinned_only<F>(mutation: &Mutation, report: &PreflightReport<F>) -> bool {
+    matches!(mutation, Mutation::FlipSelector { .. })
+        && report.constraint_violations.is_empty()
+        && report.boundary_violations.is_empty()
+        && report.bus_diagnostics.is_empty()
 }
 
 fn is_noop<F: TraceCompatibleField>(

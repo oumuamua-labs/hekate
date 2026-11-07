@@ -27,6 +27,7 @@ std = [
 blake3 = ["hekate-core/blake3", "hekate-keccak/blake3"]
 sha2 = ["hekate-core/sha2", "hekate-keccak/sha2"]
 sha3 = ["hekate-core/sha3", "hekate-keccak/sha3"]
+shake256 = ["hekate-core/shake256", "hekate-keccak/shake256"]
 forgery = []
 
 [dependencies]
@@ -45,6 +46,7 @@ hekate-verifier = { workspace = true, features = ["std", "blake3"] }
 hekate-sdk = { workspace = true, features = ["std", "blake3", "parallel"] }
 hekate-prover-sys = { workspace = true, features = ["blake3", "public"] }
 hekate-scribble = { workspace = true }
+hekate-testkit = { workspace = true, features = ["blake3", "public"] }
 ml-kem = { version = "0.3", features = ["getrandom"] }
 ml-dsa = "0.1"
 sha3 = "0.12"

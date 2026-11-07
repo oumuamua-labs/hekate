@@ -10,19 +10,17 @@ use hekate_aes::{
     trace::{Aes128Call, Aes256Call, expand_key, expand_key_256},
 };
 use hekate_core::config::Config;
-use hekate_core::trace::{ColumnTrace, TraceBuilder, TraceColumn};
+use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block8, Block16, Block64, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block8, Block256, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{Program, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_sdk::preflight;
-use hekate_verifier::HekateVerifier;
-use rand::{TryRngCore, rngs::OsRng};
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::cell::{set_b64, set_bit};
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict;
 
-pub type F = Block128;
+pub type F = Block256;
 pub type H = DefaultHasher;
 
 pub const CPU_ROWS: usize = 16;
@@ -32,13 +30,18 @@ pub const SBOX_ROM_ROWS: usize = 256;
 pub const IN_ROW: usize = 0;
 pub const OUT_ROW: usize = 1;
 
+pub const HOST: TableId = TableId::Main;
+pub const ROUND: TableId = TableId::Chiplet(0);
+pub const ROM: TableId = TableId::Chiplet(1);
+
+pub const SBOX_128: &str = "aes128::aes_sbox";
+pub const SBOX_256: &str = "aes256::aes_sbox";
+
 #[rustfmt::skip]
 pub const FREE_CIPHER: [u8; 16] = [
     0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
     0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
 ];
-
-const TRANSCRIPT_LABEL: &[u8] = b"AES_Forgery";
 
 // ===============================================
 // FIPS 197 test vectors
@@ -261,53 +264,6 @@ pub fn build_cpu_trace_256(data_in: &[u8; 16], data_out: &[u8; 16]) -> ColumnTra
 // Trace cell access
 // ===============================================
 
-pub fn b8_at(trace: &ColumnTrace, col: usize, row: usize) -> u8 {
-    match &trace.columns[col] {
-        TraceColumn::B8(data) => data[row].to_tower().0,
-        _ => panic!("expected B8 column at {col}"),
-    }
-}
-
-pub fn set_b8(trace: &mut ColumnTrace, col: usize, row: usize, val: u8) {
-    match &mut trace.columns[col] {
-        TraceColumn::B8(data) => data[row] = Block8(val).to_hardware(),
-        _ => panic!("expected B8 column at {col}"),
-    }
-}
-
-pub fn xor_b8(trace: &mut ColumnTrace, col: usize, row: usize, mask: u8) {
-    let original = b8_at(trace, col, row);
-    set_b8(trace, col, row, original ^ mask);
-}
-
-pub fn set_b16(trace: &mut ColumnTrace, col: usize, row: usize, val: u16) {
-    match &mut trace.columns[col] {
-        TraceColumn::B16(data) => data[row] = Block16(val).to_hardware(),
-        _ => panic!("expected B16 column at {col}"),
-    }
-}
-
-pub fn set_bit(trace: &mut ColumnTrace, col: usize, row: usize, val: Bit) {
-    match &mut trace.columns[col] {
-        TraceColumn::Bit(data) => data[row] = val,
-        _ => panic!("expected Bit column at {col}"),
-    }
-}
-
-fn set_b64(trace: &mut ColumnTrace, col: usize, row: usize, val: u64) {
-    match &mut trace.columns[col] {
-        TraceColumn::B64(data) => data[row] = Block64(val).to_hardware(),
-        _ => panic!("expected B64 column at {col}"),
-    }
-}
-
-pub fn copy_b8_block(trace: &mut ColumnTrace, base: usize, len: usize, src: usize, dst: usize) {
-    for j in 0..len {
-        let value = b8_at(trace, base + j, src);
-        set_b8(trace, base + j, dst, value);
-    }
-}
-
 pub fn deactivate_rom(rom: &mut ColumnTrace, rows: core::ops::Range<usize>) {
     for row in rows {
         set_bit(rom, PhysSboxRomColumns::P_SELECTOR, row, Bit::ZERO);
@@ -326,65 +282,41 @@ pub fn deactivate_rom(rom: &mut ColumnTrace, rows: core::ops::Range<usize>) {
 // Verdict oracles
 // ===============================================
 
-pub fn prove_and_verify<P: Program<F>>(
-    air: &P,
-    cpu_trace: ColumnTrace,
-    chiplet_traces: Vec<ColumnTrace>,
-) -> Result<bool, String> {
+pub fn assert_verifies(
+    air: &(impl Program<F> + Sync),
+    cpu: ColumnTrace,
+    chiplets: Vec<ColumnTrace>,
+) {
     let instance = ProgramInstance::new(CPU_ROWS, vec![]);
-    let witness = ProgramWitness::new(cpu_trace).with_chiplets(chiplet_traces);
+    let witness = ProgramWitness::new(cpu).with_chiplets(chiplets);
 
-    let config = Config {
+    verdict::assert_verifies(air, (&instance, &witness), &config());
+}
+
+pub fn assert_rejected(
+    air: &(impl Program<F> + Sync),
+    honest: (ColumnTrace, Vec<ColumnTrace>),
+    forged: (ColumnTrace, Vec<ColumnTrace>),
+    fault: Fault<'_>,
+) {
+    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
+    let honest = ProgramWitness::new(honest.0).with_chiplets(honest.1);
+    let forged = ProgramWitness::new(forged.0).with_chiplets(forged.1);
+
+    verdict::assert_rejected(
+        air,
+        (&instance, &honest),
+        (&instance, &forged),
+        fault,
+        &config(),
+    );
+}
+
+fn config() -> Config {
+    Config {
         num_queries: 2,
         fold_arity_log: 1,
         early_stop_vars: 1,
-        zero_knowledge: true,
         ..Config::dev()
-    };
-
-    let mut blinding_seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut blinding_seed).unwrap();
-
-    let proof = prove(
-        TRANSCRIPT_LABEL,
-        air,
-        &instance,
-        &witness,
-        &config,
-        blinding_seed,
-        None,
-    )
-    .map_err(|e| format!("prover: {e:?}"))?;
-
-    let mut vt = Transcript::<H>::new(TRANSCRIPT_LABEL);
-    let pinned_id = program_id(air).unwrap();
-
-    HekateVerifier::<F, H>::verify(&pinned_id, air, &instance, &proof, &mut vt, &config)
-        .map_err(|e| format!("verifier: {e:?}"))
-}
-
-/// A violation here would make the verdict
-/// attributable to the AIR rather than the bus.
-pub fn assert_air_clean<P: Program<F>>(air: &P, cpu: &ColumnTrace, chiplets: &[ColumnTrace]) {
-    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
-    let witness = ProgramWitness::new(cpu.clone()).with_chiplets(chiplets.to_vec());
-    let report = preflight(air, &instance, &witness).unwrap();
-
-    assert!(
-        report.constraint_violations.is_empty() && report.boundary_violations.is_empty(),
-        "{report}"
-    );
-}
-
-/// Pins the rejection to a constraint root or schedule pin;
-/// a prover that failed for an unrelated reason cannot read green.
-pub fn assert_air_violated<P: Program<F>>(air: &P, cpu: &ColumnTrace, chiplets: &[ColumnTrace]) {
-    let instance = ProgramInstance::new(CPU_ROWS, vec![]);
-    let witness = ProgramWitness::new(cpu.clone()).with_chiplets(chiplets.to_vec());
-    let report = preflight(air, &instance, &witness).unwrap();
-
-    assert!(
-        !report.constraint_violations.is_empty() || !report.fixed_column_violations.is_empty(),
-        "{report}"
-    );
+    }
 }

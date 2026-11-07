@@ -8,7 +8,7 @@ use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block32, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block32, Block256, HardwareField, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
@@ -25,7 +25,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const CPU_ACTIVE: usize = CpuSha256Block::COLUMNS;

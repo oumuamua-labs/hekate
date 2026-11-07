@@ -9,6 +9,7 @@ members = [
     "hekate-sdk",
     "hekate-prover-sys",
     "hekate-scribble",
+    "hekate-testkit",
     "hekate-keccak",
     "hekate-aes",
     "hekate-sha2",
@@ -31,7 +32,7 @@ authors = [
 ]
 
 [workspace.dependencies]
-hekate-math = { version = "0.12", default-features = false }
+hekate-math = { version = "0.13", default-features = false }
 hekate-crypto = { path = "hekate-crypto", version = "=0.38.0", default-features = false }
 hekate-core = { path = "hekate-core", version = "=0.38.0", default-features = false }
 hekate-program = { path = "hekate-program", version = "=0.38.0", default-features = false }
@@ -40,6 +41,7 @@ hekate-sdk = { path = "hekate-sdk", version = "=0.38.0", default-features = fals
 hekate-gadgets = { path = "hekate-gadgets", version = "=0.38.0", default-features = false }
 hekate-prover-sys = { path = "hekate-prover-sys", version = "=0.38.1", default-features = false }
 hekate-scribble = { path = "hekate-scribble", version = "=0.38.0", default-features = false }
+hekate-testkit = { path = "hekate-testkit", default-features = false }
 hekate-keccak = { path = "hekate-keccak", version = "=0.11.0", default-features = false }
 hekate-aes = { path = "hekate-aes", version = "=0.11.0", default-features = false }
 hekate-sha2 = { path = "hekate-sha2", version = "=0.4.0", default-features = false }

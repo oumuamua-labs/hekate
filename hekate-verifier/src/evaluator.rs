@@ -10,10 +10,12 @@ use core::marker::PhantomData;
 use hekate_core::errors;
 use hekate_core::fold::PolyKind;
 use hekate_core::proofs::FoldEvalProof;
+use hekate_core::skip::SkipPoint;
+use hekate_core::tensor::TensorProduct;
 use hekate_core::trace::{ColumnType, TraceCompatibleField};
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{BinaryFieldExtras, Block128, Flat, HardwareField, PackableField, TowerField};
+use hekate_math::{BinaryFieldExtras, Flat, HardwareField, PackableField, TowerField};
 use hekate_program::expander::{
     EVAL_SUMCHECK_DEGREE, RingMaps, field_bits, field_coeffs, ring_target,
 };
@@ -21,10 +23,16 @@ use hekate_program::fold_pool::FoldPool;
 use hekate_program::linearized::linearized_coeffs;
 use tracing::{instrument, warn};
 
-const NBITS: usize = 128;
+struct PolyAt<'a, F> {
+    r: &'a [Flat<F>],
+    blocks: Vec<(ColumnType, Flat<F>)>,
+}
 
-pub struct EvaluatorVerifier<F, H: Hasher> {
-    _marker: PhantomData<(F, H)>,
+struct RowTerm<'a, F> {
+    r: &'a [Flat<F>],
+    eq_low: Vec<Flat<F>>,
+    step: usize,
+    term: Flat<F>,
 }
 
 /// Claimed evaluations as the proof carries them, and their
@@ -52,8 +60,8 @@ impl<'a, F: HardwareField> Claims<'a, F> {
     }
 }
 
-pub struct TableClaims<'a, F> {
-    pub point: &'a [Flat<F>],
+pub struct TableClaims<'a, F: HardwareField> {
+    pub point: &'a SkipPoint<F>,
     pub claims: &'a Claims<'a, F>,
 }
 
@@ -75,10 +83,14 @@ pub struct EvalVerifyContext<'a, F: HardwareField> {
 pub struct EvalOutcome<F: HardwareField> {
     pub eta: F,
     pub rho: Vec<F>,
-    pub r_mix: Vec<Block128>,
+    pub r_mix: Vec<F>,
     pub challenges: Vec<Flat<F>>,
     pub claim_masked: Flat<F>,
     pub fin: Flat<F>,
+}
+
+pub struct EvaluatorVerifier<F, H: Hasher> {
+    _marker: PhantomData<(F, H)>,
 }
 
 impl<F, H: Hasher> EvaluatorVerifier<F, H>
@@ -89,14 +101,14 @@ where
     /// one degree-2 sumcheck to `r`, each polynomial's master opened by the fold.
     #[instrument(skip_all, level = "trace", name = "Evaluator::verify")]
     pub fn verify(
-        trace_root: &[u8; 32],
-        h_root: Option<&[u8; 32]>,
+        trace_root: &H::Digest,
+        h_root: Option<&H::Digest>,
         proof: &FoldEvalProof<F>,
         transcript: &mut Transcript<H>,
         ctx: EvalVerifyContext<'_, F>,
     ) -> errors::Result<Option<EvalOutcome<F>>>
     where
-        F: BinaryFieldExtras + Into<Block128> + From<u128>,
+        F: BinaryFieldExtras + From<u128>,
     {
         let pool = ctx.pool;
         let layout = pool.layout();
@@ -133,21 +145,14 @@ where
 
         let subfield = pool.has_subfield_units();
 
-        if subfield && F::BITS != NBITS {
-            return Err(errors::Error::Protocol {
-                protocol: "evaluator_verifier",
-                message: "ring-switch evaluation requires a 128-bit field",
-            });
-        }
-
         // Order is load-bearing:
         // r'' follows the claimed evals, precedes the sumcheck.
         let kappa = F::BITS.ilog2() as usize;
 
-        let r_mix: Vec<Block128> = if subfield {
+        let r_mix: Vec<F> = if subfield {
             let mut m = Vec::with_capacity(kappa);
             for _ in 0..kappa {
-                m.push(transcript.challenge_field::<F>(b"eval_rmix")?.into());
+                m.push(transcript.challenge_field::<F>(b"eval_rmix")?);
             }
 
             m
@@ -155,14 +160,14 @@ where
             Vec::new()
         };
 
-        let rho_b: Vec<Flat<Block128>> = rho.iter().map(|&x| to_block(x)).collect();
+        let rho_hw: Vec<Flat<F>> = rho.iter().map(|r| r.to_hardware()).collect();
 
         let mut maps = RingMaps::new(&r_mix);
         let mut weights = Vec::with_capacity(ctx.tables.len());
-        let mut target = Block128::ZERO;
+        let mut target = F::ZERO;
 
         for (i, (table, pooled)) in ctx.tables.iter().zip(pool.tables()).enumerate() {
-            let unit_weights = pool.unit_weights(i, to_block(eta_tower), &rho_b)?;
+            let unit_weights = pool.unit_weights(i, eta_tower.to_hardware(), &rho_hw)?;
 
             target += ring_target::<F>(
                 &pooled.plan,
@@ -170,15 +175,22 @@ where
                 table.claims.flat(),
                 &mut maps,
                 shifted_claims,
-            );
+            )?;
 
             weights.push(unit_weights);
         }
 
         drop(maps);
 
-        let target_flat = F::from(target.0).to_hardware();
+        let target_flat = target.to_hardware();
         let num_vars = layout.num_vars();
+
+        if !proof.sumcheck_proof.skip.is_empty() {
+            return Err(errors::Error::Protocol {
+                protocol: "evaluator_verifier",
+                message: "eval sumcheck sent a skip round",
+            });
+        }
 
         let sc_res = verify(
             num_vars,
@@ -191,7 +203,7 @@ where
         let (r, sumcheck_final_eval) = match sc_res {
             Some(res) => res,
             None => {
-                warn!("Sumcheck failed");
+                warn!("eval sumcheck failed");
                 return Ok(None);
             }
         };
@@ -227,7 +239,7 @@ where
                 .flat_map(|t| &t.plan.units)
                 .map(|unit| unit.field),
             &r_mix,
-        );
+        )?;
 
         let mut fin = zero;
         for (i, ((table, pooled), unit_weights)) in ctx
@@ -237,34 +249,42 @@ where
             .zip(&weights)
             .enumerate()
         {
-            let eta_shift = from_block::<F>(unit_weights.shift);
+            let mut lifted = Vec::new();
+            let mut polys = Vec::new();
+
             for poly in pooled.polys() {
                 let lift = num_vars - layout.polys()[poly].vars;
                 let (r_pre, r_suf) = r.split_at(lift);
                 let (r_x, r_b) = r_suf.split_at(pooled.num_vars);
 
-                let r_b: Vec<Flat<Block128>> = r_b.iter().map(|x| to_block(x.to_tower())).collect();
-                let blocks = pool.block_weights_at(i, poly, unit_weights, &r_b);
+                lifted.push((poly, r_pre));
+                polys.push(PolyAt {
+                    r: r_x,
+                    blocks: pool.block_weights_at(i, poly, unit_weights, r_b),
+                });
+            }
 
-                // The weight evals at r' are transparent;
-                // the masters are bound by the fold below.
-                let field_weights = master_weights_at::<F>(
-                    table.point,
-                    r_x,
-                    &twists,
-                    eta_shift,
-                    &blocks,
-                    shifted_claims,
-                )?;
+            // The weight evals at r' are transparent;
+            // the masters are bound by the fold below.
+            let field_weights = master_weights_at::<F>(
+                table.point,
+                &polys,
+                &twists,
+                unit_weights.shift,
+                shifted_claims,
+            )?;
 
+            let lifted_polys = lifted.iter().zip(&polys).zip(&field_weights);
+
+            for (((poly, r_pre), at), field_weights) in lifted_polys {
                 let prefix = r_pre.iter().fold(one, |acc, &x| acc * (one + x));
 
                 let mut weight = zero;
-                for (&(_, block_weight), &field_weight) in blocks.iter().zip(&field_weights) {
-                    weight += field_weight * from_block(block_weight);
+                for (&(_, block_weight), &field_weight) in at.blocks.iter().zip(field_weights) {
+                    weight += field_weight * block_weight;
                 }
 
-                fin += prefix * weight * masters[poly];
+                fin += prefix * weight * masters[*poly];
             }
         }
 
@@ -273,7 +293,7 @@ where
             return Ok(None);
         }
 
-        let claims = FoldClaims {
+        let claims = FoldClaims::<'_, F, H> {
             trace_root,
             helper_root: h_root,
             point: &r,
@@ -298,12 +318,15 @@ where
 
 fn twist_coeffs<F>(
     fields: impl IntoIterator<Item = ColumnType>,
-    r_mix: &[Block128],
-) -> Vec<(ColumnType, Vec<Flat<F>>)>
+    r_mix: &[F],
+) -> errors::Result<Vec<(ColumnType, Vec<Flat<F>>)>>
 where
-    F: HardwareField + From<u128>,
+    F: TowerField + HardwareField + From<u128>,
 {
-    let mut twists = vec![(ColumnType::B128, vec![Flat::from_raw(F::ONE)])];
+    let mut identity = vec![Flat::from_raw(F::ZERO); F::BITS / field_bits(ColumnType::B128)];
+    identity[0] = Flat::from_raw(F::ONE);
+
+    let mut twists = vec![(ColumnType::B128, identity)];
     let mut subfields: Vec<ColumnType> = Vec::new();
 
     for field in fields {
@@ -313,81 +336,116 @@ where
     }
 
     if subfields.is_empty() {
-        return twists;
+        return Ok(twists);
     }
 
-    let maps: Vec<(Vec<Block128>, usize)> = subfields
+    let maps: Vec<(Vec<F>, usize)> = subfields
         .iter()
         .map(|&field| (field_coeffs(field, r_mix), field_bits(field)))
         .collect();
 
-    for (&field, mu) in subfields.iter().zip(linearized_coeffs(&maps)) {
-        let twist = mu
-            .iter()
-            .step_by(field_bits(field))
-            .map(|&m| from_block(m))
-            .collect();
+    for (&field, mu) in subfields.iter().zip(linearized_coeffs(&maps)?) {
+        let twist = mu.iter().step_by(field_bits(field)).copied().collect();
 
         twists.push((field, twist));
     }
 
-    twists
+    Ok(twists)
 }
 
-/// One master weight `Σ_j μ_j·(eq + η·K̃)(σ^j(P), r')`
-/// per unit field of `fields`: squaring fixes every cube
-/// point, hence `φ_K(eq(P, x)) = Σ_j μ_j·eq(σ^j(P), x)`.
+/// One master weight `Σ_j μ_j·(w + η·K̃_w)^(2^j)(r')` per unit field
+/// of each polynomial at its `r'`: squaring fixes every cube point, hence
+/// `φ_K(w(x))` is `Σ_j μ_j · w(x)^(2^j)` with the point's weights powered.
 fn master_weights_at<F: HardwareField>(
-    point: &[Flat<F>],
-    r_row: &[Flat<F>],
+    point: &SkipPoint<F>,
+    polys: &[PolyAt<'_, F>],
     twists: &[(ColumnType, Vec<Flat<F>>)],
     eta_shift: Flat<F>,
-    fields: &[(ColumnType, Flat<Block128>)],
     shifted_claims: bool,
-) -> errors::Result<Vec<Flat<F>>> {
-    if point.len() != r_row.len() {
-        return Err(errors::Error::Protocol {
-            protocol: "evaluator_verifier",
-            message: "claim point and row challenges differ in length",
-        });
-    }
+) -> errors::Result<Vec<Vec<Flat<F>>>> {
+    let zero = Flat::from_raw(F::ZERO);
+    let k = point.skip_vars();
 
-    let mut mus = Vec::with_capacity(fields.len());
-    for &(field, _) in fields {
-        let (_, mu) = twists
-            .iter()
-            .find(|(f, _)| *f == field)
-            .ok_or(errors::Error::Protocol {
+    let mut rows: Vec<RowTerm<'_, F>> = Vec::new();
+    let mut members = Vec::with_capacity(polys.len());
+
+    for poly in polys {
+        if point.num_vars() != poly.r.len() {
+            return Err(errors::Error::Protocol {
                 protocol: "evaluator_verifier",
-                message: "unit field has no twist coefficients",
-            })?;
+                message: "claim point and row challenges differ in length",
+            });
+        }
 
-        mus.push((field_bits(field), mu));
+        let mut mus = Vec::with_capacity(poly.blocks.len());
+        for &(field, _) in &poly.blocks {
+            let (_, mu) =
+                twists
+                    .iter()
+                    .find(|(f, _)| *f == field)
+                    .ok_or(errors::Error::Protocol {
+                        protocol: "evaluator_verifier",
+                        message: "unit field has no twist coefficients",
+                    })?;
+
+            mus.push((field_bits(field), mu));
+        }
+
+        let width = mus.iter().map(|&(width, _)| width).min().unwrap_or(F::BITS);
+
+        let at = match rows.iter().position(|row| row.r == poly.r) {
+            Some(at) => {
+                rows[at].step = rows[at].step.min(width);
+
+                at
+            }
+            None => {
+                rows.push(RowTerm {
+                    r: poly.r,
+                    eq_low: TensorProduct::eq_table(&poly.r[..k]),
+                    step: width,
+                    term: zero,
+                });
+
+                rows.len() - 1
+            }
+        };
+
+        members.push((at, mus));
     }
 
-    let step = mus.iter().map(|&(width, _)| width).min().unwrap_or(NBITS);
+    let step = rows.iter().map(|row| row.step).min().unwrap_or(F::BITS);
 
-    let mut sigma = point.to_vec();
-    let mut weights = vec![Flat::from_raw(F::ZERO); fields.len()];
+    let mut low = point.low().to_vec();
+    let mut sigma = point.tail().to_vec();
+    let mut weights: Vec<Vec<Flat<F>>> = polys
+        .iter()
+        .map(|poly| vec![zero; poly.blocks.len()])
+        .collect();
 
-    for j in (0..NBITS).step_by(step) {
+    for j in (0..F::BITS).step_by(step) {
         if j > 0 {
-            for p in sigma.iter_mut() {
+            for p in low.iter_mut().chain(sigma.iter_mut()) {
                 for _ in 0..step {
                     *p = *p * *p;
                 }
             }
         }
 
-        let (eq, k_p) = eq_and_k_p_at(&sigma, r_row);
-        let term = match shifted_claims {
-            true => eq + eta_shift * k_p,
-            false => eq,
-        };
+        for row in rows.iter_mut().filter(|row| j % row.step == 0) {
+            let (eq, k_p) = eq_and_k_p_at(&low, &row.eq_low, &sigma, &row.r[k..]);
 
-        for (weight, &(width, mu)) in weights.iter_mut().zip(&mus) {
-            if j % width == 0 {
-                *weight += mu[j / width] * term;
+            row.term = match shifted_claims {
+                true => eq + eta_shift * k_p,
+                false => eq,
+            };
+        }
+
+        for (poly_weights, (at, mus)) in weights.iter_mut().zip(&members) {
+            for (weight, &(width, mu)) in poly_weights.iter_mut().zip(mus) {
+                if j % width == 0 {
+                    *weight += mu[j / width] * rows[*at].term;
+                }
             }
         }
     }
@@ -395,10 +453,40 @@ fn master_weights_at<F: HardwareField>(
     Ok(weights)
 }
 
+/// Evaluates the weights' MLE and next-row shift `K̃` at `r'`,
+/// the block part by its eq table and the tail part by
+/// `eq_and_k_p_tail`, a block's last row carrying into the next.
+fn eq_and_k_p_at<F: HardwareField>(
+    low: &[Flat<F>],
+    eq_low: &[Flat<F>],
+    tail: &[Flat<F>],
+    r_high: &[Flat<F>],
+) -> (Flat<F>, Flat<F>) {
+    let zero = Flat::from_raw(F::ZERO);
+    let last = low.len() - 1;
+
+    let block = low
+        .iter()
+        .zip(eq_low)
+        .fold(zero, |acc, (&w, &e)| acc + w * e);
+
+    let shift = low[..last]
+        .iter()
+        .zip(&eq_low[1..])
+        .fold(zero, |acc, (&w, &e)| acc + w * e);
+
+    let (eq_high, k_high) = eq_and_k_p_tail(tail, r_high);
+
+    (
+        block * eq_high,
+        shift * eq_high + low[last] * eq_low[0] * k_high,
+    )
+}
+
 /// `(eq(P, r'), K̃_P(r'))` in O(n): the K_P carry chain
 /// `Σ_k Π_{i<k}(1+r'_i)P_i · r'_k(1+P_k) · Π_{i>k}(1+r'_i+P_i)`
 /// plus the cyclic wrap `Π_i (1+r'_i)P_i`.
-fn eq_and_k_p_at<F: HardwareField>(point: &[Flat<F>], r_final: &[Flat<F>]) -> (Flat<F>, Flat<F>) {
+fn eq_and_k_p_tail<F: HardwareField>(point: &[Flat<F>], r_final: &[Flat<F>]) -> (Flat<F>, Flat<F>) {
     let one = Flat::from_raw(F::ONE);
 
     let mut eq = one;
@@ -416,19 +504,11 @@ fn eq_and_k_p_at<F: HardwareField>(point: &[Flat<F>], r_final: &[Flat<F>]) -> (F
     (eq, carry + wrap)
 }
 
-fn to_block<F: Into<Block128>>(x: F) -> Flat<Block128> {
-    x.into().to_hardware()
-}
-
-fn from_block<F: HardwareField + From<u128>>(x: Flat<Block128>) -> Flat<F> {
-    F::from(x.to_tower().0).to_hardware()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hekate_core::poly::PolyVariant;
-    use hekate_math::TowerField;
+    use hekate_math::{Block128, TowerField};
     use hekate_program::expander::eq_tensor_b;
 
     fn elems(seed: u128, n: usize) -> Vec<Block128> {
@@ -516,7 +596,7 @@ mod tests {
             let r_final = elems(101 + num_vars as u128, num_vars);
 
             let direct = mle_at(&k_p_on_cube(&point), &r_final);
-            let (eq, k_p) = eq_and_k_p_at(&flat(&point), &flat(&r_final));
+            let (eq, k_p) = eq_and_k_p_tail(&flat(&point), &flat(&r_final));
 
             assert_eq!(k_p.to_tower(), direct, "n={num_vars}");
             assert_eq!(
@@ -528,8 +608,42 @@ mod tests {
     }
 
     #[test]
+    fn skip_point_closed_form_matches_materialized() {
+        for tail_vars in 0..=3 {
+            let low = flat(&elems(17 + tail_vars as u128, 4));
+            let tail = flat(&elems(29 + tail_vars as u128, tail_vars));
+            let point = SkipPoint::new(low.clone(), tail.clone()).unwrap();
+
+            let r_final = elems(401 + tail_vars as u128, tail_vars + 2);
+            let r_flat = flat(&r_final);
+
+            let weights: Vec<Block128> = point.expand().iter().map(|w| w.to_tower()).collect();
+            let n = weights.len();
+            let shifted: Vec<Block128> = (0..n).map(|i| weights[(i + n - 1) & (n - 1)]).collect();
+
+            let (eq, k_p) = eq_and_k_p_at(
+                &low,
+                &TensorProduct::eq_table(&r_flat[..2]),
+                &tail,
+                &r_flat[2..],
+            );
+
+            assert_eq!(
+                eq.to_tower(),
+                mle_at(&weights, &r_final),
+                "eq t={tail_vars}"
+            );
+            assert_eq!(
+                k_p.to_tower(),
+                mle_at(&shifted, &r_final),
+                "k_p t={tail_vars}"
+            );
+        }
+    }
+
+    #[test]
     fn closed_forms_match_materialized() {
-        let kappa = NBITS.ilog2() as usize;
+        let kappa = Block128::BITS.ilog2() as usize;
 
         let fields = [
             ColumnType::Bit,
@@ -546,22 +660,27 @@ mod tests {
             let r_mix = elems(919 + num_vars as u128, kappa);
             let eta = elems(503 + num_vars as u128, 1)[0];
 
-            let twists = twist_coeffs::<Block128>(fields, &r_mix);
+            let twists = twist_coeffs::<Block128>(fields, &r_mix).unwrap();
             let blocks: Vec<(ColumnType, Flat<Block128>)> = fields
                 .iter()
                 .map(|&field| (field, Flat::from_raw(Block128::ZERO)))
                 .collect();
 
+            let r_flat = flat(&r_final);
+
             let weights = |blocks: &[(ColumnType, Flat<Block128>)], shifted_claims| {
                 master_weights_at(
-                    &flat(&point),
-                    &flat(&r_final),
+                    &SkipPoint::multilinear(flat(&point)),
+                    &[PolyAt {
+                        r: &r_flat,
+                        blocks: blocks.to_vec(),
+                    }],
                     &twists,
                     eta.to_hardware(),
-                    blocks,
                     shifted_claims,
                 )
                 .unwrap()
+                .remove(0)
             };
 
             let joint = weights(&blocks, true);
@@ -588,6 +707,59 @@ mod tests {
                     weights(alone, true)[0],
                     "joint {field:?} n={num_vars}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_rows_match_separate_calls() {
+        let kappa = Block128::BITS.ilog2() as usize;
+
+        let point = SkipPoint::new(flat(&elems(41, 4)), flat(&elems(43, 3))).unwrap();
+        let r_mix = elems(47, kappa);
+        let eta = elems(53, 1)[0].to_hardware();
+
+        let r_a = flat(&elems(59, 5));
+        let r_b = flat(&elems(61, 5));
+
+        let fields = [
+            ColumnType::Bit,
+            ColumnType::B8,
+            ColumnType::B32,
+            ColumnType::B64,
+            ColumnType::B128,
+        ];
+
+        let twists = twist_coeffs::<Block128>(fields, &r_mix).unwrap();
+        let blocks: Vec<(ColumnType, Flat<Block128>)> = fields
+            .iter()
+            .map(|&field| (field, Flat::from_raw(Block128::ZERO)))
+            .collect();
+
+        let polys =
+            [(&r_a, 2..4), (&r_b, 4..5), (&r_a, 0..2), (&r_b, 1..3)].map(|(r, fields)| PolyAt {
+                r: &r[..],
+                blocks: blocks[fields].to_vec(),
+            });
+
+        for shifted_claims in [false, true] {
+            let shared = master_weights_at(&point, &polys, &twists, eta, shifted_claims).unwrap();
+
+            for (poly, weights) in polys.iter().zip(&shared) {
+                let alone = master_weights_at(
+                    &point,
+                    &[PolyAt {
+                        r: poly.r,
+                        blocks: poly.blocks.clone(),
+                    }],
+                    &twists,
+                    eta,
+                    shifted_claims,
+                )
+                .unwrap()
+                .remove(0);
+
+                assert_eq!(*weights, alone);
             }
         }
     }

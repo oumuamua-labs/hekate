@@ -866,8 +866,13 @@ mod tests {
 
     #[test]
     fn blinds_carry_noise_of_tall_tables() {
+        let config = Config::prod();
+        let row_vars = noise_cells(config.num_queries, config.fold_arity_log)
+            .next_power_of_two()
+            .ilog2() as usize;
+
         let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2).unwrap();
-        let pool = FoldPool::new(&[(&plan, 12)], &Config::prod()).unwrap();
+        let pool = FoldPool::new(&[(&plan, row_vars)], &config).unwrap();
         let table = &pool.tables()[0];
         let helper = table.helper.unwrap();
 
@@ -887,8 +892,8 @@ mod tests {
         let table = &pool.tables()[0];
 
         for poly in [table.trace, table.helper.unwrap()] {
-            let leaf = 1 << pool.layout().polys()[poly].leaf_vars;
-            let uniform = ((config.num_queries + 2) * leaf).div_ceil(1 << row_vars);
+            let leaf_vars = pool.layout().polys()[poly].leaf_vars;
+            let uniform = noise_cells(config.num_queries, leaf_vars).div_ceil(1 << row_vars);
 
             assert_eq!(pool.noise_blocks(poly), uniform - 1);
         }

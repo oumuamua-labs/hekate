@@ -9,7 +9,7 @@ use clap::Parser;
 use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakColumns, generate_keccak_trace};
@@ -22,7 +22,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 #[derive(Parser)]

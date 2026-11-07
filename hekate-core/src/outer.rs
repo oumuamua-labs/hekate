@@ -5,7 +5,7 @@
 use crate::config::{Config, Error, LOG2_FRAC_BITS, OUTER_RATE_LOG2, OUTER_ROWS, log2_ratio_fixed};
 use crate::errors;
 use alloc::vec::Vec;
-use hekate_crypto::Hasher;
+use hekate_crypto::{Digest, Hasher};
 use hekate_math::{Flat, HardwareField, TowerField};
 use zeroize::Zeroize;
 #[cfg(feature = "secure-memory")]
@@ -52,8 +52,8 @@ pub struct Pad<F: TowerField> {
     next: usize,
 }
 
-impl<F: TowerField + From<u128>> Pad<F> {
-    /// Derives `len` entries from `seed` in counter mode.
+impl<F: TowerField> Pad<F> {
+    /// Derives `len` uniform entries of `F` from `seed` in counter mode.
     pub fn derive<H: Hasher>(seed: &[u8; 32], len: usize) -> Self {
         let mut values = Vec::with_capacity(len);
         for i in 0..len {
@@ -61,12 +61,9 @@ impl<F: TowerField + From<u128>> Pad<F> {
             hasher.update(seed);
             hasher.update(&(i as u64).to_le_bytes());
 
-            let digest = hasher.finalize();
+            let entry = F::from_uniform_bytes(&hasher.finalize().leading());
 
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(&digest[..16]);
-
-            values.push(Flat::from_raw(F::from(u128::from_le_bytes(bytes))));
+            values.push(Flat::from_raw(entry));
         }
 
         Self { values, next: 0 }
@@ -244,8 +241,10 @@ impl Config {
 mod tests {
     use super::*;
     use crate::config::MIN_PRODUCTION_BITS;
+    use hekate_crypto::DefaultHasher;
+    use hekate_math::Block256;
 
-    const FIELD_BITS: usize = 128;
+    const FIELD_BITS: usize = 256;
 
     #[test]
     fn prod_geometry_meets_the_production_floor() {
@@ -331,27 +330,27 @@ mod tests {
         let geom = cfg.outer_geom(12_000, 20_000, FIELD_BITS).unwrap();
 
         let thinner = OuterGeometry {
-            queries: 120,
+            queries: 154,
             ..geom
         };
 
-        assert_eq!(cfg.outer_queries, 121);
+        assert_eq!(cfg.outer_queries, 155);
         assert!(cfg.outer_security_bits(FIELD_BITS, &thinner) < MIN_PRODUCTION_BITS);
         assert!(cfg.outer_security_bits(FIELD_BITS, &geom) >= MIN_PRODUCTION_BITS);
     }
 
     /// `MAX_OUTER_DOMAIN_LOG2` binds before the field term:
     /// one more mul wire pushes the domain past 2^24, while
-    /// `128 - 24 = 104` still clears `MIN_PRODUCTION_BITS`.
+    /// `256 - 24 = 232` still clears `MIN_PRODUCTION_BITS`.
     #[test]
     fn domain_cap_bounds_outer_statement() {
         let cfg = Config::prod();
 
-        let largest = cfg.outer_geom(12_000, 11_183_509, FIELD_BITS).unwrap();
+        let largest = cfg.outer_geom(12_000, 11_183_146, FIELD_BITS).unwrap();
 
         assert_eq!(largest.domain_len.ilog2(), MAX_OUTER_DOMAIN_LOG2);
         assert!(cfg.outer_field_term_bits(FIELD_BITS, &largest) > MIN_PRODUCTION_BITS);
-        assert!(cfg.outer_geom(12_000, 11_183_510, FIELD_BITS).is_err());
+        assert!(cfg.outer_geom(12_000, 11_183_147, FIELD_BITS).is_err());
     }
 
     #[test]
@@ -359,5 +358,12 @@ mod tests {
         let cfg = Config::dev();
 
         assert!(cfg.outer_geom(64, 32, FIELD_BITS).is_ok());
+    }
+
+    #[test]
+    fn pad_entries_fill_high_limb() {
+        let pad = Pad::<Block256>::derive::<DefaultHasher>(&[7u8; 32], 64);
+
+        assert!(pad.values().iter().all(|entry| entry.into_raw().0[1] != 0));
     }
 }

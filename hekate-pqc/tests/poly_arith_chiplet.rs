@@ -5,25 +5,23 @@
 use hekate_core::config::Config;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block16, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block16, Block32, Block256, TowerField};
 use hekate_pqc::ntt::NttParams;
 use hekate_pqc::poly_arith::{BaseCaseMac, PolyArithChiplet, PolyArithForgery};
 use hekate_pqc::wiring::{COEF_BUS_ID, N, Poly, PolyLabels, PolyValues, coef_spec};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
-use hekate_program::digest::program_id;
 use hekate_program::{CadenceSegment, FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::{TableId, preflight};
+use hekate_testkit::fault::{Check, Fault};
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 const Q: u32 = 3329;
 const ZETA: u64 = 17;
+
+const POLY_ARITH: TableId = TableId::Chiplet(0);
 
 const HOST_LAYOUT: [ColumnType; 4] = [
     ColumnType::B16,
@@ -37,6 +35,12 @@ struct Product {
     outputs: usize,
     terms: usize,
     seeded: bool,
+}
+
+struct Proof {
+    program: CircuitProgram<F>,
+    instance: ProgramInstance<F>,
+    witness: ProgramWitness<F>,
 }
 
 #[derive(Clone)]
@@ -151,6 +155,12 @@ impl Case {
         (trace, values)
     }
 
+    fn honest(&self) -> Proof {
+        let (trace, values) = self.run();
+
+        self.proof(trace, &values)
+    }
+
     fn check_outputs(&self, values: &PolyValues) {
         let get = |poly: Poly| *values.get(poly).unwrap();
 
@@ -239,52 +249,6 @@ impl Case {
     }
 }
 
-struct Proof {
-    program: CircuitProgram<F>,
-    instance: ProgramInstance<F>,
-    witness: ProgramWitness<F>,
-}
-
-impl Proof {
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"PolyArithChiplet",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"PolyArithChiplet");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
-
-    fn rejected(&self) -> bool {
-        !self.accepted(false) && !self.accepted(true)
-    }
-}
-
 fn honest(products: &[Product]) {
     let case = Case::new(products);
     let (trace, values) = case.run();
@@ -293,29 +257,34 @@ fn honest(products: &[Product]) {
 
     let proof = case.proof(trace, &values);
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 fn assert_forgery_breaks_only(honest: &Case, forged: &Case, col: Col) {
     let (trace, values) = forged.run();
+    let own = forged.proof(trace.clone(), &values);
 
-    assert!(forged.proof(trace.clone(), &values).report().is_clean());
+    assert!(
+        preflight(&own.program, &own.instance, &own.witness)
+            .unwrap()
+            .is_clean()
+    );
 
-    let proof = honest.proof(trace, &values);
-    let report = proof.report();
+    let pins = [(POLY_ARITH, col.index())];
 
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.fixed_column_violations.is_empty());
-
-    for v in &report.fixed_column_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.col_idx, col.index());
-    }
-
-    assert!(proof.rejected());
+    assert_fault(
+        &honest.honest(),
+        &honest.proof(trace, &values),
+        Fault {
+            pin_columns: &pins,
+            first_check: Some(Check::FixedColumn),
+            ..Fault::NONE
+        },
+    );
 }
 
 fn assert_breaks_only(forgery: PolyArithForgery, label: &str) {
@@ -328,20 +297,24 @@ fn assert_breaks_only(forgery: PolyArithForgery, label: &str) {
     let mut values = case.inputs();
     let trace = case.chiplet.trace_forged(&mut values, &[forgery]).unwrap();
 
-    let proof = case.proof(trace, &values);
-    let report = proof.report();
+    assert_fault(
+        &case.honest(),
+        &case.proof(trace, &values),
+        Fault {
+            constraint_labels: &[(POLY_ARITH, label)],
+            ..Fault::NONE
+        },
+    );
+}
 
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.constraint_violations.is_empty());
-
-    for v in &report.constraint_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.label, Some(label));
-    }
-
-    assert!(proof.rejected());
+fn assert_fault(honest: &Proof, forged: &Proof, fault: Fault<'_>) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        fault,
+        &Config::prod(),
+    );
 }
 
 fn host_trace(tokens: &[Poly], values: &PolyValues, rows: usize) -> ColumnTrace {
@@ -416,9 +389,11 @@ fn keygen_product_copies_its_terms_and_proves() {
 
     let proof = case.proof(trace, &values);
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 #[test]
@@ -599,13 +574,12 @@ fn host_reading_different_output_is_caught_by_bus_alone() {
         tampered.insert(poly, coeffs).unwrap();
     }
 
-    let proof = case.proof(trace, &tampered);
-    let report = proof.report();
+    let fault = Fault {
+        buses: &[COEF_BUS_ID],
+        ..Fault::NONE
+    };
 
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(proof.rejected());
+    assert_fault(&case.honest(), &case.proof(trace, &tampered), fault);
 }
 
 #[test]

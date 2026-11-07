@@ -11,9 +11,9 @@
 
 use hekate::core::config::{Config, MAX_TABLE_VARS};
 use hekate::core::trace::{ColumnTrace, TraceColumn};
-use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::crypto::{DefaultHasher, Digest, Hasher};
+use hekate::math::{Block256, TowerField};
 use hekate_core::errors::Error;
 use hekate_core::trace::IntoTraceColumn;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
@@ -23,9 +23,11 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::site::{CHIPLET_ZEROCHECK, OUTER_LINEAR, ZEROCHECK};
+use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // ==========================================================
@@ -218,8 +220,7 @@ fn missing_chiplet_rows_rejected() {
 // EXPLOIT: Corrupted chiplet evaluation values
 //
 // A malicious prover modifies the claimed evaluation
-// values for a chiplet. The TensorPCS proximity check
-// must detect the mismatch.
+// values for a chiplet.
 // ==========================================================
 
 #[test]
@@ -236,15 +237,11 @@ fn chiplet_eval_values_forgery() {
 
     c_eval.1[0] += F::ONE;
 
-    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
-    let pinned_id = program_id(&air).unwrap();
-
-    let result =
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
+    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, b"ChipletSecurity");
 
     assert!(
-        result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: Chiplet eval value forgery accepted"
+        rejected_at(&outcome, &log, ZEROCHECK),
+        "got {outcome:?}\n{log}"
     );
 }
 
@@ -265,17 +262,13 @@ fn pool_root_swap_rejected() {
 
     // ATTACK:
     // Replace the pool root with zeros
-    proof.trace_root = [0u8; 32];
+    proof.trace_root = vec![0u8; <<DefaultHasher as Hasher>::Digest as Digest>::BYTES];
 
-    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
-    let pinned_id = program_id(&air).unwrap();
-
-    let result =
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
+    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ChipletSecurity");
 
     assert!(
-        result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: Forged pool Merkle root accepted"
+        rejected_with(&outcome, CHIPLET_ZEROCHECK),
+        "got {outcome:?}"
     );
 }
 
@@ -316,7 +309,7 @@ fn chiplet_eval_values_truncated() {
 //
 // A malicious prover modifies the chiplet's LogUp
 // claimed_sum so the paired (main, chiplet) endpoints
-// no longer cancel. `check_bus_sum_matching` must reject.
+// no longer cancel.
 // ==========================================================
 
 #[test]
@@ -333,15 +326,11 @@ fn chiplet_logup_sum_mismatch() {
     // so the bus no longer cancels.
     proof.chiplet_logup_aux[0].claimed_sums[0] += F::ONE;
 
-    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
-    let pinned_id = program_id(&air).unwrap();
-
-    let result =
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
+    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ChipletSecurity");
 
     assert!(
-        result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: Chiplet LogUp claimed_sum forgery accepted"
+        rejected_with(&outcome, CHIPLET_ZEROCHECK),
+        "got {outcome:?}"
     );
 }
 
@@ -350,13 +339,10 @@ fn chiplet_logup_sum_mismatch() {
 //
 // A program declares a main-trace bus endpoint
 // ("phantom_bus") that no chiplet or gadget supplies.
-// The verifier's exhaustiveness check must reject
-// this because the bus has no counterpart.
 // ==========================================================
 
 /// AIR with an extra phantom bus_id that
-/// no chiplet provides. Used only for
-/// verification (not proving).
+/// no chiplet provides.
 fn phantom_bus_air(num_rows: usize) -> CircuitProgram<F> {
     let mut cx = Circuit::<F>::new("PhantomBus", num_rows).unwrap();
     let cpu = cx.schema(&CpuFetchColumns::build_layout());
@@ -384,46 +370,44 @@ fn phantom_bus_air(num_rows: usize) -> CircuitProgram<F> {
 
 #[test]
 fn unmatched_main_bus_rejected() {
-    let num_vars = 6;
-    let num_rows = 1 << num_vars;
+    let (air, instance, witness, config) = build_test_system(6);
+    let (_, ok) = prove_and_verify(&air, &instance, &witness, &config);
 
-    // Prove with the normal AIR (1 main bus + 1 chiplet).
-    let (air, instance, witness, config) = build_test_system(num_vars);
-    let seed = [0xBBu8; 32];
+    assert!(ok, "Baseline proof must verify");
 
-    let proof = prove(
-        b"ChipletSecurity",
-        &air,
-        &instance,
-        &witness,
-        &config,
-        seed,
-        None,
-    )
-    .expect("proving failed");
+    let phantom_air = phantom_bus_air(instance.num_rows());
 
-    // Verify with the phantom AIR that declares
-    // an extra bus_id no chiplet supplies.
-    // The verifier must reject: "phantom_bus"
-    // has no chiplet/gadget counterpart.
-    let phantom_air = phantom_bus_air(num_rows);
+    for zero_knowledge in [false, true] {
+        let config = Config {
+            zero_knowledge,
+            ..config.clone()
+        };
 
-    let mut vt = Transcript::<H>::new(b"ChipletSecurity");
-    let pinned_id = program_id(&phantom_air).unwrap();
+        let proof = prove(
+            b"ChipletSecurity",
+            &phantom_air,
+            &instance,
+            &witness,
+            &config,
+            [0xBBu8; 32],
+            None,
+        )
+        .expect("phantom prove");
 
-    let result = HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        &phantom_air,
-        &instance,
-        &proof,
-        &mut vt,
-        &config,
-    );
+        // The verifier must reject: "phantom_bus" has no chiplet/gadget counterpart
+        let (outcome, log) =
+            verify_logged(&phantom_air, &instance, &config, &proof, b"ChipletSecurity");
 
-    assert!(
-        result.is_err(),
-        "SECURITY FAILURE: Unmatched main-trace bus_id accepted"
-    );
+        let rejected = match zero_knowledge {
+            false => rejected_with(&outcome, "bus endpoint sums do not cancel to zero"),
+            true => rejected_at(&outcome, &log, OUTER_LINEAR),
+        };
+
+        assert!(
+            rejected,
+            "zero_knowledge={zero_knowledge}: got {outcome:?}\n{log}"
+        );
+    }
 }
 
 // =====================================================
@@ -449,8 +433,14 @@ fn chiplet_sumcheck_degree_inflation_rejected() {
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
     assert!(
-        result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: degree-inflated chiplet round poly accepted"
+        matches!(
+            result,
+            Err(Error::Protocol {
+                message: "round polynomial degree mismatch",
+                ..
+            })
+        ),
+        "got {result:?}"
     );
 }
 
@@ -621,7 +611,7 @@ fn height_spread_rejected_at_chiplet_zerocheck() {
 
     assert!(ok, "Baseline proof must verify");
 
-    proof.chiplet_rows[0] = 1 << 10;
+    proof.chiplet_rows[0] = 1 << 8;
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -634,7 +624,7 @@ fn height_spread_rejected_at_chiplet_zerocheck() {
             result,
             Err(Error::Protocol {
                 protocol: "verifier",
-                message: "chiplet ZeroCheck failed",
+                message: CHIPLET_ZEROCHECK,
             })
         ),
         "{result:?}"

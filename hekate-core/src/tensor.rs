@@ -81,6 +81,27 @@ impl<F: HardwareField> TensorProduct<F> {
         res
     }
 
+    /// Tabulates `eq(r, x)` for every `x < 2^r.len()`,
+    /// bit `b` of `x` against `r[b]`.
+    pub fn eq_table(r: &[Flat<F>]) -> Vec<Flat<F>> {
+        let one = Flat::from_raw(F::ONE);
+
+        let mut table = Vec::with_capacity(1 << r.len());
+        table.push(one);
+
+        for &r_b in r {
+            for i in 0..table.len() {
+                let hi = table[i] * r_b;
+
+                table[i] += hi;
+
+                table.push(hi);
+            }
+        }
+
+        table
+    }
+
     /// JIT `Eq(index, r)` for a hypercube index
     /// (`O(num_vars)`). Hot path in Sumcheck.
     ///

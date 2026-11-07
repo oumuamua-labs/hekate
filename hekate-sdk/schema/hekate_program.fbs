@@ -6,9 +6,11 @@ namespace hekate.wire;
 
 // ===== Field Elements =====
 
-struct Block128 {
-  lo: uint64;
-  hi: uint64;
+struct Block256 {
+  w0: uint64;
+  w1: uint64;
+  w2: uint64;
+  w3: uint64;
 }
 
 // ===== Column Types =====
@@ -23,11 +25,11 @@ table AstNode {
   tag: NodeTag;
   col_index: uint32;
   next_row: bool;
-  const_value: Block128;
+  const_value: Block256;
   left: uint32;
   right: uint32;
   sum_children: [uint32];
-  scalar: Block128;
+  scalar: Block256;
 }
 
 table ConstraintAst {
@@ -48,7 +50,7 @@ table BoundaryConstraint {
   row_idx: uint64;
   kind: BoundaryTargetKind;
   public_input_idx: uint32;
-  constant_value: Block128;
+  constant_value: Block256;
 }
 
 // ===== Permutation / LogUp =====
@@ -78,7 +80,7 @@ table Source {
   column_index: uint32;
   column_indices: [uint32];
   byte_index: uint32;
-  constant_value: Block128;
+  constant_value: Block256;
   side: EmitSide;
 }
 
@@ -140,7 +142,7 @@ table CadenceSegment {
   stride: uint64;
   count: uint64;
   origin: uint64;
-  values: [Block128];
+  values: [Block256];
 }
 
 table FixedColumn {
@@ -148,9 +150,9 @@ table FixedColumn {
   kind: FixedShapeKind;
   custom_bits: [ubyte];
   period: uint32;
-  values: [Block128];
+  values: [Block256];
   sparse_rows: [uint64];
-  sparse_values: [Block128];
+  sparse_values: [Block256];
   stride: uint64;
   count: uint64;
   origin: uint64;
@@ -231,7 +233,7 @@ table ProgramBundle {
 
   // Instance (public)
   num_rows: uint64;
-  public_inputs: [Block128];
+  public_inputs: [Block256];
 
   // Witness (private)
   main_trace: ColumnTrace;
