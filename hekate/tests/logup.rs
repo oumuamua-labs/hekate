@@ -22,11 +22,9 @@ use hekate_program::permutation::{
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
-use hekate_testkit::site::{
-    BUS_SUM, CHIPLET_ZEROCHECK, FIXED_COLUMN, H_EVAL_BINDING, MULTIPROOF, OUTER_LINEAR,
-};
-use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{FoldStage, OuterStage, Rejection, Table, ZerocheckStage};
 use multibus::{LABEL, cfg, multibus_proof};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,7 +143,7 @@ fn run(
     program: &GhostProgram,
     cpu: &[(Block32, Bit)],
     table: &[(Block32, Bit)],
-) -> (errors::Result<bool>, String) {
+) -> Result<(), Rejection> {
     let num_rows = 4;
     let seed = [0xC3u8; 32];
 
@@ -174,7 +172,7 @@ fn run(
     )
     .expect("ghost activation prove");
 
-    verify_logged(program, &instance, &config, &proof, b"GHOST_ACTIVATION")
+    verify(program, &instance, &config, &proof, b"GHOST_ACTIVATION")
 }
 
 fn honest_cpu() -> Vec<(Block32, Bit)> {
@@ -208,9 +206,9 @@ fn ghost_activation_honest_accepts() {
         },
     };
 
-    let (outcome, _) = run(&program, &honest_cpu(), &honest_table());
+    let outcome = run(&program, &honest_cpu(), &honest_table());
 
-    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]
@@ -239,11 +237,14 @@ fn exploit_ghost_activation_partial_zero_key_permutation() {
         },
     };
 
-    let (outcome, log) = run(&pinned, &cpu, &table);
+    let outcome = run(&pinned, &cpu, &table);
 
-    assert!(
-        rejected_at(&outcome, &log, FIXED_COLUMN),
-        "got {outcome:?}\n{log}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::FixedColumn(COL_SELECTOR),
+        })
     );
 
     let admitted = GhostProgram {
@@ -257,9 +258,9 @@ fn exploit_ghost_activation_partial_zero_key_permutation() {
         },
     };
 
-    let (outcome, _) = run(&admitted, &cpu, &table);
+    let outcome = run(&admitted, &cpu, &table);
 
-    assert!(rejected_with(&outcome, BUS_SUM), "got {outcome:?}");
+    assert_eq!(outcome, Err(Rejection::BusSum));
 }
 
 #[test]
@@ -430,16 +431,16 @@ fn lookup_bus_two_tables_mismatched_content_rejected() {
 
     let instance = ProgramInstance::new(num_rows, vec![]);
 
-    let config = Config {
-        num_queries: 4,
-        min_security_bits: 0,
-        fold_arity_log: 1,
-        early_stop_vars: 1,
-        zero_knowledge: false,
-        ..Config::default()
-    };
+    let run = |table_b_key: u32, zero_knowledge: bool| {
+        let config = Config {
+            num_queries: 4,
+            min_security_bits: 0,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
+            zero_knowledge,
+            ..Config::default()
+        };
 
-    let run = |table_b_key: u32| {
         let reader = mt_lookup_trace(num_vars, &[(0, 0xA1A1_A1A1), (1, 0xB2B2_B2B2)]);
         let table_a = mt_lookup_trace(num_vars, &[(0, 0xA1A1_A1A1)]);
         let table_b = mt_lookup_trace(num_vars, &[(1, table_b_key)]);
@@ -450,14 +451,16 @@ fn lookup_bus_two_tables_mismatched_content_rejected() {
         )
         .expect("two-table lookup prove");
 
-        verify_logged(&air, &instance, &config, &proof, b"BUS_MT")
+        verify(&air, &instance, &config, &proof, b"BUS_MT")
     };
 
-    let (matched, _) = run(0xB2B2_B2B2);
-    assert!(matches!(matched, Ok(true)), "got {matched:?}");
-
-    let (outcome, _) = run(0xC3C3_C3C3);
-    assert!(rejected_with(&outcome, BUS_SUM), "got {outcome:?}");
+    assert_eq!(run(0xB2B2_B2B2, false), Ok(()));
+    assert_eq!(run(0xB2B2_B2B2, true), Ok(()));
+    assert_eq!(run(0xC3C3_C3C3, false), Err(Rejection::BusSum));
+    assert_eq!(
+        run(0xC3C3_C3C3, true),
+        Err(Rejection::Outer(OuterStage::Linear))
+    );
 }
 
 // =====================================================
@@ -514,16 +517,21 @@ fn bus_free_proof() -> (
     let proof = prove(LABEL, &air, &instance, &witness, &config, [0x5A; 32], None)
         .expect("bus-free baseline prove");
 
-    assert_eq!(
-        verify_logged(&air, &instance, &config, &proof, LABEL).0,
-        Ok(true)
-    );
+    assert_eq!(verify(&air, &instance, &config, &proof, LABEL), Ok(()));
 
     (air, instance, config, proof)
 }
 
-fn h_eval_rejected(zero_knowledge: bool, outcome: &errors::Result<bool>, log: &str) -> bool {
-    rejected_with(outcome, CHIPLET_ZEROCHECK) && (zero_knowledge || log.contains(H_EVAL_BINDING))
+fn h_eval_rejection(zero_knowledge: bool) -> Rejection {
+    match zero_knowledge {
+        true => Rejection::Zerocheck {
+            table: Table::Chiplet(1),
+            stage: ZerocheckStage::Sumcheck,
+        },
+        false => Rejection::HEval {
+            table: Table::Chiplet(0),
+        },
+    }
 }
 
 // =====================================================
@@ -543,11 +551,12 @@ fn logup_h_evals_reordered_rejected() {
 
         aux.h_evals.swap(0, 1);
 
-        let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+        let outcome = verify(&air, &instance, &config, &proof, LABEL);
 
-        assert!(
-            h_eval_rejected(zero_knowledge, &outcome, &log),
-            "zero_knowledge={zero_knowledge}: got {outcome:?}\n{log}"
+        assert_eq!(
+            outcome,
+            Err(h_eval_rejection(zero_knowledge)),
+            "zero_knowledge={zero_knowledge}"
         );
     }
 }
@@ -569,11 +578,12 @@ fn h_eval_corruption_after_sumcheck_rejected() {
 
         aux.h_evals[0] += F::ONE;
 
-        let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+        let outcome = verify(&air, &instance, &config, &proof, LABEL);
 
-        assert!(
-            h_eval_rejected(zero_knowledge, &outcome, &log),
-            "zero_knowledge={zero_knowledge}: got {outcome:?}\n{log}"
+        assert_eq!(
+            outcome,
+            Err(h_eval_rejection(zero_knowledge)),
+            "zero_knowledge={zero_knowledge}"
         );
     }
 }
@@ -591,18 +601,9 @@ fn h_opening_omitted_on_bused_table_rejected() {
     // Keep h_root, the transcript stays synced
     proof.eval_proof.openings.remove(1);
 
-    let result = verify_logged(&air, &instance, &config, &proof, LABEL).0;
+    let result = verify(&air, &instance, &config, &proof, LABEL);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "fold",
-                message: "fold proof does not match its layout",
-            })
-        ),
-        "{result:?}"
-    );
+    assert_eq!(result, Err(Rejection::Fold(FoldStage::Layout)));
 }
 
 #[test]
@@ -613,17 +614,14 @@ fn h_root_omitted_on_bused_proof_rejected() {
 
     proof.h_root = None;
 
-    let result = verify_logged(&air, &instance, &config, &proof, LABEL).0;
+    let result = verify(&air, &instance, &config, &proof, LABEL);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "verifier",
-                message: "h_root presence must match the helper tree",
-            })
-        ),
-        "{result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "h_root presence must match the helper tree",
+        }))
     );
 }
 
@@ -761,16 +759,19 @@ fn proof_under_other_bus_ids_rejected() {
 
     assert!(preflight(&air, &instance, &witness).unwrap().is_clean());
 
-    let (fake, _) = verify_logged(&air, &instance, &config, &proof, b"BusLabelFlip");
-    assert!(matches!(fake, Ok(true)), "got {fake:?}");
+    let fake = verify(&air, &instance, &config, &proof, b"BusLabelFlip");
+    assert_eq!(fake, Ok(()));
 
     mode_honest.store(true, Ordering::SeqCst);
 
-    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"BusLabelFlip");
+    let outcome = verify(&air, &instance, &config, &proof, b"BusLabelFlip");
 
-    assert!(
-        rejected_with(&outcome, CHIPLET_ZEROCHECK),
-        "got {outcome:?}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Chiplet(0),
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -806,11 +807,11 @@ fn zero_bus_main_injected_claimed_sum_rejected() {
     proof.main_logup_aux.claimed_sums.push(F::ONE);
 
     assert_eq!(
-        verify_logged(&air, &instance, &config, &proof, LABEL).0,
-        Err(Error::Protocol {
+        verify(&air, &instance, &config, &proof, LABEL),
+        Err(Rejection::Malformed(Error::Protocol {
             protocol: "verifier",
             message: "logup_aux claimed_sums length mismatch with the h columns",
-        })
+        }))
     );
 }
 
@@ -829,17 +830,14 @@ fn h_binding_on_bus_free_proof_rejected() {
     let mut with_root = proof.clone();
     with_root.h_root = bused.h_root;
 
-    let (result, _) = verify_logged(&air, &instance, &config, &with_root, LABEL);
+    let result = verify(&air, &instance, &config, &with_root, LABEL);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "verifier",
-                message: "h_root presence must match the helper tree",
-            })
-        ),
-        "{result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "h_root presence must match the helper tree",
+        }))
     );
 
     let mut with_opening = proof;
@@ -848,18 +846,9 @@ fn h_binding_on_bus_free_proof_rejected() {
         .openings
         .insert(1, bused.eval_proof.openings[1].clone());
 
-    let (result, _) = verify_logged(&air, &instance, &config, &with_opening, LABEL);
+    let result = verify(&air, &instance, &config, &with_opening, LABEL);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "fold",
-                message: "fold proof does not match its layout",
-            })
-        ),
-        "{result:?}"
-    );
+    assert_eq!(result, Err(Rejection::Fold(FoldStage::Layout)));
 }
 
 // =====================================================
@@ -876,9 +865,9 @@ fn h_opening_sibling_tamper_rejected() {
 
     opening.multiproof.siblings[0] ^= 1;
 
-    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+    let outcome = verify(&air, &instance, &config, &proof, LABEL);
 
-    assert!(rejected_with(&outcome, MULTIPROOF), "{outcome:?}\n{log}");
+    assert_eq!(outcome, Err(Rejection::Fold(FoldStage::Multiproof)));
 }
 
 // =====================================================
@@ -953,7 +942,7 @@ fn tag_trace() -> ColumnTrace {
     tb.build()
 }
 
-fn tag_outcome(air: &TwoBuses, zero_knowledge: bool) -> errors::Result<bool> {
+fn tag_outcome(air: &TwoBuses, zero_knowledge: bool) -> Result<(), Rejection> {
     let instance = ProgramInstance::new(1 << TAG_VARS, vec![]);
     let witness = ProgramWitness::new(tag_trace());
 
@@ -965,7 +954,7 @@ fn tag_outcome(air: &TwoBuses, zero_knowledge: bool) -> errors::Result<bool> {
     let proof = prove(LABEL, air, &instance, &witness, &config, [0x7A; 32], None)
         .expect("tag fixture prove");
 
-    verify_logged(air, &instance, &config, &proof, LABEL).0
+    verify(air, &instance, &config, &proof, LABEL)
 }
 
 #[test]
@@ -988,11 +977,11 @@ fn crossed_buses_of_one_tuple_shape_rejected() {
     assert_eq!(report.bus_diagnostics.len(), 2);
     assert!(report.bus_diagnostics.iter().all(|d| d.bus_imbalance));
 
-    let raw = tag_outcome(&air, false);
-    assert!(rejected_with(&raw, BUS_SUM), "{raw:?}");
-
-    let zk = tag_outcome(&air, true);
-    assert!(matches!(zk, Ok(false)), "{zk:?}");
+    assert_eq!(tag_outcome(&air, false), Err(Rejection::BusSum));
+    assert_eq!(
+        tag_outcome(&air, true),
+        Err(Rejection::Outer(OuterStage::Linear))
+    );
 }
 
 #[test]
@@ -1015,11 +1004,11 @@ fn slot_zero_const_does_not_merge_two_buses() {
         cubic: false,
     };
 
-    let raw = tag_outcome(&air, false);
-    assert!(rejected_with(&raw, BUS_SUM), "{raw:?}");
-
-    let zk = tag_outcome(&air, true);
-    assert!(matches!(zk, Ok(false)), "{zk:?}");
+    assert_eq!(tag_outcome(&air, false), Err(Rejection::BusSum));
+    assert_eq!(
+        tag_outcome(&air, true),
+        Err(Rejection::Outer(OuterStage::Linear))
+    );
 }
 
 #[test]
@@ -1044,11 +1033,11 @@ fn buses_crossed_inside_pair_columns_rejected() {
         air.specs[c.first].0 != air.specs[second].0
     }));
 
-    let raw = tag_outcome(&air, false);
-    assert!(rejected_with(&raw, BUS_SUM), "{raw:?}");
-
-    let zk = tag_outcome(&air, true);
-    assert!(matches!(zk, Ok(false)), "{zk:?}");
+    assert_eq!(tag_outcome(&air, false), Err(Rejection::BusSum));
+    assert_eq!(
+        tag_outcome(&air, true),
+        Err(Rejection::Outer(OuterStage::Linear))
+    );
 }
 
 #[test]
@@ -1092,9 +1081,10 @@ fn balanced_twins_of_tag_fixtures_verify() {
         for zero_knowledge in [false, true] {
             let outcome = tag_outcome(&air, zero_knowledge);
 
-            assert!(
-                matches!(outcome, Ok(true)),
-                "cubic={cubic} zero_knowledge={zero_knowledge}: {outcome:?}"
+            assert_eq!(
+                outcome,
+                Ok(()),
+                "cubic={cubic} zero_knowledge={zero_knowledge}"
             );
         }
     }
@@ -1202,17 +1192,16 @@ fn logup_bus_happy_path() {
     let mut verifier_transcript = Transcript::<H>::new(b"LogUp_Happy");
     let pinned_id = program_id(&air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(
+    let outcome = HekateVerifier::<F, H>::verify(
         &pinned_id,
         &air,
         &instance,
         &proof,
         &mut verifier_transcript,
         &config,
-    )
-    .expect("Verifier returned error");
+    );
 
-    assert!(ok, "Verifier rejected a valid permutation proof");
+    assert_eq!(outcome, Ok(()));
 }
 
 /// Divergent multisets -> paired logUp
@@ -1255,15 +1244,9 @@ fn logup_bus_divergence_rejected() {
         )
         .expect("Prover generates an honest proof of a non-permutation");
 
-        verify_logged(&air, &instance, &config, &proof, b"LogUp_Divergence")
+        verify(&air, &instance, &config, &proof, b"LogUp_Divergence")
     };
 
-    let (honest, _) = run(false);
-    assert!(matches!(honest, Ok(true)), "got {honest:?}");
-
-    let (outcome, log) = run(true);
-    assert!(
-        rejected_at(&outcome, &log, OUTER_LINEAR),
-        "got {outcome:?}\n{log}"
-    );
+    assert_eq!(run(false), Ok(()));
+    assert_eq!(run(true), Err(Rejection::Outer(OuterStage::Linear)));
 }
