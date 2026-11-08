@@ -8,12 +8,13 @@ use hekate_core::errors;
 use hekate_core::ligero::RowEncoder;
 use hekate_core::outer::OuterGeometry;
 use hekate_math::{BinaryFieldExtras, HardwareField, TowerField};
-use hekate_program::Program;
 use hekate_program::chiplet::ChipletDef;
+use hekate_program::constraint::{ConstraintAst, ConstraintExpr, ExprId};
 use hekate_program::digest::{self, ProgramId};
 use hekate_program::expander::RingSwitchPlan;
 use hekate_program::outer::{TableShape, table_plan};
 use hekate_program::permutation::{validate_bus_tags, validate_fixed_selectors};
+use hekate_program::{Air, Program, validate_fixed_columns};
 
 /// What verifying `program` under one `Config` needs before
 /// any proof: chiplet definitions, table parts, ring-switch
@@ -31,15 +32,23 @@ pub struct PreparedProgram<F: TowerField> {
 }
 
 impl<F: TowerField> PreparedProgram<F> {
+    /// Checks `program` and `config` and derives what
+    /// every proof of the program is verified against.
     pub fn new<P: Program<F>>(program: &P, config: &Config) -> errors::Result<Self> {
+        if config.num_queries == 0 {
+            return Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "num_queries cannot be zero",
+            });
+        }
+
         // One read: the id hashes the table the proofs are checked against
         let main = ChipletDef::from_main_table(program);
         let chiplets = program.chiplet_defs()?;
         let num_public_inputs = program.num_public_inputs();
 
-        validate_fixed_selectors(&main.permutation_checks, main.pins())?;
-
-        for def in &chiplets {
+        for def in [&main].into_iter().chain(&chiplets) {
+            validate_fixed_columns(def.pins(), Air::<F>::virtual_column_layout(def), None)?;
             validate_fixed_selectors(&def.permutation_checks, def.pins())?;
         }
 
@@ -51,16 +60,23 @@ impl<F: TowerField> PreparedProgram<F> {
 
         validate_bus_tags::<F>(endpoints)?;
 
-        let main_shape = TableShape::from_air(&main, &main.statics())?;
-        let main_plan = table_plan(&main, &main_shape, config)?;
+        let main_statics = main.statics();
+        let main_shape = TableShape::from_air(&main, &main_statics)?;
+        let main_plan = table_plan(&main, &main_statics, &main_shape, config)?;
+
+        check_next_reads(main_statics.ast, &main_plan)?;
 
         let mut chiplet_plans = Vec::with_capacity(chiplets.len());
         let mut chiplet_shapes = Vec::with_capacity(chiplets.len());
 
         for def in &chiplets {
-            let shape = TableShape::from_air(def, &def.statics())?;
+            let statics = def.statics();
+            let shape = TableShape::from_air(def, &statics)?;
+            let plan = table_plan(def, &statics, &shape, config)?;
 
-            chiplet_plans.push(table_plan(def, &shape, config)?);
+            check_next_reads(statics.ast, &plan)?;
+
+            chiplet_plans.push(plan);
             chiplet_shapes.push(shape);
         }
 
@@ -117,6 +133,39 @@ impl<F: BinaryFieldExtras + HardwareField> Default for VerifierScratch<F> {
     }
 }
 
+/// Errs unless `plan` ships a claim for each next-row cell
+/// of `ast`. The match has no wildcard arm: a new expression
+/// kind fails to compile until it says whether it reads one.
+fn check_next_reads<F: TowerField>(
+    ast: &ConstraintAst<F>,
+    plan: &RingSwitchPlan,
+) -> errors::Result<()> {
+    let slots = plan.next_slots();
+
+    for id in 0..ast.arena.len() as u32 {
+        let shipped = match ast.arena.get(ExprId(id)) {
+            ConstraintExpr::Cell(cell) if cell.next_row => {
+                slots.get(cell.col_idx).copied().flatten().is_some()
+            }
+            ConstraintExpr::Cell(_)
+            | ConstraintExpr::Const(_)
+            | ConstraintExpr::Add(..)
+            | ConstraintExpr::Mul(..)
+            | ConstraintExpr::Scale(..)
+            | ConstraintExpr::Sum(_) => true,
+        };
+
+        if !shipped {
+            return Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "AST reads a next-row cell its plan ships no claim for",
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +220,27 @@ mod tests {
         assert_eq!(
             prepared.program_id,
             digest::program_id_from_parts(&prepared.main, 0, &[], &[], &[])
+        );
+    }
+
+    #[test]
+    fn plan_without_next_row_slot_rejected() {
+        let cs = ConstraintSystem::<F>::new();
+        cs.constrain(cs.next(1) + cs.col(0));
+
+        let ast = cs.build();
+        let layout = [ColumnType::B32; 2];
+
+        let shipped = RingSwitchPlan::new(&layout, None, 0, 0, &[false, true]).unwrap();
+        let unshipped = RingSwitchPlan::new(&layout, None, 0, 0, &[false; 2]).unwrap();
+
+        assert_eq!(check_next_reads(&ast, &shipped), Ok(()));
+        assert_eq!(
+            check_next_reads(&ast, &unshipped),
+            Err(errors::Error::Protocol {
+                protocol: "verifier",
+                message: "AST reads a next-row cell its plan ships no claim for",
+            })
         );
     }
 }

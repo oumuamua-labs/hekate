@@ -2,9 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::flat_matches_canonical;
 use alloc::vec::Vec;
-use hekate_core::errors;
 use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::SumcheckProof;
 use hekate_core::skip::SkipDomain;
@@ -12,17 +10,15 @@ use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_math::{Flat, HardwareField};
 
-pub type SumcheckVerifyResult<F> = errors::Result<Option<(Vec<Flat<F>>, Flat<F>)>>;
+use crate::flat_matches_canonical;
+use crate::rejection::SumcheckRejection;
 
-/// Verifies a Sumcheck protocol
-/// execution over a Boolean hypercube.
+/// Verifies a Sumcheck protocol execution over a Boolean hypercube.
 ///
-/// The Sumcheck protocol reduces the claim
-/// that a multi-variate polynomial sums to
-/// a specific value over the Boolean hypercube
-/// $\{0, 1\}^v$ into a single claim about the
-/// polynomial's evaluation at a randomly
-/// chosen point $r \in \mathbb{F}^v$.
+/// The Sumcheck protocol reduces the claim that a multi-variate
+/// polynomial sums to a specific value over the Boolean hypercube
+/// $\{0, 1\}^v$ into a single claim about the polynomial's evaluation
+/// at a randomly chosen point $r \in \mathbb{F}^v$.
 ///
 /// # Security & Protocol Mechanics
 /// 1. **Degree Enforcement:** Strictly validates
@@ -39,30 +35,30 @@ pub type SumcheckVerifyResult<F> = errors::Result<Option<(Vec<Flat<F>>, Flat<F>)
 ///    to securely sample the next random challenge $r_i$.
 ///
 /// # Returns
-/// If successful, returns `Some((challenges, final_eval))`
+/// If successful, returns `(challenges, final_eval)`
 /// containing the drawn random point $r = (r_0, \dots, r_{v-1})$
 /// and the final expected evaluation at that point.
-/// Returns `Err` or `None` if any consistency check
-/// or degree validation fails.
+/// Returns the [`SumcheckRejection`] of the first
+/// failing count, degree or consistency check.
 pub fn verify<F: HardwareField, H: Hasher>(
     num_vars: usize,
     degree: usize,
     initial_claim: Flat<F>,
     proof: &SumcheckProof<F>,
     transcript: &mut Transcript<H>,
-) -> SumcheckVerifyResult<F> {
+) -> Result<(Vec<Flat<F>>, Flat<F>), SumcheckRejection> {
     if proof.round_polys.len() != num_vars {
-        return Ok(None);
+        return Err(SumcheckRejection::Rounds);
     }
 
     if num_vars == 0 {
         transcript.append_field(b"final_val", proof.claimed_evaluation);
 
         if !flat_matches_canonical(initial_claim, proof.claimed_evaluation) {
-            return Ok(None);
+            return Err(SumcheckRejection::Claim);
         }
 
-        return Ok(Some((Vec::new(), proof.claimed_evaluation.to_hardware())));
+        return Ok((Vec::new(), proof.claimed_evaluation.to_hardware()));
     }
 
     let mut full_poly = UnivariatePoly::new(Vec::with_capacity(degree + 1));
@@ -78,10 +74,7 @@ pub fn verify<F: HardwareField, H: Hasher>(
         // expect exactly `degree` evaluations.
         let expected_len = degree;
         if poly.evals.len() != expected_len {
-            return Err(errors::Error::Protocol {
-                protocol: "sumcheck",
-                message: "round polynomial degree mismatch",
-            });
+            return Err(SumcheckRejection::Degree);
         }
 
         // Degree stripping reconstruction:
@@ -109,13 +102,13 @@ pub fn verify<F: HardwareField, H: Hasher>(
 
     // Final Consistency Check
     if !flat_matches_canonical(current_claim, proof.claimed_evaluation) {
-        return Ok(None);
+        return Err(SumcheckRejection::Claim);
     }
 
     // Commit final value to transcript
     transcript.append_field(b"final_val", proof.claimed_evaluation);
 
-    Ok(Some((challenges, current_claim)))
+    Ok((challenges, current_claim))
 }
 
 /// Replays a skip round: rebuilds the first domain value
@@ -126,14 +119,11 @@ pub fn verify_skip<F: HardwareField, H: Hasher>(
     initial_claim: Flat<F>,
     sent: &[F],
     transcript: &mut Transcript<H>,
-) -> errors::Result<(Flat<F>, Flat<F>)> {
+) -> Result<(Flat<F>, Flat<F>), SumcheckRejection> {
     let plan = domain.plan();
 
     if sent.len() != plan.sent_scalars() {
-        return Err(errors::Error::Protocol {
-            protocol: "sumcheck",
-            message: "skip round scalar count mismatch",
-        });
+        return Err(SumcheckRejection::Degree);
     }
 
     let rest_of_block = sent[..plan.block_rows() - 1]

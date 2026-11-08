@@ -6,8 +6,6 @@
 //! the pad cursor that mirrors the prover's masking order,
 //! and the zk-Ligero segment over the assembled statement.
 
-use crate::prepared::VerifierScratch;
-use crate::root;
 use alloc::vec::Vec;
 use hekate_core::config::Config;
 use hekate_core::errors;
@@ -17,14 +15,19 @@ use hekate_core::ligero::{
 };
 use hekate_core::proofs::{InnerProof, OuterOpening};
 use hekate_core::protocol;
+use hekate_core::trace::TraceCompatibleField;
 use hekate_crypto::Hasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{BinaryFieldExtras, Flat, HardwareField, TowerField};
+use hekate_math::Flat;
 use hekate_program::outer::{
     EvalRecord, OuterLayout, OuterStatement, TableRecord, linear_tensor_vars, linear_weights,
     statement_rows,
 };
 use tracing::{instrument, trace_span, warn};
+
+use crate::prepared::VerifierScratch;
+use crate::rejection::{OuterStage, Rejection};
+use crate::root;
 
 /// Next unconsumed pad index;
 /// advanced in the prover's masking order.
@@ -55,25 +58,22 @@ pub fn verify_outer<F, H>(
     eval: &EvalRecord<F>,
     cursor: PadCursor,
     scratch: &mut VerifierScratch<F>,
-) -> errors::Result<bool>
+) -> Result<(), Rejection>
 where
-    F: HardwareField + BinaryFieldExtras + TowerField,
+    F: TraceCompatibleField,
     H: Hasher,
 {
     if cursor.0 as usize != statement.masked_scalars {
-        return Err(errors::Error::Protocol {
-            protocol: "outer",
-            message: "masked scalar count does not match the statement",
-        });
+        return Err(Rejection::Outer(OuterStage::PadCount));
     }
 
     let (pad_root, outer) = match (pad_root, proof.outer.as_ref()) {
         (Some(root), Some(outer)) => (root, outer),
         _ => {
-            return Err(errors::Error::Protocol {
+            return Err(Rejection::Malformed(errors::Error::Protocol {
                 protocol: "outer",
                 message: "eval-claim hiding needs both pad_root and the outer segment",
-            });
+            }));
         }
     };
 
@@ -128,7 +128,7 @@ where
 
     if !opened(&outer.pad_opening) || !opened(&outer.aux_opening) {
         warn!("outer openings do not cover the queried columns");
-        return Ok(false);
+        return Err(Rejection::Outer(OuterStage::Coverage));
     }
 
     let openings = || {
@@ -142,7 +142,7 @@ where
         })
     };
 
-    let tests = || -> errors::Result<[(errors::Result<bool>, &'static str); 3]> {
+    let tests = || -> Result<(), Rejection> {
         let pad_opening = Opening::from_wire(&outer.pad_opening, layout.pad_rows)?;
         let aux_opening = Opening::from_wire(&outer.aux_opening, aux_rows)?;
 
@@ -150,7 +150,7 @@ where
         let vanisher = encoder.vanisher_at(&columns)?;
 
         let interleaved = || {
-            trace_span!("interleaved").in_scope(|| {
+            let holds = trace_span!("interleaved").in_scope(|| {
                 verify_interleaved(
                     encoder,
                     &to_flat(&outer.interleaved),
@@ -158,10 +158,16 @@ where
                     layout.interleaved_mask(),
                     &stacked,
                 )
-            })
+            });
+
+            test_outcome(
+                holds,
+                OuterStage::Interleaved,
+                "outer interleaved test failed",
+            )
         };
 
-        let linear = || -> errors::Result<bool> {
+        let linear = || -> Result<(), Rejection> {
             let batch = trace_span!("linear_weights")
                 .in_scope(|| linear_weights(&layout, &statement, records, eval, &r_lin))?;
             let encoded = trace_span!("encode_weights", rows = batch.rows.len())
@@ -173,7 +179,7 @@ where
                 vanisher: &vanisher,
             };
 
-            Ok(trace_span!("linear").in_scope(|| {
+            let holds = trace_span!("linear").in_scope(|| {
                 verify_linear(
                     encoder,
                     &to_flat(&outer.linear),
@@ -183,7 +189,9 @@ where
                     batch.target,
                     &stacked,
                 )
-            }))
+            });
+
+            test_outcome(holds, OuterStage::Linear, "outer linear test failed")
         };
 
         let quadratic = || {
@@ -193,7 +201,7 @@ where
                 vanisher: &vanisher,
             };
 
-            trace_span!("quadratic").in_scope(|| {
+            let holds = trace_span!("quadratic").in_scope(|| {
                 verify_quadratic(
                     encoder,
                     &to_flat(&outer.quadratic),
@@ -203,33 +211,24 @@ where
                     layout.message_len,
                     &stacked,
                 )
-            })
+            });
+
+            test_outcome(holds, OuterStage::Quadratic, "outer quadratic test failed")
         };
 
         let (interleaved, (linear, quadratic)) = join(interleaved, || join(linear, quadratic));
 
-        Ok([
-            (Ok(interleaved), "outer interleaved test failed"),
-            (linear, "outer linear test failed"),
-            (Ok(quadratic), "outer quadratic test failed"),
-        ])
+        interleaved.and(linear).and(quadratic)
     };
 
     let (openings_hold, tests) = join(openings, tests);
 
     if !openings_hold {
         warn!("outer opening rejected");
-        return Ok(false);
+        return Err(Rejection::Outer(OuterStage::Opening));
     }
 
-    for (holds, failure) in tests? {
-        if !holds? {
-            warn!("{failure}");
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
+    tests
 }
 
 /// Both closures always run: on the pool with
@@ -248,4 +247,14 @@ where
     let pair = (a(), b());
 
     pair
+}
+
+fn test_outcome(holds: bool, stage: OuterStage, failure: &str) -> Result<(), Rejection> {
+    match holds {
+        true => Ok(()),
+        false => {
+            warn!("{failure}");
+            Err(Rejection::Outer(stage))
+        }
+    }
 }

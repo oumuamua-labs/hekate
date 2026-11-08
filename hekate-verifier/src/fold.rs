@@ -16,6 +16,8 @@ use hekate_crypto::{Digest, Hasher};
 use hekate_math::{BinaryFieldExtras, CantorBasis, Flat, HardwareField, TowerField};
 use tracing::{instrument, warn};
 
+use crate::rejection::{FoldStage, Rejection};
+
 const MAX_COSET: usize = 1 << MAX_FOLD_ARITY_LOG;
 
 pub struct FoldClaims<'a, F, H: Hasher> {
@@ -104,7 +106,7 @@ pub fn verify<F, H>(
     claims: FoldClaims<'_, F, H>,
     proof: &FoldEvalProof<F>,
     transcript: &mut Transcript<H>,
-) -> errors::Result<bool>
+) -> Result<(), Rejection>
 where
     F: TowerField + HardwareField + BinaryFieldExtras + TraceCompatibleField,
     H: Hasher,
@@ -119,7 +121,7 @@ where
     let digest_bytes = H::Digest::BYTES;
 
     if claims.masters.len() != polys.len() || claims.point.len() != layout.num_vars() {
-        return Err(malformed("one master per polynomial at the batching point"));
+        return Err(malformed("one master per polynomial at the batching point").into());
     }
 
     if proof.fold_rounds.len() != 2 * fold_vars
@@ -127,7 +129,7 @@ where
         || proof.final_layer.len() != 1 << stop
         || proof.openings.len() != layout.trees().len()
     {
-        return Err(malformed("fold proof does not match its layout"));
+        return Err(Rejection::Fold(FoldStage::Layout));
     }
 
     let round_root = |c: usize| &proof.round_roots[(c - 1) * digest_bytes..c * digest_bytes];
@@ -190,7 +192,7 @@ where
 
     if claim != head * tail {
         warn!("fold sumcheck final claim disagrees with the final layer");
-        return Ok(false);
+        return Err(Rejection::Fold(FoldStage::FinalClaim));
     }
 
     let queries = transcript.challenge_indices(
@@ -218,7 +220,7 @@ where
         };
 
         if matches!(tree.kind, TreeKind::Round(_)) && tree.leaf_bytes != symbol_bytes << a {
-            return Err(malformed("round tree leaves do not hold the fold field"));
+            return Err(malformed("round tree leaves do not hold the fold field").into());
         }
 
         let opened = open_tree::<F, H>(tree, opening, &root, tag, a, &queries)?;
@@ -271,7 +273,7 @@ where
 
                         joined += lambdas[k] * prefolded;
                     }
-                    _ => return Err(malformed("polynomial joins past the first round")),
+                    _ => return Err(malformed("polynomial joins past the first round").into()),
                 }
 
                 at += run * width;
@@ -295,7 +297,8 @@ where
                     round = c,
                     query, "fold value disagrees with the committed round"
                 );
-                return Ok(false);
+
+                return Err(Rejection::Fold(FoldStage::Round(c)));
             }
 
             value = kernel.fold_coset(
@@ -316,11 +319,12 @@ where
                 round = rounds,
                 query, "fold value disagrees with the final layer"
             );
-            return Ok(false);
+
+            return Err(Rejection::Fold(FoldStage::FinalLayer));
         }
     }
 
-    Ok(true)
+    Ok(())
 }
 
 fn open_tree<'p, F, H>(
@@ -330,7 +334,7 @@ fn open_tree<'p, F, H>(
     tag: Tag,
     arity_log: usize,
     queries: &[usize],
-) -> errors::Result<OpenedTree<'p>>
+) -> Result<OpenedTree<'p>, Rejection>
 where
     F: TowerField,
     H: Hasher,
@@ -345,9 +349,7 @@ where
     let leaf_bytes = tree.leaf_bytes;
 
     if opening.leaves.len() != distinct.len() * leaf_bytes {
-        return Err(malformed(
-            "opened leaves do not match the tree's leaf width",
-        ));
+        return Err(malformed("opened leaves do not match the tree's leaf width").into());
     }
 
     let hashes: Vec<(usize, H::Digest)> = distinct
@@ -366,7 +368,7 @@ where
 
     if !accepted {
         warn!(kind = ?tree.kind, "fold tree multiproof rejected");
-        return Err(malformed("fold tree multiproof rejected"));
+        return Err(Rejection::Fold(FoldStage::Multiproof));
     }
 
     Ok(OpenedTree {
