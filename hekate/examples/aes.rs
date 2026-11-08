@@ -191,13 +191,12 @@ fn prove_and_verify<P: Program<F>>(
     // Phase 4:
     // Verify
     let pinned_id = run.audited_id(air);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         let mut vt = Transcript::<H>::new(transcript_label);
         HekateVerifier::<F, H>::verify(&pinned_id, air, &instance, &proof, &mut vt, &config)
-            .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }
 
 fn print_layout(key_hex: &str, rows_per_block: usize, sbox_rounds_per_block: usize) {

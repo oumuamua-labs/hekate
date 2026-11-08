@@ -210,7 +210,7 @@ fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, m_prime: &[u8],
     let mut verifier_transcript = Transcript::<H>::new(b"MlDsa_E2E");
 
     let pinned_id = args.audited_id(&program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &program,
@@ -219,10 +219,9 @@ fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, m_prime: &[u8],
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }
 
 fn main() {
