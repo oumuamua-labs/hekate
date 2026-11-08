@@ -14,15 +14,20 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::site::ZEROCHECK;
-use hekate_testkit::verdict::{rejected_at, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
 use hekate_verifier::prepared::{PreparedProgram, VerifierScratch};
+use hekate_verifier::rejection::{Rejection, Table, ZerocheckStage};
 use proptest::prelude::*;
 use rand::{TryRngCore, rngs::OsRng};
 
 type F = Block256;
 type H = DefaultHasher;
+
+const MAIN_SUMCHECK: Rejection = Rejection::Zerocheck {
+    table: Table::Main,
+    stage: ZerocheckStage::Sumcheck,
+};
 
 fn test_config() -> Config {
     Config {
@@ -128,11 +133,7 @@ fn air_fib_e2e() {
         &config,
     );
 
-    match result {
-        Ok(true) => {}
-        Ok(false) => panic!("Program verification returned false"),
-        Err(e) => panic!("Program verification error: {:?}", e),
-    }
+    assert_eq!(result, Ok(()));
 }
 
 #[test]
@@ -196,18 +197,15 @@ fn transcript_binding_security_trace_root_changes_challenges() {
         "Sanity: different configs must yield different trace roots"
     );
 
-    let (honest, _) = verify_logged(&air, &instance, &config_a, &proof_a, b"BindingTest");
-    assert!(matches!(honest, Ok(true)), "got {honest:?}");
+    let honest = verify(&air, &instance, &config_a, &proof_a, b"BindingTest");
+    assert_eq!(honest, Ok(()));
 
     let mut swapped = proof_a.clone();
     swapped.trace_root = proof_b.trace_root.clone();
 
-    let (outcome, log) = verify_logged(&air, &instance, &config_a, &swapped, b"BindingTest");
+    let outcome = verify(&air, &instance, &config_a, &swapped, b"BindingTest");
 
-    assert!(
-        rejected_at(&outcome, &log, ZEROCHECK),
-        "got {outcome:?}\n{log}"
-    );
+    assert_eq!(outcome, Err(MAIN_SUMCHECK));
 }
 
 #[test]
@@ -244,17 +242,16 @@ fn zk_air_happy_path() {
     .unwrap();
 
     let mut verifier_transcript = Transcript::<H>::new(b"FibAir_ZK");
-    let ok = HekateVerifier::<F, H>::verify(
+    let outcome = HekateVerifier::<F, H>::verify(
         &program_id(&air).unwrap(),
         &air,
         &instance,
         &proof,
         &mut verifier_transcript,
         &config,
-    )
-    .unwrap();
+    );
 
-    assert!(ok, "ZK Program verification failed");
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]
@@ -289,7 +286,13 @@ fn prepared_verify_matches_verify_across_reuse() {
         )
         .unwrap();
 
-        for (instance, accepts) in [(&honest, true), (&forged, false), (&honest, true)] {
+        let outcomes = [
+            (&honest, Ok(())),
+            (&forged, Err(MAIN_SUMCHECK)),
+            (&honest, Ok(())),
+        ];
+
+        for (instance, expected) in outcomes {
             let fresh = HekateVerifier::<F, H>::verify(
                 &id,
                 &air,
@@ -308,8 +311,8 @@ fn prepared_verify_matches_verify_across_reuse() {
                 &mut scratch,
             );
 
-            assert_eq!(fresh.as_ref().ok(), reused.as_ref().ok(), "2^{num_vars}");
-            assert_eq!(matches!(reused, Ok(true)), accepts, "2^{num_vars}");
+            assert_eq!(fresh, expected, "2^{num_vars}");
+            assert_eq!(reused, expected, "2^{num_vars}");
         }
     }
 }
@@ -353,7 +356,10 @@ fn prepared_program_rejects_another_programs_id() {
         &mut VerifierScratch::new(),
     );
 
-    assert!(matches!(outcome, Err(Error::ProgramIdMismatch { .. })));
+    assert!(matches!(
+        outcome,
+        Err(Rejection::Program(Error::ProgramIdMismatch { .. }))
+    ));
 }
 
 #[test]
@@ -396,11 +402,12 @@ fn verify_batch_rejects_exactly_forged_position() {
         let results = HekateVerifier::<F, H>::verify_batch(&id, &prepared, b"FibAir_Batch", &batch);
 
         for (i, result) in results.iter().enumerate() {
-            assert_eq!(
-                matches!(result, Ok(true)),
-                i != bad,
-                "forged at {bad}, item {i}"
-            );
+            let expected = match i == bad {
+                true => Err(MAIN_SUMCHECK),
+                false => Ok(()),
+            };
+
+            assert_eq!(*result, expected, "forged at {bad}, item {i}");
         }
     }
 }
@@ -444,17 +451,16 @@ proptest! {
         .unwrap();
 
         let mut verifier_transcript = Transcript::<H>::new(b"FibAir_Fuzz");
-        let ok = HekateVerifier::<F, H>::verify(
-        &program_id(&air).unwrap(),
-        &air,
-        &instance,
-        &proof,
-        &mut verifier_transcript,
-        &config,
-    )
-            .unwrap();
+        let outcome = HekateVerifier::<F, H>::verify(
+            &program_id(&air).unwrap(),
+            &air,
+            &instance,
+            &proof,
+            &mut verifier_transcript,
+            &config,
+        );
 
-        prop_assert!(ok, "Program verification failed for num_vars={num_vars}");
+        prop_assert_eq!(outcome, Ok(()), "Program verification failed for num_vars={}", num_vars);
     }
 }
 
@@ -494,7 +500,7 @@ fn quarter_rate_proof_verifies_at_derived_count() {
         )
     };
 
-    assert!(matches!(verify(&quarter), Ok(true)));
+    assert_eq!(verify(&quarter), Ok(()));
 
     let half_rate = Config {
         code_rate: CodeRate::Half,
@@ -503,11 +509,6 @@ fn quarter_rate_proof_verifies_at_derived_count() {
     };
 
     for drifted in [Config::prod(), half_rate] {
-        let (outcome, log) = verify_logged(&air, &instance, &drifted, &proof, b"FibAir_Quarter");
-
-        assert!(
-            rejected_at(&outcome, &log, ZEROCHECK),
-            "got {outcome:?}\n{log}"
-        );
+        assert_eq!(verify(&drifted), Err(MAIN_SUMCHECK));
     }
 }

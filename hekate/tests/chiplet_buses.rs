@@ -19,14 +19,19 @@ use hekate_program::digest::program_id;
 use hekate_program::permutation::PermutationCheckSpec;
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::site::OUTER_LINEAR;
-use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{OuterStage, Rejection};
 
 type F = Block256;
 type H = DefaultHasher;
 
 const TEST_NUM_VARS: usize = 6;
+
+const BUS_SUM_REJECTED: [Result<(), Rejection>; 2] = [
+    Err(Rejection::Outer(OuterStage::Linear)),
+    Err(Rejection::BusSum),
+];
 
 fn test_config() -> Config {
     Config {
@@ -59,7 +64,7 @@ fn prove_and_verify<P: Program<F>>(
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F, ColumnTrace>,
     config: &Config,
-) -> bool {
+) -> Result<(), Rejection> {
     let seed = [0xCCu8; 32];
     let proof =
         prove(b"ChipletBuses", air, instance, witness, config, seed, None).expect("proving failed");
@@ -68,14 +73,13 @@ fn prove_and_verify<P: Program<F>>(
     let pinned_id = program_id(air).unwrap();
 
     HekateVerifier::<F, H>::verify(&pinned_id, air, instance, &proof, &mut vt, config)
-        .unwrap_or(false)
 }
 
 fn verify_both_modes<P: Program<F> + Sync>(
     air: &P,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F, ColumnTrace>,
-) -> [(errors::Result<bool>, String); 2] {
+) -> [Result<(), Rejection>; 2] {
     [true, false].map(|zero_knowledge| {
         let config = Config {
             zero_knowledge,
@@ -93,15 +97,8 @@ fn verify_both_modes<P: Program<F> + Sync>(
         )
         .expect("chiplet buses prove");
 
-        verify_logged(air, instance, &config, &proof, b"ChipletBuses")
+        verify(air, instance, &config, &proof, b"ChipletBuses")
     })
-}
-
-fn bus_sum_rejects(outcomes: &[(errors::Result<bool>, String); 2]) -> bool {
-    let [(zk, zk_log), (base, _)] = outcomes;
-
-    rejected_at(zk, zk_log, OUTER_LINEAR)
-        && rejected_with(base, "bus endpoint sums do not cancel to zero")
 }
 
 // ==========================================================
@@ -171,8 +168,9 @@ fn chiplet_to_chiplet_bus_valid() {
     let witness =
         ProgramWitness::new(dummy_main_trace(TEST_NUM_VARS)).with_chiplets(vec![trace1, trace2]);
 
-    assert!(
+    assert_eq!(
         prove_and_verify(&air, &instance, &witness, &test_config()),
+        Ok(()),
         "chiplet<>chiplet bus with matching products must verify"
     );
 }
@@ -208,7 +206,7 @@ fn chiplet_to_chiplet_bus_product_mismatch() {
 
     let outcomes = verify_both_modes(&air, &instance, &witness);
 
-    assert!(bus_sum_rejects(&outcomes), "got {outcomes:?}");
+    assert_eq!(outcomes, BUS_SUM_REJECTED);
 }
 
 /// Chiplet declares bus_id with no counterpart anywhere. Verify rejects.
@@ -232,7 +230,7 @@ fn dangling_chiplet_bus() {
 
     let outcomes = verify_both_modes(&air, &instance, &witness);
 
-    assert!(bus_sum_rejects(&outcomes), "got {outcomes:?}");
+    assert_eq!(outcomes, BUS_SUM_REJECTED);
 }
 
 /// Three specs share a bus_id.
@@ -261,15 +259,10 @@ fn odd_endpoint_multiplicity_rejected() {
     };
 
     let balanced = three(&[]);
-    assert!(
-        balanced
-            .iter()
-            .all(|(outcome, _)| matches!(outcome, Ok(true))),
-        "got {balanced:?}"
-    );
+    assert_eq!(balanced, [Ok(()), Ok(())]);
 
     let odd = three(&instructions);
-    assert!(bus_sum_rejects(&odd), "got {odd:?}");
+    assert_eq!(odd, BUS_SUM_REJECTED);
 }
 
 /// Existing main<>chiplet pattern
@@ -358,8 +351,9 @@ fn main_chiplet_bus_backward_compat() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(cpu_trace).with_chiplets(vec![rom_trace]);
 
-    assert!(
+    assert_eq!(
         prove_and_verify(&air, &instance, &witness, &test_config()),
+        Ok(()),
         "classic main<>chiplet pattern must still work"
     );
 }
@@ -394,5 +388,8 @@ fn namespaced_end_to_end_prove_verify() {
     let witness =
         ProgramWitness::new(dummy_main_trace(TEST_NUM_VARS)).with_chiplets(vec![trace1, trace2]);
 
-    assert!(prove_and_verify(&air, &instance, &witness, &test_config()));
+    assert_eq!(
+        prove_and_verify(&air, &instance, &witness, &test_config()),
+        Ok(())
+    );
 }

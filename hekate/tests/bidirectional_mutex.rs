@@ -17,10 +17,10 @@ use hekate_program::{
     Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness, define_columns,
 };
 use hekate_prover_sys::prove;
-use hekate_testkit::site::FIXED_COLUMN;
-use hekate_testkit::verdict::{rejected_at, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
 use hekate_verifier::prepared::PreparedProgram;
+use hekate_verifier::rejection::{Rejection, Table, ZerocheckStage};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -198,7 +198,7 @@ fn run(
     program: &ForgeryHost,
     cpu_rows: &[(Block32, Bit, Bit)],
     partner_rows: &[(Block32, Bit)],
-) -> (errors::Result<bool>, String) {
+) -> Result<(), Rejection> {
     let num_rows: usize = 4;
     let seed = [0xC3u8; 32];
 
@@ -226,7 +226,7 @@ fn run(
     )
     .expect("paired bus prove");
 
-    verify_logged(program, &instance, &config, &proof, b"BIDIR_FORGERY")
+    verify(program, &instance, &config, &proof, b"BIDIR_FORGERY")
 }
 
 #[test]
@@ -255,9 +255,9 @@ fn paired_bus_disjoint_selectors_honest_accepts() {
         (Block32::ZERO, Bit::ZERO),
     ];
 
-    let (outcome, _) = run(&program, &cpu_rows, &partner_rows);
+    let outcome = run(&program, &cpu_rows, &partner_rows);
 
-    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]
@@ -286,11 +286,14 @@ fn exploit_paired_bus_both_selectors_high_permutation() {
         (Block32::ZERO, Bit::ZERO),
     ];
 
-    let (outcome, log) = run(&program, &cpu_rows, &partner_rows);
+    let outcome = run(&program, &cpu_rows, &partner_rows);
 
-    assert!(
-        rejected_at(&outcome, &log, FIXED_COLUMN),
-        "got {outcome:?}\n{log}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::FixedColumn(PairedCpuCols::S_SEND),
+        })
     );
 }
 
@@ -327,14 +330,17 @@ fn exploit_paired_bus_both_selectors_high_lookup() {
         (Block32::ZERO, Bit::ZERO),
     ];
 
-    let (honest, _) = run(&program, &honest_rows, &partner_rows);
-    assert!(matches!(honest, Ok(true)), "got {honest:?}");
+    let honest = run(&program, &honest_rows, &partner_rows);
+    assert_eq!(honest, Ok(()));
 
-    let (outcome, log) = run(&program, &cpu_rows, &partner_rows);
+    let outcome = run(&program, &cpu_rows, &partner_rows);
 
-    assert!(
-        rejected_at(&outcome, &log, FIXED_COLUMN),
-        "got {outcome:?}\n{log}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::FixedColumn(PairedCpuCols::S_SEND),
+        })
     );
 }
 
@@ -454,10 +460,9 @@ fn paired_air_constraint_ast_mutated_post_prove_rejected() {
     let mut vt = Transcript::<H>::new(b"AuditP0");
     let pinned_id = program_id(&air).unwrap();
 
-    assert!(
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-            .unwrap(),
-        "paired baseline must verify"
+    assert_eq!(
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config),
+        Ok(())
     );
 
     air.include_mutex.store(false, Ordering::SeqCst);
@@ -468,7 +473,10 @@ fn paired_air_constraint_ast_mutated_post_prove_rejected() {
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
     assert!(
-        result.is_err(),
+        matches!(
+            result,
+            Err(Rejection::Program(Error::ProgramIdMismatch { .. }))
+        ),
         "SECURITY FAILURE: mutated constraint_ast must miss the pinned program_id"
     );
 }

@@ -10,8 +10,8 @@ use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::site::{EVAL_SUMCHECK, OUTER_LINEAR};
-use hekate_testkit::verdict::{rejected_at, verify_logged};
+use hekate_testkit::verdict::verify;
+use hekate_verifier::rejection::{OuterStage, PoolStage, Rejection};
 
 type F = Block256;
 
@@ -113,9 +113,10 @@ fn whole_read_cell_outside_type_rejected() {
     let mut escaped = Vec::new();
     for (vars, zero_knowledge) in HEIGHTS.into_iter().flat_map(|v| [(v, false), (v, true)]) {
         let config = config(zero_knowledge);
-        let site = match zero_knowledge {
-            false => EVAL_SUMCHECK,
-            true => OUTER_LINEAR,
+
+        let expected = match zero_knowledge {
+            false => Rejection::PoolEval(PoolStage::Sumcheck),
+            true => Rejection::Outer(OuterStage::Linear),
         };
 
         for (wide, wide_bits) in WIDE_TYPES {
@@ -133,10 +134,9 @@ fn whole_read_cell_outside_type_rejected() {
 
                 let fits = (1u128 << bits) - 1;
                 let honest = prove_with(&air, &config, vars, fits, narrow);
-                let (outcome, _) =
-                    verify_logged(&air, &instance(vars, fits), &config, &honest, LABEL);
+                let outcome = verify(&air, &instance(vars, fits), &config, &honest, LABEL);
 
-                assert!(matches!(outcome, Ok(true)), "{label}: {outcome:?}");
+                assert_eq!(outcome, Ok(()), "{label}");
                 assert_eq!(
                     !honest.zerocheck_proof.skip.is_empty(),
                     vars == SKIP_VARS,
@@ -146,11 +146,10 @@ fn whole_read_cell_outside_type_rejected() {
                 let outside = 1u128 << bits;
                 let forged = prove_with(&air, &config, vars, outside, wide);
 
-                let (outcome, log) =
-                    verify_logged(&air, &instance(vars, outside), &config, &forged, LABEL);
+                let outcome = verify(&air, &instance(vars, outside), &config, &forged, LABEL);
 
-                if !rejected_at(&outcome, &log, site) {
-                    escaped.push((label, log));
+                if outcome != Err(expected) {
+                    escaped.push((label, outcome));
                 }
             }
         }

@@ -17,9 +17,9 @@ use hekate_program::digest::program_id;
 use hekate_program::expander::VirtualExpander;
 use hekate_program::{Air, FixedColumn, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::site::ZEROCHECK;
-use hekate_testkit::verdict::{rejected_at, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{Rejection, Table, ZerocheckStage};
 
 type F = Block256;
 type H = DefaultHasher;
@@ -191,10 +191,10 @@ fn virtual_packing_eval_forgery_rejected() {
     let mut vt = Transcript::<H>::new(b"VirtualPackEvalForgery");
     let pinned_id = program_id(&air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-        .expect("verification must not error");
+    let outcome =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(ok, "baseline must verify");
+    assert_eq!(outcome, Ok(()));
 
     // Corrupt virtual bit column 17
     let evals = &mut proof.chiplet_point_evaluations[0].1;
@@ -202,11 +202,14 @@ fn virtual_packing_eval_forgery_rejected() {
 
     evals[17] += F::ONE;
 
-    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, b"VirtualPackEvalForgery");
+    let outcome = verify(&air, &instance, &config, &proof, b"VirtualPackEvalForgery");
 
-    assert!(
-        rejected_at(&outcome, &log, ZEROCHECK),
-        "got {outcome:?}\n{log}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -250,12 +253,11 @@ fn virtual_expansion_witness_isolation() {
     let mut vt_zk = Transcript::<H>::new(b"VirtualPackWitnessIsolation");
     let pinned_id = program_id(&air).unwrap();
 
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &pinned_id, &air, &instance, &proof_zk, &mut vt_zk, &config_zk
-        )
-        .unwrap(),
-        "ZK proof must verify"
+        ),
+        Ok(())
     );
 
     assert!(

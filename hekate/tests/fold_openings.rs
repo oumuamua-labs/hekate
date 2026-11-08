@@ -9,8 +9,8 @@ use hekate::crypto::{DefaultHasher, Digest, Hasher};
 use hekate::math::Block256;
 use hekate_core::errors::Error;
 use hekate_math::TowerField;
-use hekate_testkit::site::{FOLD_FINAL, MULTIPROOF};
-use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
+use hekate_testkit::verdict::verify;
+use hekate_verifier::rejection::{FoldStage, PoolStage, Rejection};
 use multibus::{LABEL, cfg, multibus_proof};
 
 type F = Block256;
@@ -36,9 +36,9 @@ fn trace_opening_sibling_tamper_rejected() {
 
     opening.multiproof.siblings[0] ^= 1;
 
-    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+    let outcome = verify(&air, &instance, &config, &proof, LABEL);
 
-    assert!(rejected_with(&outcome, MULTIPROOF), "{outcome:?}\n{log}");
+    assert_eq!(outcome, Err(Rejection::Fold(FoldStage::Multiproof)));
 }
 
 #[test]
@@ -52,17 +52,14 @@ fn opened_column_off_part_layout_rejected() {
     short_trace.eval_proof.openings[0].leaves.pop();
 
     for forged in [long_h, short_trace] {
-        let (result, _) = verify_logged(&air, &instance, &config, &forged, LABEL);
+        let result = verify(&air, &instance, &config, &forged, LABEL);
 
-        assert!(
-            matches!(
-                result,
-                Err(Error::Protocol {
-                    protocol: "fold",
-                    message: "opened leaves do not match the tree's leaf width",
-                })
-            ),
-            "{result:?}"
+        assert_eq!(
+            result,
+            Err(Rejection::Malformed(Error::Protocol {
+                protocol: "fold",
+                message: "opened leaves do not match the tree's leaf width",
+            }))
         );
     }
 }
@@ -84,18 +81,9 @@ fn master_count_mismatch_rejected() {
     long_mask.eval_proof.mask_masters.push(F::ONE);
 
     for forged in [short, long, short_mask, long_mask] {
-        let (result, _) = verify_logged(&air, &instance, &config, &forged, LABEL);
+        let result = verify(&air, &instance, &config, &forged, LABEL);
 
-        assert!(
-            matches!(
-                result,
-                Err(Error::Protocol {
-                    protocol: "evaluator_verifier",
-                    message: "one master evaluation per committed polynomial is required",
-                })
-            ),
-            "{result:?}"
-        );
+        assert_eq!(result, Err(Rejection::PoolEval(PoolStage::Masters)));
     }
 }
 
@@ -107,11 +95,12 @@ fn master_or_fold_vector_tamper_rejected() {
         let mut forged = proof.clone();
         forged.eval_proof.masters[k] += F::ONE;
 
-        let (outcome, log) = verify_logged(&air, &instance, &config, &forged, LABEL);
+        let outcome = verify(&air, &instance, &config, &forged, LABEL);
 
-        assert!(
-            rejected_at(&outcome, &log, FOLD_FINAL),
-            "master {k}: {outcome:?}\n{log}"
+        assert_eq!(
+            outcome,
+            Err(Rejection::Fold(FoldStage::FinalClaim)),
+            "master {k}"
         );
     }
 
@@ -119,39 +108,28 @@ fn master_or_fold_vector_tamper_rejected() {
         let mut forged = proof.clone();
         forged.eval_proof.mask_masters[k] += F::ONE;
 
-        let (outcome, log) = verify_logged(&air, &instance, &config, &forged, LABEL);
+        let outcome = verify(&air, &instance, &config, &forged, LABEL);
 
-        assert!(
-            rejected_at(&outcome, &log, FOLD_FINAL),
-            "mask master {k}: {outcome:?}\n{log}"
+        assert_eq!(
+            outcome,
+            Err(Rejection::Fold(FoldStage::FinalClaim)),
+            "mask master {k}"
         );
     }
 
     let mut bumped = proof.clone();
     bumped.eval_proof.fold_rounds[0] += F::ONE;
 
-    let (outcome, log) = verify_logged(&air, &instance, &config, &bumped, LABEL);
+    let outcome = verify(&air, &instance, &config, &bumped, LABEL);
 
-    assert!(
-        rejected_at(&outcome, &log, FOLD_FINAL),
-        "{outcome:?}\n{log}"
-    );
+    assert_eq!(outcome, Err(Rejection::Fold(FoldStage::FinalClaim)));
 
     let mut truncated = proof;
     truncated.eval_proof.fold_rounds.pop();
 
-    let (result, _) = verify_logged(&air, &instance, &config, &truncated, LABEL);
+    let result = verify(&air, &instance, &config, &truncated, LABEL);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "fold",
-                message: "fold proof does not match its layout",
-            })
-        ),
-        "{result:?}"
-    );
+    assert_eq!(result, Err(Rejection::Fold(FoldStage::Layout)));
 }
 
 #[test]
@@ -173,9 +151,9 @@ fn unreached_layer_node_tamper_rejected() {
     unreached[0] ^= 1;
 
     for forged in [trace, h] {
-        let (outcome, log) = verify_logged(&air, &instance, &config, &forged, LABEL);
+        let outcome = verify(&air, &instance, &config, &forged, LABEL);
 
-        assert!(rejected_with(&outcome, MULTIPROOF), "{outcome:?}\n{log}");
+        assert_eq!(outcome, Err(Rejection::Fold(FoldStage::Multiproof)));
     }
 }
 
@@ -197,9 +175,9 @@ fn unreached_section_off_derived_count_rejected() {
     unreached.truncate(unreached.len() - NODE_BYTES);
 
     for forged in [extra, short] {
-        let (outcome, log) = verify_logged(&air, &instance, &config, &forged, LABEL);
+        let outcome = verify(&air, &instance, &config, &forged, LABEL);
 
-        assert!(rejected_with(&outcome, MULTIPROOF), "{outcome:?}\n{log}");
+        assert_eq!(outcome, Err(Rejection::Fold(FoldStage::Multiproof)));
     }
 }
 
@@ -211,10 +189,7 @@ fn eval_skip_round_rejected() {
 
     proof.eval_proof.sumcheck_proof.skip.push(F::ONE);
 
-    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+    let outcome = verify(&air, &instance, &config, &proof, LABEL);
 
-    assert!(
-        rejected_with(&outcome, "eval sumcheck sent a skip round"),
-        "{outcome:?}\n{log}"
-    );
+    assert_eq!(outcome, Err(Rejection::PoolEval(PoolStage::Degree)));
 }

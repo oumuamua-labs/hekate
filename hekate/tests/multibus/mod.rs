@@ -14,7 +14,7 @@ use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::permutation::{ChallengeLabel, PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::verdict::verify_logged;
+use hekate_testkit::verdict::verify;
 
 type F = Block256;
 
@@ -137,9 +137,9 @@ pub fn multibus_proof(
     let proof = prove(LABEL, &air, &instance, &witness, &config, [0xA5; 32], None)
         .expect("multibus baseline prove");
 
-    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, LABEL);
+    let outcome = verify(&air, &instance, &config, &proof, LABEL);
 
-    assert_eq!(outcome, Ok(true), "{log}");
+    assert_eq!(outcome, Ok(()));
 
     (air, instance, config, proof)
 }

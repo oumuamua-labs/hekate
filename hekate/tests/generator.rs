@@ -27,9 +27,9 @@ use hekate_program::{
     Air, CadenceSegment, FixedColumn, FixedShape, ProgramInstance, ProgramWitness, fix,
 };
 use hekate_prover_sys::prove;
-use hekate_testkit::site::{OUTER_LINEAR, ZEROCHECK};
-use hekate_testkit::verdict::{rejected_at, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{OuterStage, Rejection, Table, ZerocheckStage};
 
 type F = Block256;
 type H = DefaultHasher;
@@ -297,10 +297,9 @@ fn run_seed(seed: u64) {
     let pinned = program_id(&air).unwrap();
 
     let mut t = Transcript::<H>::new(DOMAIN);
-    let honest = HekateVerifier::<F, H>::verify(&pinned, &air, &instance, &proof, &mut t, &config)
-        .unwrap_or_else(|e| panic!("seed {seed}: honest verify errored: {e:?}"));
+    let honest = HekateVerifier::<F, H>::verify(&pinned, &air, &instance, &proof, &mut t, &config);
 
-    assert!(honest, "seed {seed}: honest proof rejected");
+    assert_eq!(honest, Ok(()), "seed {seed}: honest proof rejected");
 
     let delta = F::from(((rng.next() as u32) | 1) as u128);
     let forged = ProgramInstance::new(num_rows, vec![public_value + delta]);
@@ -308,17 +307,17 @@ fn run_seed(seed: u64) {
     let forged_proof = prove(DOMAIN, &air, &forged, &witness, &config, seed_bytes, None)
         .unwrap_or_else(|e| panic!("seed {seed}: forged prove failed: {e:?}"));
 
-    let (outcome, log) = verify_logged(&air, &forged, &config, &forged_proof, DOMAIN);
+    let outcome = verify(&air, &forged, &config, &forged_proof, DOMAIN);
 
-    let site = match s.zk {
-        true => OUTER_LINEAR,
-        false => ZEROCHECK,
+    let expected = match s.zk {
+        true => Rejection::Outer(OuterStage::Linear),
+        false => Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Sumcheck,
+        },
     };
 
-    assert!(
-        rejected_at(&outcome, &log, site),
-        "seed {seed}: got {outcome:?}\n{log}",
-    );
+    assert_eq!(outcome, Err(expected), "seed {seed}");
 
     let mut drifted = pinned;
     drifted[0] ^= 1;
@@ -328,7 +327,10 @@ fn run_seed(seed: u64) {
         HekateVerifier::<F, H>::verify(&drifted, &air, &instance, &proof, &mut t, &config);
 
     assert!(
-        matches!(outcome, Err(Error::ProgramIdMismatch { .. })),
+        matches!(
+            outcome,
+            Err(Rejection::Program(Error::ProgramIdMismatch { .. }))
+        ),
         "seed {seed}: drifted program id not rejected",
     );
 }

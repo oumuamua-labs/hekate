@@ -166,9 +166,9 @@ fn prove_slot_constant(zero_knowledge: bool) -> (CircuitProgram<F>, (Vec<F>, Vec
     let mut vt = Transcript::<H>::new(b"SlotConstant");
     let pinned_id = program_id(&air).unwrap();
 
-    assert!(
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-            .unwrap()
+    assert_eq!(
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config),
+        Ok(())
     );
 
     (air, proof.main_point_evaluation, secret_f)
