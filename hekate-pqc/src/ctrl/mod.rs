@@ -645,8 +645,9 @@ mod tests {
     use hekate_program::permutation::{BusKind, ServiceSlot};
     use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
     use hekate_prover_sys::prove;
-    use hekate_sdk::preflight::{PreflightReport, preflight};
+    use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
     use hekate_verifier::HekateVerifier;
+    use hekate_verifier::rejection::{OuterStage, Rejection, Table, ZerocheckStage};
     use sha3::{Digest, Sha3_256, Sha3_512};
 
     use crate::wiring::PolyLabels;
@@ -693,7 +694,7 @@ mod tests {
             preflight(&self.program, &self.instance, &self.witness).unwrap()
         }
 
-        fn accepted(&self, zero_knowledge: bool) -> bool {
+        fn verdict(&self, zero_knowledge: bool) -> Result<(), Rejection> {
             let config = Config {
                 zero_knowledge,
                 ..Config::prod()
@@ -720,7 +721,6 @@ mod tests {
                 &mut transcript,
                 &config,
             )
-            .unwrap_or(false)
         }
     }
 
@@ -948,8 +948,23 @@ mod tests {
                 .iter()
                 .all(|v| v.label == Some(label))
         );
-        assert!(!proof.accepted(false));
-        assert!(!proof.accepted(true));
+
+        let table = match report.constraint_violations[0].table {
+            TableId::Main => Table::Main,
+            TableId::Chiplet(index) => Table::Chiplet(index),
+        };
+
+        assert_eq!(
+            proof.verdict(false),
+            Err(Rejection::Zerocheck {
+                table,
+                stage: ZerocheckStage::Sumcheck,
+            })
+        );
+        assert_eq!(
+            proof.verdict(true),
+            Err(Rejection::Outer(OuterStage::Linear))
+        );
     }
 
     #[test]

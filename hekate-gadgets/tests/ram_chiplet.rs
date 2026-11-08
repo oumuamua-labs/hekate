@@ -164,7 +164,7 @@ fn ram_cpu_linking() {
         &config,
     );
 
-    assert!(result.unwrap(), "Verification failed");
+    assert_eq!(result, Ok(()));
 
     // 4. Check Bus Consistency
     // `verify()` above has already run
@@ -408,7 +408,7 @@ fn exploit_ram_uninitialised_read_via_q_last_chain() {
             (chiplet, RamColumns::Q_FIRST, 0),
             (chiplet, RamColumns::Q_STEP, last),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 

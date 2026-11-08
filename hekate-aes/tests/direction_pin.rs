@@ -26,6 +26,7 @@ use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_testkit::fault::{Check, Fault};
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::Rejection;
 
 const LABEL: &[u8] = b"AES_Direction_Pin";
 const AES_ROWS: usize = 32;
@@ -181,7 +182,7 @@ fn unpinned_host_is_rejected_at_verify() {
     assert!(
         matches!(
             &verdict,
-            Err(errors::Error::Protocol { message, .. })
+            Err(Rejection::Program(errors::Error::Protocol { message, .. }))
                 if message.starts_with("bus selector or clock phase reads a witness column")
         ),
         "{verdict:?}"

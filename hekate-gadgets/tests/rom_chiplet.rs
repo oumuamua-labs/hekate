@@ -201,7 +201,7 @@ fn rom_cpu_linking() {
         &config,
     );
 
-    assert!(result.unwrap(), "Verification failed");
+    assert_eq!(result, Ok(()));
 
     // 4. Bus Consistency
     // Both spec endpoints sit on the main trace
@@ -250,10 +250,10 @@ fn rom_gpa_large_trace() {
     let mut vt = Transcript::<H>::new(b"ROM_Large");
     let pinned_id = program_id(&air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-        .unwrap();
+    let outcome =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(ok, "Large trace verification failed");
+    assert_eq!(outcome, Ok(()), "Large trace verification failed");
 }
 
 /// Test: ROM Padding Transparency via HekateProver.

@@ -1187,7 +1187,8 @@ mod tests {
         );
 
         let parts = TableParts::<F>::of(&chiplet);
-        let shape = TableShape::from_air(&chiplet, &parts.statics()).unwrap();
+        let statics = parts.statics();
+        let shape = TableShape::from_air(&chiplet, &statics).unwrap();
 
         for zero_knowledge in [false, true] {
             let config = Config {
@@ -1197,7 +1198,7 @@ mod tests {
                 ..Config::dev()
             };
 
-            let plan = table_plan::<F>(&chiplet, &shape, &config).unwrap();
+            let plan = table_plan::<F>(&chiplet, &statics, &shape, &config).unwrap();
             let pool = FoldPool::new(&[(&plan, num_vars)], &config).unwrap();
             let plan = &pool.tables()[0].plan;
             let blocks = plan.unit_blocks();

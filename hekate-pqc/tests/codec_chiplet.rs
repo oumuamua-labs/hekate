@@ -464,7 +464,9 @@ fn assert_unsatisfiable_breaks_only(case: &DsaCase, enc: &DsaEncoding, label: &s
         &Config::prod(),
     );
 
-    fault.assert_sole(&preflight(&forged.program, &forged.instance, &forged.witness).unwrap());
+    let report = preflight(&forged.program, &forged.instance, &forged.witness).unwrap();
+
+    fault.assert_sole(&report);
 
     for zero_knowledge in [false, true] {
         let config = Config {
@@ -472,15 +474,16 @@ fn assert_unsatisfiable_breaks_only(case: &DsaCase, enc: &DsaEncoding, label: &s
             ..Config::prod()
         };
 
-        let (outcome, log) = verdict(
+        let outcome = verdict(
             &forged.program,
             (&forged.instance, &forged.witness),
             &config,
         );
 
-        assert!(
-            fault.rejects(&outcome, &log, zero_knowledge),
-            "zk {zero_knowledge}: {outcome:?}\n{log}"
+        assert_eq!(
+            outcome,
+            Err(fault.rejection(&forged.program, &report, zero_knowledge)),
+            "zk {zero_knowledge}"
         );
     }
 }

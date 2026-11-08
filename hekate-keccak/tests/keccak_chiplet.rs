@@ -206,7 +206,7 @@ fn exploit_round_state_tamper() {
 fn exploit_round_index_tamper() {
     let fault = Fault {
         pin_columns: &[(KECCAK, KeccakColumns::ROUND_BITS)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -350,7 +350,7 @@ fn exploit_s_in_out_deactivation() {
 fn exploit_ghost_state_injection() {
     let fault = Fault {
         pin_columns: &[(KECCAK, KeccakColumns::S_ROUND)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 

@@ -142,10 +142,10 @@ fn shim_prove_verifies_against_hekate_verifier() {
     let mut t = Transcript::<H>::new(label);
     let pinned_id = program_id(&air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut t, &config)
-        .expect("verify");
+    let outcome =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut t, &config);
 
-    assert!(ok, "verifier rejected shim-produced proof");
+    assert_eq!(outcome, Ok(()), "verifier rejected shim-produced proof");
 }
 
 #[test]
