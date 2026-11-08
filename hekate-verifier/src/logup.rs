@@ -183,14 +183,14 @@ mod tests {
             (BusGroup::Lookup("rom_link".to_string()), base + F::ONE),
         ];
 
-        assert!(check_bus_sum_matching(&columns).is_err());
+        assert_eq!(check_bus_sum_matching(&columns), Err(Rejection::BusSum));
     }
 
     #[test]
     fn bus_matching_rejects_unpaired_column() {
         let columns = vec![(BusGroup::Permutation, F::from(0x9999u128))];
 
-        assert!(check_bus_sum_matching(&columns).is_err());
+        assert_eq!(check_bus_sum_matching(&columns), Err(Rejection::BusSum));
     }
 
     #[test]
@@ -228,7 +228,7 @@ mod tests {
 
         check_bus_sum_matching(&balanced).unwrap();
 
-        assert!(check_bus_sum_matching(&crossed).is_err());
+        assert_eq!(check_bus_sum_matching(&crossed), Err(Rejection::BusSum));
     }
 
     #[test]
