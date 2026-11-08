@@ -121,6 +121,10 @@ pub struct ClaimBinding {
 pub struct Unit {
     pub field: ColumnType,
     pub claims: Vec<usize>,
+
+    /// Marks a unit that also ships
+    /// each claim at the next row.
+    pub next: bool,
 }
 
 enum UnitOp {
@@ -616,6 +620,9 @@ pub struct RingSwitchPlan {
 
     layout: Vec<ColumnType>,
     entries: Option<Vec<ExpansionEntry>>,
+    next_read: Vec<bool>,
+    next_slots: Vec<Option<usize>>,
+    num_next: usize,
     num_blind: usize,
     num_claims: usize,
     expands: bool,
@@ -631,8 +638,9 @@ impl RingSwitchPlan {
         entries: Option<&[ExpansionEntry]>,
         num_blind: usize,
         num_h: usize,
+        next_read: &[bool],
     ) -> Result<Self, Error> {
-        Self::build(layout, entries, num_blind, num_h, false)
+        Self::build(layout, entries, num_blind, num_h, next_read, false)
     }
 
     /// Packs aligned bit planes, and the columns read only
@@ -644,6 +652,7 @@ impl RingSwitchPlan {
             self.entries.as_deref(),
             self.num_blind,
             self.h_cols,
+            &self.next_read,
             true,
         )
     }
@@ -666,6 +675,17 @@ impl RingSwitchPlan {
 
     pub fn total_claims(&self) -> usize {
         self.num_claims
+    }
+
+    /// Counts the next-row claims the plan ships.
+    pub fn next_claims(&self) -> usize {
+        self.num_next
+    }
+
+    /// Gives each claim its index among the shipped
+    /// next-row claims, `None` where its unit ships none.
+    pub fn next_slots(&self) -> &[Option<usize>] {
+        &self.next_slots
     }
 
     /// Returns the polynomial and plan block that commit each unit, noise
@@ -711,6 +731,7 @@ impl RingSwitchPlan {
         entries: Option<&[ExpansionEntry]>,
         num_blind: usize,
         num_h: usize,
+        next_read: &[bool],
         pack: bool,
     ) -> Result<Self, Error> {
         let num_data = layout.len();
@@ -747,6 +768,13 @@ impl RingSwitchPlan {
                 UnitOp::Whole(p) if rings[p] > 0 || layout[p] == ColumnType::B128 => b.whole(p),
                 UnitOp::Whole(p) => b.member(p, layout[p], pack && reads[p] == 1),
             }
+        }
+
+        if next_read.len() != b.claim {
+            return Err(Error::Protocol {
+                protocol: "ring_switch_plan",
+                message: "next-row reads do not cover the virtual columns",
+            });
         }
 
         for k in 0..num_blind {
@@ -831,6 +859,40 @@ impl RingSwitchPlan {
             }
         }
 
+        let mut next: Vec<bool> = b
+            .units
+            .iter()
+            .zip(&b.homes)
+            .map(|(unit, home)| match *home {
+                Home::Column(p) if p < num_data => unit.claims.iter().any(|&c| next_read[c]),
+                _ => true,
+            })
+            .collect();
+
+        // A bound whole read binds its next-row claims through its planes
+        for binding in &bindings {
+            if next[binding.unit] {
+                next[binding.ring] = true;
+            }
+        }
+
+        let mut next_slots = vec![None; b.claim];
+        for (unit, next) in b.units.iter_mut().zip(next) {
+            unit.next = next;
+
+            if next {
+                for &c in &unit.claims {
+                    next_slots[c] = Some(0);
+                }
+            }
+        }
+
+        let mut num_next = 0;
+        for slot in next_slots.iter_mut().flatten() {
+            *slot = num_next;
+            num_next += 1;
+        }
+
         let places = b
             .units
             .iter()
@@ -861,6 +923,9 @@ impl RingSwitchPlan {
             h_blinds,
             layout: layout.to_vec(),
             entries: entries.map(<[ExpansionEntry]>::to_vec),
+            next_read: next_read.to_vec(),
+            next_slots,
+            num_next,
             num_blind,
             num_claims: b.claim,
             expands,
@@ -946,6 +1011,7 @@ impl UnitBuilder {
         self.units.push(Unit {
             field,
             claims: (self.claim..self.claim + claims).collect(),
+            next: true,
         });
 
         self.claim += claims;
@@ -1192,47 +1258,42 @@ pub fn ring_target<F: TowerField + HardwareField + From<u128>>(
     weights: &UnitWeights<F>,
     claims: &[Flat<F>],
     maps: &mut RingMaps<'_, F>,
-    shifted_claims: bool,
 ) -> Result<F, Error> {
     maps.tabulate(plan)?;
 
     let zero = Flat::from_raw(F::ZERO);
-    let one = Flat::from_raw(F::ONE);
 
     let half = plan.total_claims();
-
-    let base = [(0usize, one)];
-    let base_and_shift = [(0usize, one), (half, weights.shift)];
-
-    let offsets: &[(usize, Flat<F>)] = if shifted_claims {
-        &base_and_shift
-    } else {
-        &base
-    };
+    let slots = plan.next_slots();
 
     let mut target = zero;
-    for &(offset, shift_mul) in offsets {
-        for (unit, &unit_weight) in plan.units.iter().zip(&weights.units) {
-            let width = field_bits(unit.field);
-            let map = maps
-                .fields
-                .iter()
-                .find(|(field, _)| *field == unit.field)
-                .map(|(_, map)| map);
+    for (unit, &unit_weight) in plan.units.iter().zip(&weights.units) {
+        let width = field_bits(unit.field);
+        let map = maps
+            .fields
+            .iter()
+            .find(|(field, _)| *field == unit.field)
+            .map(|(_, map)| map);
 
-            let mut value = zero;
-            for (m, &c) in unit.claims.iter().enumerate() {
-                let claim = claims[offset + c];
-                let image = match map {
-                    Some(map) => map.apply(claim)?,
-                    None => claim,
-                };
+        let image = |claim: Flat<F>| match map {
+            Some(map) => map.apply(claim),
+            None => Ok(claim),
+        };
 
-                value += maps.basis[m * width] * image;
+        let mut value = zero;
+        let mut next = zero;
+
+        for (m, &c) in unit.claims.iter().enumerate() {
+            let basis = maps.basis[m * width];
+
+            value += basis * image(claims[c])?;
+
+            if let Some(slot) = slots[c] {
+                next += basis * image(claims[half + slot])?;
             }
-
-            target += unit_weight * shift_mul * value;
         }
+
+        target += unit_weight * (value + weights.shift * next);
     }
 
     Ok(target.to_tower())
@@ -1243,24 +1304,28 @@ pub fn ring_target<F: TowerField + HardwareField + From<u128>>(
 pub fn claim_weights<F: TowerField + HardwareField + From<u128>>(
     plan: &RingSwitchPlan,
     unit_weights: &UnitWeights<F>,
-    shifted_claims: bool,
-) -> Vec<(ColumnType, F)> {
-    let shifts: &[F] = if shifted_claims {
-        &[F::ONE, unit_weights.shift.to_tower()]
-    } else {
-        &[F::ONE]
-    };
+) -> Vec<(ColumnType, Flat<F>)> {
+    let basis: Vec<Flat<F>> = (0..BITS)
+        .map(|v| F::from(1u128 << v).to_hardware())
+        .collect();
 
     let half = plan.total_claims();
+    let slots = plan.next_slots();
 
-    let mut weights = vec![(ColumnType::B128, F::ZERO); half * shifts.len()];
-    for (s, &shift_mul) in shifts.iter().enumerate() {
-        for (unit, unit_weight) in plan.units.iter().zip(&unit_weights.units) {
-            let weight = unit_weight.to_tower() * shift_mul;
-            let width = field_bits(unit.field);
+    let zero = (ColumnType::B128, Flat::from_raw(F::ZERO));
 
-            for (m, &c) in unit.claims.iter().enumerate() {
-                weights[s * half + c] = (unit.field, weight * F::from(1u128 << (m * width)));
+    let mut weights = vec![zero; half + plan.next_claims()];
+    for (unit, &unit_weight) in plan.units.iter().zip(&unit_weights.units) {
+        let width = field_bits(unit.field);
+        let next_weight = unit_weight * unit_weights.shift;
+
+        for (m, &c) in unit.claims.iter().enumerate() {
+            let basis = basis[m * width];
+
+            weights[c] = (unit.field, unit_weight * basis);
+
+            if let Some(slot) = slots[c] {
+                weights[half + slot] = (unit.field, next_weight * basis);
             }
         }
     }
@@ -1430,37 +1495,32 @@ mod tests {
         weights: &UnitWeights<Block128>,
         claims: &[Flat<F>],
         r_mix: &[Block128],
-        shifted_claims: bool,
     ) -> Block128
     where
         F: HardwareField + Into<Block128>,
     {
         let half = plan.total_claims();
+        let slots = plan.next_slots();
 
-        let base = [(0usize, Block128::ONE)];
-        let base_and_shift = [(0usize, Block128::ONE), (half, weights.shift.to_tower())];
-
-        let offsets: &[(usize, Block128)] = if shifted_claims {
-            &base_and_shift
-        } else {
-            &base
-        };
+        let tower = |c: usize| -> Block128 { claims[c].to_tower().into() };
 
         let mut values: Vec<Block128> = Vec::with_capacity(BITS);
         let mut target = Block128::ZERO;
 
-        for &(offset, shift_mul) in offsets {
-            for (unit, unit_weight) in plan.units.iter().zip(&weights.units) {
-                values.clear();
-                values.extend(
-                    unit.claims
-                        .iter()
-                        .map(|&c| -> Block128 { claims[offset + c].to_tower().into() }),
-                );
+        for (unit, unit_weight) in plan.units.iter().zip(&weights.units) {
+            values.clear();
+            values.extend(unit.claims.iter().map(|&c| tower(c)));
 
-                target +=
-                    unit_weight.to_tower() * shift_mul * unit_batch(unit.field, &values, r_mix);
+            let mut batch = unit_batch(unit.field, &values, r_mix);
+
+            if unit.next {
+                values.clear();
+                values.extend(unit.claims.iter().map(|&c| tower(half + slots[c].unwrap())));
+
+                batch += weights.shift.to_tower() * unit_batch(unit.field, &values, r_mix);
             }
+
+            target += unit_weight.to_tower() * batch;
         }
 
         target
@@ -1523,23 +1583,26 @@ mod tests {
     fn ring_switch_plan_rejects_uncovered_columns() {
         let expander = keccak_expander();
         let entries = expander.expansion_entries();
+        let reads = vec![true; expander.num_virtual_columns()];
 
         let mut layout = keccak_physical_layout();
 
         assert_eq!(expander.num_physical_columns(), layout.len());
-        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0, 0).is_ok());
+        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0, 0, &reads).is_ok());
 
         layout.push(ColumnType::B64);
 
-        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0, 0).is_err());
+        assert!(RingSwitchPlan::new(&layout, Some(&entries), 0, 0, &reads).is_err());
     }
 
     #[test]
     fn ring_switch_plan_folds_every_committed_column() {
-        let entries = keccak_expander().expansion_entries();
+        let expander = keccak_expander();
+        let entries = expander.expansion_entries();
+        let reads = vec![true; expander.num_virtual_columns()];
         let layout = keccak_physical_layout();
 
-        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
+        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, 0, &reads).unwrap();
         let blocks = plan.unit_blocks();
 
         for p in 0..plan.phys_rs.len() {
@@ -1560,9 +1623,10 @@ mod tests {
             .unwrap();
 
         let entries = expander.expansion_entries();
+        let reads = vec![true; expander.num_virtual_columns()];
 
-        let bare = RingSwitchPlan::new(&layout, Some(&entries), 1, 0).unwrap();
-        let plan = RingSwitchPlan::new(&layout, Some(&entries), 1, 2).unwrap();
+        let bare = RingSwitchPlan::new(&layout, Some(&entries), 1, 0, &reads).unwrap();
+        let plan = RingSwitchPlan::new(&layout, Some(&entries), 1, 2, &reads).unwrap();
         let tail = plan.num_units - 3;
 
         assert_eq!((plan.h_cols, plan.h_blinds), (2, 1));
@@ -1599,12 +1663,15 @@ mod tests {
 
     #[test]
     fn blinded_ring_plan_ends_in_ring_blind_unit() {
-        let entries = keccak_expander().expansion_entries();
+        let expander = keccak_expander();
+        let entries = expander.expansion_entries();
+        let reads = vec![true; expander.num_virtual_columns()];
         let layout = keccak_physical_layout();
 
-        let raw = RingSwitchPlan::new(&layout, Some(&entries), 0, 0).unwrap();
-        let blinded = RingSwitchPlan::new(&layout, Some(&entries), 2, 0).unwrap();
-        let whole_only = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 2, 0).unwrap();
+        let raw = RingSwitchPlan::new(&layout, Some(&entries), 0, 0, &reads).unwrap();
+        let blinded = RingSwitchPlan::new(&layout, Some(&entries), 2, 0, &reads).unwrap();
+        let whole_only =
+            RingSwitchPlan::new(&[ColumnType::B32; 3], None, 2, 0, &[true; 3]).unwrap();
 
         assert_eq!(raw.blind_cols, 0);
         assert_eq!(raw.phys_rs.len(), layout.len());
@@ -1815,12 +1882,18 @@ mod tests {
             .unwrap();
 
         let entries = expander.expansion_entries();
+        let reads: Vec<bool> = (0..expander.num_virtual_columns())
+            .map(|c| c % 4 == 1)
+            .collect();
 
         let mut next = xorshift(0x9e37_79b9_7f4a_7c15_0123_4567_89ab_cdef);
         for num_h in [0, 2] {
-            let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, num_h).unwrap();
+            let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, num_h, &reads).unwrap();
 
-            let claims: Vec<Block128> = (0..2 * plan.total_claims()).map(|_| next()).collect();
+            let claims: Vec<Block128> = (0..plan.total_claims() + plan.next_claims())
+                .map(|_| next())
+                .collect();
+
             let weights = UnitWeights {
                 units: (0..plan.num_units).map(|_| next().to_hardware()).collect(),
                 shift: next().to_hardware(),
@@ -1828,15 +1901,12 @@ mod tests {
 
             let r_mix: Vec<Block128> = (0..7).map(|_| next()).collect();
             let flat: Vec<Flat<Block128>> = claims.iter().map(|c| c.to_hardware()).collect();
-            let target =
-                ring_target(&plan, &weights, &flat, &mut RingMaps::new(&r_mix), true).unwrap();
+            let target = ring_target(&plan, &weights, &flat, &mut RingMaps::new(&r_mix)).unwrap();
 
             let mut sum = Block128::ZERO;
-            for ((field, weight), claim) in claim_weights(&plan, &weights, true)
-                .into_iter()
-                .zip(&claims)
+            for ((field, weight), claim) in claim_weights(&plan, &weights).into_iter().zip(&claims)
             {
-                sum += weight * unit_batch(field, &[*claim], &r_mix);
+                sum += weight.to_tower() * unit_batch(field, &[*claim], &r_mix);
             }
 
             assert_eq!(sum, target, "{num_h} h columns");
@@ -1865,23 +1935,28 @@ mod tests {
             .unwrap();
 
         let entries = expander.expansion_entries();
+        let columns = expander.num_virtual_columns();
 
         let mut next = xorshift(0x2545_f491_4f6c_dd1d_9e37_79b9_7f4a_7c15);
 
         let cases = [
-            (0, 0, false),
-            (2, 1, true),
-            (1, 3, false),
-            (1, 3, true),
-            (2, 3, false),
+            (0, 0, None),
+            (2, 1, Some(1)),
+            (1, 3, None),
+            (1, 3, Some(5)),
+            (2, 3, Some(2)),
         ];
 
-        for (num_blind, num_h, shifted) in cases {
-            let plan = RingSwitchPlan::new(&layout, Some(&entries), num_blind, num_h).unwrap();
+        for (num_blind, num_h, stride) in cases {
+            let reads: Vec<bool> = (0..columns)
+                .map(|c| stride.is_some_and(|s| c % s == 0))
+                .collect();
+
+            let plan =
+                RingSwitchPlan::new(&layout, Some(&entries), num_blind, num_h, &reads).unwrap();
 
             for plan in [plan.pooled().unwrap(), plan] {
-                let halves = if shifted { 2 } else { 1 };
-                let claims: Vec<Flat<Block128>> = (0..halves * plan.total_claims())
+                let claims: Vec<Flat<Block128>> = (0..plan.total_claims() + plan.next_claims())
                     .map(|_| next().to_hardware())
                     .collect();
 
@@ -1893,15 +1968,8 @@ mod tests {
                 let r_mix: Vec<Block128> = (0..7).map(|_| next()).collect();
 
                 assert_eq!(
-                    ring_target(
-                        &plan,
-                        &weights,
-                        &claims,
-                        &mut RingMaps::new(&r_mix),
-                        shifted
-                    )
-                    .unwrap(),
-                    ring_target_transposed(&plan, &weights, &claims, &r_mix, shifted)
+                    ring_target(&plan, &weights, &claims, &mut RingMaps::new(&r_mix)).unwrap(),
+                    ring_target_transposed(&plan, &weights, &claims, &r_mix)
                 );
             }
         }
@@ -1924,7 +1992,7 @@ mod tests {
                 .collect()
         };
 
-        let plan = RingSwitchPlan::new(&layout, None, 1, 0).unwrap();
+        let plan = RingSwitchPlan::new(&layout, None, 1, 0, &[true; 5]).unwrap();
 
         assert_eq!(plan.trace_blocks(), 6);
         assert_eq!(
@@ -1958,8 +2026,11 @@ mod tests {
 
     #[test]
     fn pooled_keccak_pairs_lanes_and_packs_control_bits() {
-        let entries = keccak_expander().expansion_entries();
-        let plan = RingSwitchPlan::new(&keccak_physical_layout(), Some(&entries), 1, 0).unwrap();
+        let expander = keccak_expander();
+        let entries = expander.expansion_entries();
+        let reads = vec![true; expander.num_virtual_columns()];
+        let plan =
+            RingSwitchPlan::new(&keccak_physical_layout(), Some(&entries), 1, 0, &reads).unwrap();
 
         assert_eq!(plan.trace_blocks(), 30);
 
@@ -2035,7 +2106,7 @@ mod tests {
         ];
 
         for (declared, entries) in cases {
-            let plan = RingSwitchPlan::new(&[declared], Some(&entries), 0, 0);
+            let plan = RingSwitchPlan::new(&[declared], Some(&entries), 0, 0, &[]);
 
             assert!(
                 matches!(
@@ -2052,7 +2123,14 @@ mod tests {
 
     #[test]
     fn ring_maps_shared_across_plans_match_fresh() {
-        let whole = RingSwitchPlan::new(&[ColumnType::B64, ColumnType::B16], None, 0, 0).unwrap();
+        let whole = RingSwitchPlan::new(
+            &[ColumnType::B64, ColumnType::B16],
+            None,
+            0,
+            0,
+            &[true, false],
+        )
+        .unwrap();
 
         let expander = VirtualExpander::new()
             .expand_bits(1, ColumnType::B32)
@@ -2064,6 +2142,7 @@ mod tests {
             Some(&expander.expansion_entries()),
             0,
             0,
+            &[true; 32],
         )
         .unwrap();
 
@@ -2072,7 +2151,7 @@ mod tests {
 
         let mut shared = RingMaps::new(&r_mix);
         for plan in [&whole, &planes, &whole] {
-            let claims: Vec<Flat<Block128>> = (0..2 * plan.total_claims())
+            let claims: Vec<Flat<Block128>> = (0..plan.total_claims() + plan.next_claims())
                 .map(|_| next().to_hardware())
                 .collect();
 
@@ -2082,9 +2161,64 @@ mod tests {
             };
 
             assert_eq!(
-                ring_target(plan, &weights, &claims, &mut shared, true).unwrap(),
-                ring_target(plan, &weights, &claims, &mut RingMaps::new(&r_mix), true).unwrap()
+                ring_target(plan, &weights, &claims, &mut shared).unwrap(),
+                ring_target(plan, &weights, &claims, &mut RingMaps::new(&r_mix)).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn next_half_ships_only_for_units_read_at_next_row() {
+        let plan =
+            RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2, &[false, true, false]).unwrap();
+
+        let next: Vec<bool> = plan.units.iter().map(|u| u.next).collect();
+
+        assert_eq!(next, [false, true, false, true, true, true, true]);
+        assert_eq!(plan.next_claims(), 5);
+        assert_eq!(
+            plan.next_slots(),
+            [None, Some(0), None, Some(1), Some(2), Some(3), Some(4)]
+        );
+    }
+
+    #[test]
+    fn pooled_unit_ships_next_half_for_any_member_read() {
+        let plan =
+            RingSwitchPlan::new(&[ColumnType::B32; 3], None, 0, 0, &[false, true, false]).unwrap();
+        let pooled = plan.pooled().unwrap();
+
+        assert_eq!(plan.next_claims(), 1);
+        assert_eq!(pooled.next_claims(), 3);
+        assert_eq!(pooled.next_slots(), [Some(0), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn binding_ties_next_half_of_whole_read_to_planes() {
+        let expander = keccak_expander();
+        let entries = expander.expansion_entries();
+
+        let mut reads = vec![false; expander.num_virtual_columns()];
+        reads[1664] = true;
+
+        let plan =
+            RingSwitchPlan::new(&keccak_physical_layout(), Some(&entries), 0, 0, &reads).unwrap();
+        let pooled = plan.pooled().unwrap();
+        let slots = pooled.next_slots();
+
+        assert!(slots[1664].is_some());
+
+        for binding in pooled.binding_claims() {
+            if slots[binding.whole].is_some() {
+                assert!((0..binding.width).all(|m| slots[binding.first + m].is_some()));
+            }
+        }
+
+        assert!(slots[1666].is_none());
+    }
+
+    #[test]
+    fn next_reads_not_covering_virtual_columns_rejected() {
+        assert!(RingSwitchPlan::new(&[ColumnType::B32; 3], None, 0, 0, &[true; 2]).is_err());
     }
 }

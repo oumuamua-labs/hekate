@@ -27,6 +27,14 @@ pub struct UnitWeights<F> {
     pub shift: Flat<F>,
 }
 
+/// Groups units that take one row weight: their field, and
+/// whether they ship next-row claims, which adds `η^Σ·K_w`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnitClass {
+    pub field: ColumnType,
+    pub next: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Placement {
     poly: usize,
@@ -395,64 +403,74 @@ impl FoldPool {
     }
 
     /// Sums `weights` per block of polynomial `poly`, one vector
-    /// per unit field it holds; a block without units weighs zero.
+    /// per unit class it holds; a block without units weighs zero.
     pub fn block_weights<F: HardwareField>(
         &self,
         table: usize,
         poly: usize,
         weights: &UnitWeights<F>,
-    ) -> Vec<(ColumnType, Vec<Flat<F>>)> {
+    ) -> Vec<(UnitClass, Vec<Flat<F>>)> {
         let t = &self.tables[table];
         let zero = Flat::from_raw(F::ZERO);
         let blocks = 1 << self.block_vars(poly);
 
-        let mut fields: Vec<(ColumnType, Vec<Flat<F>>)> = Vec::new();
+        let mut classes: Vec<(UnitClass, Vec<Flat<F>>)> = Vec::new();
         for (u, unit) in t.plan.units.iter().enumerate() {
             let Some(p) = t.units[u].filter(|p| p.poly == poly) else {
                 continue;
             };
 
-            let k = match fields.iter().position(|(field, _)| *field == unit.field) {
+            let class = UnitClass {
+                field: unit.field,
+                next: unit.next,
+            };
+
+            let k = match classes.iter().position(|(c, _)| *c == class) {
                 Some(k) => k,
                 None => {
-                    fields.push((unit.field, vec![zero; blocks]));
-                    fields.len() - 1
+                    classes.push((class, vec![zero; blocks]));
+                    classes.len() - 1
                 }
             };
 
-            fields[k].1[p.block] += weights.units[u];
+            classes[k].1[p.block] += weights.units[u];
         }
 
-        fields
+        classes
     }
 
     /// Evaluates [`Self::block_weights`] of polynomial
-    /// `poly` at the block point `r_b`, field by field.
+    /// `poly` at the block point `r_b`, class by class.
     pub fn block_weights_at<F: HardwareField>(
         &self,
         table: usize,
         poly: usize,
         weights: &UnitWeights<F>,
         r_b: &[Flat<F>],
-    ) -> Vec<(ColumnType, Flat<F>)> {
+    ) -> Vec<(UnitClass, Flat<F>)> {
         let t = &self.tables[table];
         let eq = TensorProduct::new(r_b.to_vec());
 
-        let mut fields: Vec<(ColumnType, Flat<F>)> = Vec::new();
+        let mut classes: Vec<(UnitClass, Flat<F>)> = Vec::new();
         for (u, unit) in t.plan.units.iter().enumerate() {
             let Some(p) = t.units[u].filter(|p| p.poly == poly) else {
                 continue;
             };
 
+            let class = UnitClass {
+                field: unit.field,
+                next: unit.next,
+            };
+
             let weight = weights.units[u] * eq.evaluate_at_index(p.block);
 
-            match fields.iter_mut().find(|(field, _)| *field == unit.field) {
+            match classes.iter_mut().find(|(c, _)| *c == class) {
                 Some((_, sum)) => *sum += weight,
-                None => fields.push((unit.field, weight)),
+                None => classes.push((class, weight)),
             }
         }
 
-        fields
+        classes
     }
 }
 
@@ -701,64 +719,72 @@ mod tests {
         let num_vars = 4;
         let rows = 1 << num_vars;
 
-        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2).unwrap();
-        let pool = FoldPool::new(&[(&plan, num_vars)], &small(true)).unwrap();
-        let table = &pool.tables()[0];
+        for next_read in [[true; 3], [false; 3], [false, true, false]] {
+            let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2, &next_read).unwrap();
+            let pool = FoldPool::new(&[(&plan, num_vars)], &small(true)).unwrap();
+            let table = &pool.tables()[0];
 
-        let mut next = xorshift(0x94_0301);
-        let mut column = || -> Vec<Flat<F>> { (0..rows).map(|_| next()).collect() };
+            let mut next = xorshift(0x94_0301);
+            let mut column = || -> Vec<Flat<F>> { (0..rows).map(|_| next()).collect() };
 
-        let trace: Vec<Vec<Flat<F>>> = (0..plan.phys_rs.len()).map(|_| column()).collect();
-        let helper: Vec<Vec<Flat<F>>> =
-            (0..plan.h_cols + plan.h_blinds).map(|_| column()).collect();
+            let trace: Vec<Vec<Flat<F>>> = (0..plan.phys_rs.len()).map(|_| column()).collect();
+            let helper: Vec<Vec<Flat<F>>> =
+                (0..plan.h_cols + plan.h_blinds).map(|_| column()).collect();
 
-        let point: Vec<Flat<F>> = (0..num_vars).map(|_| next()).collect();
-        let eta = next();
-        let rho: Vec<Flat<F>> = (0..pool.rho_vars()).map(|_| next()).collect();
-        let weights = pool.unit_weights(0, eta, &rho).unwrap();
+            let point: Vec<Flat<F>> = (0..num_vars).map(|_| next()).collect();
+            let eta = next();
+            let rho: Vec<Flat<F>> = (0..pool.rho_vars()).map(|_| next()).collect();
+            let weights = pool.unit_weights(0, eta, &rho).unwrap();
 
-        let eq = TensorProduct::new(point);
+            let eq = TensorProduct::new(point);
 
-        let omega = |x: usize| {
-            eq.evaluate_at_index(x) + weights.shift * eq.evaluate_at_index((x + rows - 1) % rows)
-        };
-
-        let zero = Flat::from_raw(F::ZERO);
-
-        let claim = |f: &[Flat<F>]| (0..rows).fold(zero, |acc, x| acc + omega(x) * f[x]);
-
-        let placements = table.plan.unit_blocks();
-
-        let mut target = zero;
-        for (u, placement) in placements.into_iter().enumerate() {
-            let Some((kind, block)) = placement else {
-                continue;
+            let omega = |x: usize, shifted: bool| match shifted {
+                true => {
+                    eq.evaluate_at_index(x)
+                        + weights.shift * eq.evaluate_at_index((x + rows - 1) % rows)
+                }
+                false => eq.evaluate_at_index(x),
             };
 
-            let columns = match kind {
-                PolyKind::Trace => &trace,
-                PolyKind::Helper => &helper,
-                PolyKind::Mask => unreachable!("a plan places no unit in a mask"),
+            let zero = Flat::from_raw(F::ZERO);
+
+            let claim = |f: &[Flat<F>], shifted: bool| {
+                (0..rows).fold(zero, |acc, x| acc + omega(x, shifted) * f[x])
             };
 
-            target += weights.units[u] * claim(&columns[block]);
-        }
+            let placements = table.plan.unit_blocks();
 
-        let mut sum = zero;
-        for (poly, columns) in [(table.trace, &trace), (table.helper.unwrap(), &helper)] {
-            let noise = pool.noise_blocks(poly);
+            let mut target = zero;
+            for (u, placement) in placements.into_iter().enumerate() {
+                let Some((kind, block)) = placement else {
+                    continue;
+                };
 
-            for (_, field_weights) in pool.block_weights(0, poly, &weights) {
-                for (block, &w) in field_weights.iter().enumerate() {
-                    match block.checked_sub(noise).and_then(|p| columns.get(p)) {
-                        Some(f) => sum += w * claim(f),
-                        None => assert_eq!(w, zero, "block {block} holds no unit"),
+                let columns = match kind {
+                    PolyKind::Trace => &trace,
+                    PolyKind::Helper => &helper,
+                    PolyKind::Mask => unreachable!("a plan places no unit in a mask"),
+                };
+
+                target += weights.units[u] * claim(&columns[block], table.plan.units[u].next);
+            }
+
+            let mut sum = zero;
+            for (poly, columns) in [(table.trace, &trace), (table.helper.unwrap(), &helper)] {
+                let noise = pool.noise_blocks(poly);
+
+                for (class, class_weights) in pool.block_weights(0, poly, &weights) {
+                    for (block, &w) in class_weights.iter().enumerate() {
+                        match block.checked_sub(noise).and_then(|p| columns.get(p)) {
+                            Some(f) => sum += w * claim(f, class.next),
+                            None => assert_eq!(w, zero, "block {block} holds no unit"),
+                        }
                     }
                 }
             }
-        }
 
-        assert_eq!(sum, target);
+            assert_eq!(sum, target);
+        }
     }
 
     #[test]
@@ -774,6 +800,7 @@ mod tests {
             Some(&expander.expansion_entries()),
             0,
             0,
+            &[true; 3],
         )
         .unwrap();
 
@@ -793,8 +820,8 @@ mod tests {
 
     #[test]
     fn roles_run_over_polynomials_and_small_tables_pad() {
-        let wide = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2).unwrap();
-        let narrow = RingSwitchPlan::new(&[ColumnType::B32; 1], None, 1, 0).unwrap();
+        let wide = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2, &[true; 3]).unwrap();
+        let narrow = RingSwitchPlan::new(&[ColumnType::B32; 1], None, 1, 0, &[true; 1]).unwrap();
 
         let pool = FoldPool::new(&[(&wide, 6), (&narrow, 4)], &small(true)).unwrap();
         let [wide_table, narrow_table] = pool.tables() else {
@@ -822,11 +849,13 @@ mod tests {
             .build()
             .unwrap();
 
+        let next_read: Vec<bool> = (0..34).map(|c| c % 3 == 0).collect();
         let plan = RingSwitchPlan::new(
             &[ColumnType::B32; 3],
             Some(&expander.expansion_entries()),
             1,
             2,
+            &next_read,
         )
         .unwrap();
 
@@ -852,10 +881,10 @@ mod tests {
                     })
             };
 
-            let dense: Vec<(ColumnType, Flat<F>)> = pool
+            let dense: Vec<(UnitClass, Flat<F>)> = pool
                 .block_weights(0, poly, &weights)
                 .iter()
-                .map(|(field, w)| (*field, at_point(w)))
+                .map(|(class, w)| (*class, at_point(w)))
                 .collect();
 
             assert_eq!(pool.block_weights_at(0, poly, &weights, &r_b), dense);
@@ -871,7 +900,7 @@ mod tests {
             .next_power_of_two()
             .ilog2() as usize;
 
-        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2).unwrap();
+        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2, &[true; 3]).unwrap();
         let pool = FoldPool::new(&[(&plan, row_vars)], &config).unwrap();
         let table = &pool.tables()[0];
         let helper = table.helper.unwrap();
@@ -887,7 +916,7 @@ mod tests {
         let row_vars = 8;
         let config = Config::prod();
 
-        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2).unwrap();
+        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2, &[true; 3]).unwrap();
         let pool = FoldPool::new(&[(&plan, row_vars)], &config).unwrap();
         let table = &pool.tables()[0];
 
@@ -901,7 +930,7 @@ mod tests {
 
     #[test]
     fn table_past_word_rejected() {
-        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2).unwrap();
+        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2, &[true; 3]).unwrap();
         let num_vars = usize::BITS as usize - 1;
 
         assert!(matches!(
@@ -912,7 +941,7 @@ mod tests {
 
     #[test]
     fn arity_outside_cap_rejected_before_noise_layout() {
-        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2).unwrap();
+        let plan = RingSwitchPlan::new(&[ColumnType::B32; 3], None, 1, 2, &[true; 3]).unwrap();
 
         for fold_arity_log in [0, MAX_FOLD_ARITY_LOG + 1] {
             let pool = FoldPool::new(
@@ -932,7 +961,7 @@ mod tests {
 
     #[test]
     fn wide_table_splits_one_level_down() {
-        let plan = RingSwitchPlan::new(&[ColumnType::B128; 9], None, 1, 0).unwrap();
+        let plan = RingSwitchPlan::new(&[ColumnType::B128; 9], None, 1, 0, &[true; 9]).unwrap();
         let pool = FoldPool::new(&[(&plan, 4)], &small(true)).unwrap();
         let table = &pool.tables()[0];
 
@@ -947,7 +976,7 @@ mod tests {
 
     #[test]
     fn base_mode_split_takes_deeper_cut() {
-        let plan = RingSwitchPlan::new(&[ColumnType::B32; 9], None, 0, 0).unwrap();
+        let plan = RingSwitchPlan::new(&[ColumnType::B32; 9], None, 0, 0, &[true; 9]).unwrap();
         let pool = FoldPool::new(&[(&plan, 4)], &small(false)).unwrap();
         let table = &pool.tables()[0];
 
@@ -967,7 +996,8 @@ mod tests {
         let num_vars = 4;
         let rows = 1 << num_vars;
 
-        let plan = RingSwitchPlan::new(&[ColumnType::B128; 9], None, 1, 2).unwrap();
+        let next_read: Vec<bool> = (0..9).map(|c| c % 2 == 0).collect();
+        let plan = RingSwitchPlan::new(&[ColumnType::B128; 9], None, 1, 2, &next_read).unwrap();
         let pool = FoldPool::new(&[(&plan, num_vars)], &small(true)).unwrap();
         let table = &pool.tables()[0];
 
@@ -987,13 +1017,19 @@ mod tests {
 
         let eq = TensorProduct::new(point);
 
-        let omega = |x: usize| {
-            eq.evaluate_at_index(x) + weights.shift * eq.evaluate_at_index((x + rows - 1) % rows)
+        let omega = |x: usize, shifted: bool| match shifted {
+            true => {
+                eq.evaluate_at_index(x)
+                    + weights.shift * eq.evaluate_at_index((x + rows - 1) % rows)
+            }
+            false => eq.evaluate_at_index(x),
         };
 
         let zero = Flat::from_raw(F::ZERO);
 
-        let claim = |f: &[Flat<F>]| (0..rows).fold(zero, |acc, x| acc + omega(x) * f[x]);
+        let claim = |f: &[Flat<F>], shifted: bool| {
+            (0..rows).fold(zero, |acc, x| acc + omega(x, shifted) * f[x])
+        };
 
         let mut target = zero;
         for (u, placement) in table.plan.unit_blocks().into_iter().enumerate() {
@@ -1004,7 +1040,7 @@ mod tests {
                 Some((PolyKind::Mask, _)) => unreachable!("a plan places no unit in a mask"),
             };
 
-            target += weights.units[u] * claim(column);
+            target += weights.units[u] * claim(column, table.plan.units[u].next);
         }
 
         let mut sum = zero;
@@ -1020,10 +1056,10 @@ mod tests {
                 }
             };
 
-            for (_, field_weights) in pool.block_weights(0, poly, &weights) {
-                for (block, &w) in field_weights.iter().enumerate() {
+            for (class, class_weights) in pool.block_weights(0, poly, &weights) {
+                for (block, &w) in class_weights.iter().enumerate() {
                     match column_of(block) {
-                        Some(f) => sum += w * claim(f),
+                        Some(f) => sum += w * claim(f, class.next),
                         None => assert_eq!(w, zero, "poly {poly} block {block} holds no unit"),
                     }
                 }
@@ -1035,7 +1071,7 @@ mod tests {
 
     #[test]
     fn split_pool_units_draw_distinct_weights() {
-        let plan = RingSwitchPlan::new(&[ColumnType::B128; 9], None, 1, 2).unwrap();
+        let plan = RingSwitchPlan::new(&[ColumnType::B128; 9], None, 1, 2, &[true; 9]).unwrap();
         let pool = FoldPool::new(&[(&plan, 4)], &small(true)).unwrap();
         let table = &pool.tables()[0];
 

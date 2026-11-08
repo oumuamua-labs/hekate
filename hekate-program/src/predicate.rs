@@ -6,6 +6,7 @@ use crate::ProgramCell;
 use crate::constraint::{ConstraintAst, ConstraintExpr, ExprId};
 use alloc::vec;
 use alloc::vec::Vec;
+use hekate_core::errors;
 use hekate_math::{Flat, HardwareField, TowerField};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,20 +34,26 @@ impl Unknown {
     }
 }
 
-/// `half` is `V + K`.
+/// Places a table's AST cells among its eval claims:
+/// next-row claims start at `half`, in `next`'s slots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ClaimLayout {
+pub struct ClaimLayout<'a> {
     pub pad_first: u32,
     pub half: u32,
+    pub next: &'a [Option<usize>],
 }
 
-impl ClaimLayout {
-    pub fn index(&self, cell: ProgramCell) -> u32 {
-        let base = cell.col_idx as u32;
-
+impl ClaimLayout<'_> {
+    /// Gives a cell's claim index, `None` for a next-row
+    /// cell whose unit ships no next-row claim.
+    pub fn index(&self, cell: ProgramCell) -> Option<u32> {
         match cell.next_row {
-            true => base + self.half,
-            false => base,
+            true => {
+                let slot = self.next.get(cell.col_idx).copied().flatten()?;
+
+                Some(self.half + slot as u32)
+            }
+            false => Some(cell.col_idx as u32),
         }
     }
 }
@@ -146,7 +153,10 @@ pub fn wire_values<F: TowerField + HardwareField>(
     wires
 }
 
-pub fn compile<F: HardwareField>(ast: &ConstraintAst<F>, layout: ClaimLayout) -> PredicateRows<F> {
+pub fn compile<F: HardwareField>(
+    ast: &ConstraintAst<F>,
+    layout: ClaimLayout,
+) -> errors::Result<PredicateRows<F>> {
     let n = ast.arena.len();
     let live = crate::outer::reachable(ast);
     let one = Flat::from_raw(F::ONE);
@@ -163,7 +173,7 @@ pub fn compile<F: HardwareField>(ast: &ConstraintAst<F>, layout: ClaimLayout) ->
 
         let form = match ast.arena.get(ExprId(i as u32)) {
             ConstraintExpr::Cell(cell) => {
-                let idx = layout.index(*cell);
+                let idx = layout.index(*cell).ok_or(unshipped_next_cell())?;
 
                 Form {
                     unknowns: vec![(Unknown::Pad(layout.pad_first + idx), one)],
@@ -231,10 +241,17 @@ pub fn compile<F: HardwareField>(ast: &ConstraintAst<F>, layout: ClaimLayout) ->
         .map(|r| forms[r.0 as usize].clone())
         .collect();
 
-    PredicateRows {
+    Ok(PredicateRows {
         affine,
         mul_nodes,
         roots,
+    })
+}
+
+pub(crate) fn unshipped_next_cell() -> errors::Error {
+    errors::Error::Protocol {
+        protocol: "outer",
+        message: "AST reads a next-row cell its table ships no claim for",
     }
 }
 
@@ -246,9 +263,21 @@ mod tests {
 
     type F = Block128;
 
+    const SLOTS: [Option<usize>; 8] = [
+        Some(0),
+        Some(1),
+        Some(2),
+        Some(3),
+        Some(4),
+        Some(5),
+        Some(6),
+        Some(7),
+    ];
+
     const LAYOUT: ClaimLayout = ClaimLayout {
         pad_first: 100,
         half: 8,
+        next: &SLOTS,
     };
 
     const COLS: usize = 6;
@@ -256,6 +285,7 @@ mod tests {
     const HONEST: ClaimLayout = ClaimLayout {
         pad_first: 0,
         half: COLS as u32,
+        next: &SLOTS,
     };
 
     fn mix(seed: u128) -> F {
@@ -334,7 +364,7 @@ mod tests {
     #[test]
     fn honest_values_satisfy_every_affine_row() {
         let ast = rich_ast();
-        let rows = compile(&ast, HONEST);
+        let rows = compile(&ast, HONEST).unwrap();
 
         let plain: Vec<F> = (0..2 * COLS).map(|i| mix(i as u128 + 1)).collect();
         let pad: Vec<F> = (0..2 * COLS).map(|i| mix(i as u128 + 977)).collect();
@@ -368,7 +398,7 @@ mod tests {
     #[test]
     fn compiled_roots_reproduce_ast_evaluation() {
         let ast = rich_ast();
-        let rows = compile(&ast, HONEST);
+        let rows = compile(&ast, HONEST).unwrap();
 
         let plain: Vec<F> = (0..2 * COLS).map(|i| mix(i as u128 + 1)).collect();
         let pad: Vec<F> = (0..2 * COLS).map(|i| mix(i as u128 + 977)).collect();
@@ -402,7 +432,7 @@ mod tests {
     #[test]
     fn flipped_claim_breaks_roots_that_read_it() {
         let ast = rich_ast();
-        let rows = compile(&ast, HONEST);
+        let rows = compile(&ast, HONEST).unwrap();
 
         let plain: Vec<F> = (0..2 * COLS).map(|i| mix(i as u128 + 1)).collect();
         let pad: Vec<F> = (0..2 * COLS).map(|i| mix(i as u128 + 977)).collect();
@@ -447,7 +477,7 @@ mod tests {
     #[test]
     fn cell_binds_one_pad_entry_and_one_claim() {
         let ast = ast_of(|a| vec![a.cell(ProgramCell::current(3))]);
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.mul_nodes, 0);
         assert!(rows.affine.is_empty());
@@ -458,7 +488,7 @@ mod tests {
     #[test]
     fn next_row_cell_lands_in_second_half() {
         let ast = ast_of(|a| vec![a.cell(ProgramCell::next(3))]);
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.roots[0].claims, vec![(11, one())]);
         assert_eq!(rows.roots[0].unknowns, vec![(Unknown::Pad(111), one())]);
@@ -473,7 +503,7 @@ mod tests {
             vec![a.mul(x, y)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.mul_nodes, 1);
         assert_eq!(rows.affine.len(), 2);
@@ -498,7 +528,7 @@ mod tests {
             vec![a.mul(x, y)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
         let lhs = &rows.affine[0];
 
         assert_eq!(lhs.claims, vec![(0, one())]);
@@ -523,7 +553,7 @@ mod tests {
             vec![a.mul(inner, z)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.mul_nodes, 2);
         assert_eq!(rows.affine.len(), 4);
@@ -558,7 +588,7 @@ mod tests {
             vec![a.add(shared, x), a.add(shared, y)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.mul_nodes, 1);
         assert_eq!(rows.affine.len(), 2);
@@ -573,7 +603,7 @@ mod tests {
             vec![a.add(k, x)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.roots[0].constant, one());
         assert_eq!(rows.roots[0].claims, vec![(0, one())]);
@@ -591,7 +621,7 @@ mod tests {
             vec![a.scale(two, s)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.roots[0].claims, vec![(0, two.to_hardware())]);
         assert_eq!(rows.roots[0].constant, two.to_hardware());
@@ -605,7 +635,7 @@ mod tests {
             vec![a.sum(cells)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.roots[0].claims.len(), 4);
         assert_eq!(rows.roots[0].unknowns.len(), 4);
@@ -623,8 +653,37 @@ mod tests {
             vec![a.add(p, q)]
         });
 
-        let rows = compile(&ast, LAYOUT);
+        let rows = compile(&ast, LAYOUT).unwrap();
 
         assert_eq!(rows.mul_nodes as usize, crate::outer::mul_node_count(&ast));
+    }
+
+    #[test]
+    fn next_row_cell_lands_at_its_slot() {
+        let ast = ast_of(|a| vec![a.cell(ProgramCell::next(3))]);
+        let slots = [None, None, None, Some(0)];
+        let layout = ClaimLayout {
+            pad_first: 100,
+            half: 8,
+            next: &slots,
+        };
+
+        let rows = compile(&ast, layout).unwrap();
+
+        assert_eq!(rows.roots[0].claims, vec![(8, one())]);
+        assert_eq!(rows.roots[0].unknowns, vec![(Unknown::Pad(108), one())]);
+    }
+
+    #[test]
+    fn unshipped_next_row_cell_rejected() {
+        let ast = ast_of(|a| vec![a.cell(ProgramCell::next(2))]);
+        let slots = [None, None, None, Some(0)];
+        let layout = ClaimLayout {
+            pad_first: 0,
+            half: 8,
+            next: &slots,
+        };
+
+        assert!(compile(&ast, layout).is_err());
     }
 }

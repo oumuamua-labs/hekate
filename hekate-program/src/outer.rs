@@ -14,7 +14,9 @@ use crate::permutation::{
     BusColumn, BusFraction, BusGroup, PermutationCheckSpec, RankClock, bus_alpha_weights,
     bus_columns, bus_draw_events, h_planes, plane_basis,
 };
-use crate::predicate::{AffineRow, ClaimLayout, Form, Unknown, WireRole, compile};
+use crate::predicate::{
+    AffineRow, ClaimLayout, Form, Unknown, WireRole, compile, unshipped_next_cell,
+};
 use crate::{Air, FixedColumn, ProgramInstance, ShapeEvaluator};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -26,7 +28,7 @@ use hekate_core::errors;
 use hekate_core::outer::{OUTER_MASK_ROWS, OuterGeometry};
 use hekate_core::poly::univariate::{MAX_POINTS, UnivariatePoly};
 use hekate_core::skip::{SkipDomain, SkipLanes, SkipPlan, SkipPoint};
-use hekate_core::trace::ColumnType;
+use hekate_core::trace::{ColumnType, TraceCompatibleField};
 use hekate_math::{Block8, Block16, Flat, FlatPromote, HardwareField, TowerField};
 
 const SKIP_MIN_VARS: usize = 9;
@@ -148,6 +150,9 @@ pub struct TableShape {
     pub subfield_units: bool,
     pub whole_blinds: usize,
 
+    /// Claims of the units that ship a next-row half.
+    pub next_claims: usize,
+
     /// The lane field a skip may run the constraints in:
     /// GF(2^8) when the AST reads bit columns and
     /// byte constants only, GF(2^16) otherwise.
@@ -202,7 +207,14 @@ impl TableShape {
         }
 
         let entries = air.virtual_expander().map(|e| e.expansion_entries());
-        let plan = RingSwitchPlan::new(air.column_layout(), entries.as_deref(), 0, 0)?;
+
+        let plan = RingSwitchPlan::new(
+            air.column_layout(),
+            entries.as_deref(),
+            0,
+            0,
+            &next_row_reads(ast, air.num_columns())?,
+        )?;
 
         Ok(Self {
             num_vars: 0,
@@ -215,6 +227,7 @@ impl TableShape {
             expands_bits: plan.expands_bits(),
             subfield_units: plan.has_subfield_units(),
             whole_blinds: 0,
+            next_claims: 0,
             skip_lanes: match byte_lanes {
                 true => SkipLanes::Block8,
                 false => SkipLanes::Block16,
@@ -267,6 +280,7 @@ impl TableShape {
             expands_bits: table.plan.expands_bits(),
             subfield_units: table.plan.has_subfield_units(),
             whole_blinds: table.plan.whole_blinds(),
+            next_claims: table.plan.next_claims(),
             ..self
         }
     }
@@ -280,7 +294,7 @@ impl TableShape {
         }
     }
 
-    /// Eval claims per half: virtual columns, whole blind units,
+    /// Current-row eval claims: virtual columns, whole blind units,
     /// the ring blind unit's planes, every `h` plane, `h`'s blinds.
     pub fn eval_claims(&self) -> usize {
         let ring_blind = match self.expands_bits && self.whole_blinds > 0 {
@@ -296,7 +310,7 @@ impl TableShape {
     pub fn masked_scalars(&self) -> usize {
         let skip = self.skip();
         let zerocheck = skip.sent_scalars() + (self.num_vars - skip.vars) * self.sumcheck_degree;
-        let claims = 2 * self.eval_claims();
+        let claims = self.eval_claims() + self.next_claims;
 
         self.bus_columns + self.h_columns() + zerocheck + claims
     }
@@ -380,15 +394,17 @@ impl OuterStatement {
         let mut plans = Vec::with_capacity(chiplets.len() + 1);
 
         for def in chiplets {
-            let shape = TableShape::from_air(def, &def.statics())?;
+            let statics = def.statics();
+            let shape = TableShape::from_air(def, &statics)?;
 
-            plans.push(table_plan(def, &shape, config)?);
+            plans.push(table_plan(def, &statics, &shape, config)?);
             shapes.push(shape);
         }
 
-        let main_shape = TableShape::from_air(main, &main_parts.statics())?;
+        let main_statics = main_parts.statics();
+        let main_shape = TableShape::from_air(main, &main_statics)?;
 
-        plans.push(table_plan(main, &main_shape, config)?);
+        plans.push(table_plan(main, &main_statics, &main_shape, config)?);
         shapes.push(main_shape);
 
         let heights: Vec<(&RingSwitchPlan, usize)> = plans
@@ -524,8 +540,10 @@ pub struct TableRecord<'s, F> {
     /// `(group, pad, masked sum)` per `h` column.
     pub claimed_sums: Vec<(BusGroup, u32, Flat<F>)>,
 
+    /// Plane bindings of both halves, in claim indices.
     pub bindings: Vec<ClaimBinding>,
 
+    pub next_slots: Vec<Option<usize>>,
     pub shape: TableShape,
 }
 
@@ -535,7 +553,15 @@ impl<F: TowerField + HardwareField> TableRecord<'_, F> {
             + 1
             + self.shape.h_columns()
             + self.fixed.len()
-            + 2 * self.bindings.len()
+            + self.bindings.len()
+    }
+
+    fn claim_layout(&self) -> ClaimLayout<'_> {
+        ClaimLayout {
+            pad_first: self.consistency.pad_first,
+            half: self.shape.eval_claims() as u32,
+            next: &self.next_slots,
+        }
     }
 
     /// `f` on each row after the predicate rows, in statement order;
@@ -554,7 +580,7 @@ impl<F: TowerField + HardwareField> TableRecord<'_, F> {
             f(fixed_column_row(pad, claim, public));
         }
 
-        let half = (self.claims_masked.len() / 2) as u32;
+        let half = self.shape.eval_claims() as u32;
         let first_h = half - (self.shape.h_columns() + self.shape.h_blinds()) as u32;
         let planes = self.shape.h_planes;
 
@@ -572,14 +598,12 @@ impl<F: TowerField + HardwareField> TableRecord<'_, F> {
         }
 
         for binding in &self.bindings {
-            for offset in [0, half] {
-                f(plane_binding_row(
-                    pad_first,
-                    binding.whole as u32 + offset,
-                    binding.first as u32 + offset,
-                    binding.width,
-                ));
-            }
+            f(plane_binding_row(
+                pad_first,
+                binding.whole as u32,
+                binding.first as u32,
+                binding.width,
+            ));
         }
     }
 }
@@ -613,7 +637,6 @@ pub struct EvalInputs<'a, F> {
     pub eta: F,
     pub rho: &'a [F],
     pub r_mix: &'a [F],
-    pub shifted_claims: bool,
     pub challenges: &'a [Flat<F>],
     pub claim_masked: Flat<F>,
     pub fin: Flat<F>,
@@ -643,6 +666,7 @@ pub struct TableInputs<'a, 's, F: TowerField> {
     pub val_final_masked: Flat<F>,
     pub claims_masked: Vec<Flat<F>>,
     pub bindings: Vec<ClaimBinding>,
+    pub next_slots: Vec<Option<usize>>,
 
     pub pads: TablePads,
 }
@@ -731,11 +755,7 @@ impl<F: TowerField + HardwareField> Sweep<F> {
     ) -> errors::Result<()> {
         let ast = record.ast;
         let claims = &record.claims_masked;
-
-        let layout = ClaimLayout {
-            pad_first: record.consistency.pad_first,
-            half: (claims.len() / 2) as u32,
-        };
+        let layout = record.claim_layout();
 
         let n = ast.arena.len();
 
@@ -761,7 +781,7 @@ impl<F: TowerField + HardwareField> Sweep<F> {
 
             match ast.arena.get(ExprId(i as u32)) {
                 ConstraintExpr::Cell(cell) => {
-                    let idx = layout.index(*cell);
+                    let idx = layout.index(*cell).ok_or(unshipped_next_cell())?;
 
                     acc.add(Unknown::Pad(layout.pad_first + idx), adjoint);
 
@@ -833,12 +853,11 @@ impl<F: TowerField + HardwareField> Sweep<F> {
     }
 }
 
-pub fn eval_initial_form<F: TowerField + HardwareField + From<u128>>(
+pub fn eval_initial_form<F: TraceCompatibleField + From<u128>>(
     pool: &FoldPool,
     eta: F,
     rho: &[F],
     r_mix: &[F],
-    shifted_claims: bool,
     claim_pads: &[u32],
     first_wire: u32,
 ) -> errors::Result<InitialForm<F>> {
@@ -848,7 +867,7 @@ pub fn eval_initial_form<F: TowerField + HardwareField + From<u128>>(
     for (i, table) in pool.tables().iter().enumerate() {
         let unit_weights = pool.unit_weights(i, eta.to_hardware(), &rho)?;
 
-        weights.extend(claim_weights(&table.plan, &unit_weights, shifted_claims));
+        weights.extend(claim_weights(&table.plan, &unit_weights));
     }
 
     if weights.len() != claim_pads.len() {
@@ -862,9 +881,7 @@ pub fn eval_initial_form<F: TowerField + HardwareField + From<u128>>(
     let mut ring = Vec::new();
     let mut fields: Vec<ColumnType> = Vec::new();
 
-    for (&(field, weight), &pad) in weights.iter().zip(claim_pads) {
-        let a = weight.to_hardware();
-
+    for (&(field, a), &pad) in weights.iter().zip(claim_pads) {
         if field == ColumnType::B128 {
             form.push((Unknown::Pad(pad), a));
             continue;
@@ -890,7 +907,7 @@ pub fn eval_initial_form<F: TowerField + HardwareField + From<u128>>(
         .map(|&field| (field_coeffs(field, r_mix), field_bits(field)))
         .collect();
 
-    let gadget = RingGadget::new(ring, linearized_coeffs(&maps)?, first_wire);
+    let gadget = RingGadget::new(ring, linearized_coeffs(&maps)?, first_wire)?;
 
     form.extend(gadget.delta_form());
 
@@ -904,14 +921,13 @@ pub fn eval_initial_form<F: TowerField + HardwareField + From<u128>>(
 /// through the rounds, plus the ring gadget.
 pub fn eval_record<F>(inputs: &EvalInputs<'_, F>) -> errors::Result<EvalRecord<F>>
 where
-    F: TowerField + HardwareField + From<u128>,
+    F: TraceCompatibleField + From<u128>,
 {
     let initial = eval_initial_form(
         inputs.pool,
         inputs.eta,
         inputs.rho,
         inputs.r_mix,
-        inputs.shifted_claims,
         inputs.claim_pads,
         inputs.first_wire,
     )?;
@@ -944,14 +960,45 @@ where
 
     let skip = shape.skip();
     let point = SkipPoint::from_challenges(skip, inputs.r_final)?;
-    let half = shape.eval_claims() as u32;
+    let half = shape.eval_claims();
+    let next_slots = inputs.next_slots;
 
-    if inputs.claims_masked.len() != 2 * half as usize {
+    if inputs.claims_masked.len() != half + shape.next_claims || next_slots.len() != half {
         return Err(errors::Error::Protocol {
             protocol: "outer",
             message: "eval claim count does not match the table shape",
         });
     }
+
+    let next_index = |claim: usize| -> errors::Result<usize> {
+        let slot = next_slots[claim].ok_or(errors::Error::Protocol {
+            protocol: "outer",
+            message: "claim read at the next row ships no next-row claim",
+        })?;
+
+        Ok(half + slot)
+    };
+
+    let mut bindings = Vec::with_capacity(2 * inputs.bindings.len());
+    for binding in &inputs.bindings {
+        bindings.push(*binding);
+
+        if next_slots[binding.whole].is_some() {
+            bindings.push(ClaimBinding {
+                whole: next_index(binding.whole)?,
+                first: next_index(binding.first)?,
+                width: binding.width,
+            });
+        }
+    }
+
+    let telescope = (0..inputs.blinding_columns)
+        .map(|k| {
+            let b = trace_width + k;
+
+            Ok((b as u32, next_index(b)? as u32))
+        })
+        .collect::<errors::Result<Vec<_>>>()?;
 
     let mut shapes = ShapeEvaluator::new(&point);
     let mut fixed = Vec::new();
@@ -1071,13 +1118,7 @@ where
         alpha: inputs.alpha,
         planes: plane_basis::<F>()?,
         boundary,
-        telescope: (0..inputs.blinding_columns as u32)
-            .map(|k| {
-                let b = trace_width as u32 + k;
-
-                (b, half + b)
-            })
-            .collect(),
+        telescope,
         buses,
         val_final_form: sumcheck_mask_form(&initial, &rounds),
         val_final_masked: inputs.val_final_masked,
@@ -1089,7 +1130,8 @@ where
         consistency,
         fixed,
         claimed_sums,
-        bindings: inputs.bindings,
+        bindings,
+        next_slots,
         shape,
     })
 }
@@ -1136,12 +1178,7 @@ pub fn assemble<'r, F: TowerField + HardwareField>(
     for record in records {
         let first = affine.len();
 
-        let layout = ClaimLayout {
-            pad_first: record.consistency.pad_first,
-            half: (record.claims_masked.len() / 2) as u32,
-        };
-
-        let predicate = compile(record.ast, layout);
+        let predicate = compile(record.ast, record.claim_layout())?;
         let consistency = first + predicate.affine.len();
 
         affine.extend(predicate.affine);
@@ -1604,7 +1641,7 @@ pub fn linear_tensor_vars(rows: usize) -> usize {
 /// Weights and target of the linear test on
 /// the rows [`assemble`] builds, computed
 /// from the records without building them.
-pub fn linear_weights<F: TowerField + HardwareField>(
+pub fn linear_weights<F: TraceCompatibleField>(
     layout: &OuterLayout,
     statement: &OuterStatement,
     records: &[TableRecord<'_, F>],
@@ -1625,7 +1662,7 @@ pub fn linear_weights<F: TowerField + HardwareField>(
 
 /// Weights and target of the linear test on built rows:
 /// the reference [`linear_weights`] is tested against.
-pub fn linear_weights_of_rows<F: TowerField + HardwareField>(
+pub fn linear_weights_of_rows<F: TraceCompatibleField>(
     layout: &OuterLayout,
     rows: &OuterRows<'_, F>,
     tensor: &[F],
@@ -1651,9 +1688,11 @@ pub fn linear_weights_of_rows<F: TowerField + HardwareField>(
     )
 }
 
-/// Builds a table's ring-switch plan with the `h` planes of `shape`.
+/// Builds a table's ring-switch plan with the `h` planes of `shape`
+/// and a next-row half for each unit the AST reads at the next row.
 pub fn table_plan<F: TowerField>(
     air: &impl Air<F>,
+    statics: &TableStatics<'_, F>,
     shape: &TableShape,
     config: &Config,
 ) -> errors::Result<RingSwitchPlan> {
@@ -1664,6 +1703,7 @@ pub fn table_plan<F: TowerField>(
         entries.as_deref(),
         config.blind_units(),
         shape.h_columns(),
+        &next_row_reads(statics.ast, shape.num_columns)?,
     )
 }
 
@@ -1803,6 +1843,31 @@ fn in_byte_field<F: TowerField>(c: &F) -> bool {
     c.serialize(bytes).is_ok() && bytes[1..].iter().all(|&b| b == 0)
 }
 
+/// Marks each virtual column the AST reads at the next row;
+/// errs on a cell outside the `num_columns` virtual columns.
+fn next_row_reads<F: TowerField>(
+    ast: &ConstraintAst<F>,
+    num_columns: usize,
+) -> errors::Result<Vec<bool>> {
+    let mut reads = vec![false; num_columns];
+    for id in 0..ast.arena.len() as u32 {
+        let ConstraintExpr::Cell(cell) = ast.arena.get(ExprId(id)) else {
+            continue;
+        };
+
+        if cell.col_idx >= num_columns {
+            return Err(errors::Error::Protocol {
+                protocol: "air",
+                message: "AST cell outside the virtual columns",
+            });
+        }
+
+        reads[cell.col_idx] |= cell.next_row;
+    }
+
+    Ok(reads)
+}
+
 fn lagrange_weights<F: TowerField + HardwareField>(degree: usize, r: Flat<F>) -> Vec<Flat<F>> {
     (0..=degree)
         .map(|j| {
@@ -1814,7 +1879,7 @@ fn lagrange_weights<F: TowerField + HardwareField>(degree: usize, r: Flat<F>) ->
         .collect()
 }
 
-fn weigh_records<F: TowerField + HardwareField>(
+fn weigh_records<F: TraceCompatibleField>(
     layout: &OuterLayout,
     records: &[TableRecord<'_, F>],
     eval: &EvalRecord<F>,
@@ -1895,7 +1960,7 @@ fn weigh_table<F: TowerField + HardwareField>(
     Ok(())
 }
 
-fn weigh_rows<F: TowerField + HardwareField>(
+fn weigh_rows<F: TraceCompatibleField>(
     layout: &OuterLayout,
     rows: &OuterRows<'_, F>,
     scales: &[Flat<F>],
@@ -2118,7 +2183,15 @@ mod tests {
             expands_bits: false,
             subfield_units: false,
             whole_blinds: 0,
+            next_claims: 0,
             skip_lanes: SkipLanes::Block16,
+        }
+    }
+
+    fn every_half(shape: TableShape) -> TableShape {
+        TableShape {
+            next_claims: shape.eval_claims(),
+            ..shape
         }
     }
 
@@ -2181,7 +2254,7 @@ mod tests {
     }
 
     /// One table over [`bus_ast`]: `c0 · c1` as the only
-    /// constraint, two columns, one Permutation bus column
+    /// constraint, three columns, one Permutation bus column
     /// keying `c0` against a public constant, selector `c1`.
     fn bus_record(
         ast: &ConstraintAst<F>,
@@ -2189,6 +2262,7 @@ mod tests {
         h_masked: Flat<F>,
     ) -> TableRecord<'_, F> {
         let mul_nodes = mul_node_count(ast);
+        let half = claims_masked.len() / 2;
 
         let column = BusColumnRow {
             h_pads: vec![BUS_H_PAD],
@@ -2216,9 +2290,11 @@ mod tests {
             fixed: Vec::new(),
             claimed_sums: vec![(BusGroup::Permutation, 0, mix(7))],
             bindings: Vec::new(),
+            next_slots: (0..half).map(Some).collect(),
             shape: TableShape {
                 mul_nodes,
-                ..shape(1, 2, 3, 1)
+                next_claims: half,
+                ..shape(1, 3, 3, 1)
             },
         }
     }
@@ -2321,7 +2397,8 @@ mod tests {
     }
 
     fn pool_of(columns: usize, field: ColumnType) -> FoldPool {
-        let plan = RingSwitchPlan::new(&vec![field; columns], None, 0, 0).unwrap();
+        let plan =
+            RingSwitchPlan::new(&vec![field; columns], None, 0, 0, &vec![true; columns]).unwrap();
 
         FoldPool::new(&[(&plan, 4)], &raw_at(0)).unwrap()
     }
@@ -2406,6 +2483,7 @@ mod tests {
                 })
                 .collect(),
             bindings: Vec::new(),
+            next_slots: (0..half as usize).map(Some).collect(),
             shape: TableShape {
                 num_vars: 3,
                 num_columns: columns as usize,
@@ -2417,6 +2495,7 @@ mod tests {
                 expands_bits: false,
                 subfield_units: false,
                 whole_blinds: 0,
+                next_claims: half as usize,
                 skip_lanes: SkipLanes::Block16,
             },
         }
@@ -2441,7 +2520,7 @@ mod tests {
             })
             .collect();
 
-        let gadget = RingGadget::new(entries, mu, first_wire);
+        let gadget = RingGadget::new(entries, mu, first_wire).unwrap();
         mask_form.extend(gadget.delta_form());
 
         EvalRecord {
@@ -2553,7 +2632,7 @@ mod tests {
         assert_eq!(ring.masked_scalars(), plain.masked_scalars());
 
         for whole_blinds in [1, 4] {
-            let blinded = |s: TableShape| TableShape { whole_blinds, ..s };
+            let blinded = |s: TableShape| every_half(TableShape { whole_blinds, ..s });
 
             assert_eq!(
                 blinded(ring).masked_scalars() - blinded(plain).masked_scalars(),
@@ -2654,16 +2733,16 @@ mod tests {
 
     #[test]
     fn busless_table_pays_for_no_h_claims() {
-        let with_bus = TableShape {
+        let with_bus = every_half(TableShape {
             whole_blinds: 1,
             ..shape(12, 100, 3, 1)
-        };
+        });
 
-        let without = TableShape {
+        let without = every_half(TableShape {
             bus_columns: 0,
             bus_wires: 0,
             ..with_bus
-        };
+        });
 
         let claimed_sum_and_h_eval = 2;
 
@@ -2679,10 +2758,10 @@ mod tests {
     #[test]
     fn masked_scalars_match_transcript_tally() {
         for whole_blinds in [1, 8] {
-            let s = TableShape {
+            let s = every_half(TableShape {
                 whole_blinds,
                 ..shape(12, 1977, 5, 3)
-            };
+            });
 
             let claimed_sums_and_h_evals = 3 + 3;
             let skip_round = (5 << 6) - 1;
@@ -3409,5 +3488,28 @@ mod tests {
             with(12, 5, SkipLanes::Block16).skip(),
             plan(6, SkipLanes::Block16, 5)
         );
+    }
+
+    #[test]
+    fn next_claims_enter_masked_scalars_once() {
+        let current_only = shape(12, 100, 3, 1);
+        let shipped = TableShape {
+            next_claims: 7,
+            ..current_only
+        };
+
+        assert_eq!(shipped.masked_scalars() - current_only.masked_scalars(), 7);
+    }
+
+    #[test]
+    fn next_row_reads_mark_next_row_cells_only() {
+        let reads = next_row_reads(&rich_ast(), 4).unwrap();
+
+        assert_eq!(reads, [true, false, false, false]);
+    }
+
+    #[test]
+    fn ast_cell_outside_virtual_columns_rejected() {
+        assert!(next_row_reads(&rich_ast(), 2).is_err());
     }
 }
