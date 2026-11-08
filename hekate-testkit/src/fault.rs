@@ -4,16 +4,14 @@
 
 use std::collections::BTreeSet;
 
-use hekate_core::errors;
 use hekate_math::Block256;
+use hekate_program::Program;
 use hekate_sdk::preflight::{PreflightReport, TableId};
-
-use crate::site::{BUS_SUM, CHIPLET_ZEROCHECK, FIXED_COLUMN, OUTER_LINEAR, ZEROCHECK};
-use crate::verdict::{rejected_at, rejected_with};
+use hekate_verifier::rejection::{OuterStage, Rejection, Table, ZerocheckStage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
-    Zerocheck,
+    Sumcheck,
     FixedColumn,
 }
 
@@ -125,21 +123,25 @@ impl<'a> Fault<'a> {
         assert_eq!(buses, self.buses.iter().copied().collect(), "{report}");
     }
 
-    pub fn rejects(self, outcome: &errors::Result<bool>, log: &str, zero_knowledge: bool) -> bool {
+    pub fn rejection(
+        self,
+        air: &impl Program<Block256>,
+        report: &PreflightReport<Block256>,
+        zero_knowledge: bool,
+    ) -> Rejection {
         if zero_knowledge {
-            return rejected_at(outcome, log, OUTER_LINEAR);
+            return Rejection::Outer(OuterStage::Linear);
         }
 
         match self.first_failing_table() {
-            Some(TableId::Main) => rejected_at(outcome, log, self.site(TableId::Main)),
-            Some(TableId::Chiplet(index)) => {
-                let field = format!("chiplet_idx={index}");
-
-                rejected_with(outcome, CHIPLET_ZEROCHECK)
-                    && log.split_whitespace().any(|token| token == field)
-                    && log.contains(self.site(TableId::Chiplet(index)))
-            }
-            None => rejected_with(outcome, BUS_SUM),
+            Some(table) => Rejection::Zerocheck {
+                table: match table {
+                    TableId::Main => Table::Main,
+                    TableId::Chiplet(index) => Table::Chiplet(index),
+                },
+                stage: self.stage(air, report, table),
+            },
+            None => Rejection::BusSum,
         }
     }
 
@@ -183,18 +185,48 @@ impl<'a> Fault<'a> {
             .or(tables.first().copied())
     }
 
-    fn site(self, table: TableId) -> &'static str {
+    fn stage(
+        self,
+        air: &impl Program<Block256>,
+        report: &PreflightReport<Block256>,
+        table: TableId,
+    ) -> ZerocheckStage {
         let pinned = self.pinned_tables().contains(&table);
 
         let check = match (self.first_check, pinned) {
             (Some(check), _) => check,
-            (None, false) => Check::Zerocheck,
+            (None, false) => Check::Sumcheck,
             (None, true) => panic!("fault on pinned table {table} names its first check"),
         };
 
         match check {
-            Check::Zerocheck => ZEROCHECK,
-            Check::FixedColumn => FIXED_COLUMN,
+            Check::Sumcheck => ZerocheckStage::Sumcheck,
+            Check::FixedColumn => {
+                ZerocheckStage::FixedColumn(first_violated_pin(air, report, table))
+            }
         }
     }
+}
+
+fn first_violated_pin(
+    air: &impl Program<Block256>,
+    report: &PreflightReport<Block256>,
+    table: TableId,
+) -> usize {
+    let violated: BTreeSet<usize> = report
+        .fixed_column_violations
+        .iter()
+        .filter(|v| v.table == table)
+        .map(|v| v.col_idx)
+        .collect();
+
+    let pins = match table {
+        TableId::Main => air.fixed_columns(),
+        TableId::Chiplet(index) => air.chiplet_defs().unwrap()[index].pins().to_vec(),
+    };
+
+    pins.iter()
+        .map(|pin| pin.col_idx)
+        .find(|col| violated.contains(col))
+        .unwrap_or_else(|| panic!("no pin of table {table} is violated"))
 }

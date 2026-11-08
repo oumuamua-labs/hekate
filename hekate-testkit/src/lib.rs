@@ -4,6 +4,4 @@
 
 pub mod cell;
 pub mod fault;
-pub mod log;
-pub mod site;
 pub mod verdict;

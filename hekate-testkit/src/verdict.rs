@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::config::Config;
-use hekate_core::errors;
 use hekate_core::proofs::InnerProof;
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
@@ -13,9 +12,9 @@ use hekate_program::{Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_sdk::preflight;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::Rejection;
 
 use crate::fault::Fault;
-use crate::log::logged;
 
 const LABEL: &[u8] = b"hekate-testkit";
 const SEED: [u8; 32] = [0x5A; 32];
@@ -33,8 +32,8 @@ pub fn assert_verifies(
     assert!(report.is_clean(), "{report}");
 
     for zero_knowledge in [false, true] {
-        let (outcome, log) = verdict(air, statement, &with_mode(base, zero_knowledge));
-        assert_eq!(outcome, Ok(true), "zk {zero_knowledge}\n{log}");
+        let outcome = verdict(air, statement, &with_mode(base, zero_knowledge));
+        assert_eq!(outcome, Ok(()), "zk {zero_knowledge}");
     }
 }
 
@@ -46,20 +45,20 @@ pub fn assert_rejected(
     base: &Config,
 ) {
     let (instance, witness) = forged;
+    let report = preflight(air, instance, witness).unwrap();
 
-    fault.assert_sole(&preflight(air, instance, witness).unwrap());
+    fault.assert_sole(&report);
 
     for zero_knowledge in [false, true] {
         let config = with_mode(base, zero_knowledge);
 
-        let (outcome, log) = verdict(air, honest, &config);
-        assert_eq!(outcome, Ok(true), "zk {zero_knowledge}\n{log}");
+        let outcome = verdict(air, honest, &config);
+        assert_eq!(outcome, Ok(()), "zk {zero_knowledge}");
 
-        let (outcome, log) = verdict(air, forged, &config);
-        assert!(
-            fault.rejects(&outcome, &log, zero_knowledge),
-            "zk {zero_knowledge}: {outcome:?}\n{log}"
-        );
+        let outcome = verdict(air, forged, &config);
+        let expected = fault.rejection(air, &report, zero_knowledge);
+
+        assert_eq!(outcome, Err(expected), "zk {zero_knowledge}");
     }
 }
 
@@ -67,41 +66,31 @@ pub fn verdict(
     air: &(impl Program<Block256> + Sync),
     (instance, witness): Statement<'_>,
     config: &Config,
-) -> (errors::Result<bool>, String) {
+) -> Result<(), Rejection> {
     let proof = prove(LABEL, air, instance, witness, config, SEED, None)
         .expect("the prover does not refuse");
 
-    verify_logged(air, instance, config, &proof, LABEL)
+    verify(air, instance, config, &proof, LABEL)
 }
 
-pub fn verify_logged(
+pub fn verify(
     air: &(impl Program<Block256> + Sync),
     instance: &ProgramInstance<Block256>,
     config: &Config,
     proof: &InnerProof<Block256>,
     label: &'static [u8],
-) -> (errors::Result<bool>, String) {
+) -> Result<(), Rejection> {
     let mut transcript = Transcript::<DefaultHasher>::new(label);
     let pinned_id = program_id(air).unwrap();
 
-    logged(|| {
-        HekateVerifier::<Block256, DefaultHasher>::verify(
-            &pinned_id,
-            air,
-            instance,
-            proof,
-            &mut transcript,
-            config,
-        )
-    })
-}
-
-pub fn rejected_at(outcome: &errors::Result<bool>, log: &str, site: &str) -> bool {
-    matches!(outcome, Ok(false)) && log.contains(site)
-}
-
-pub fn rejected_with(outcome: &errors::Result<bool>, expected: &str) -> bool {
-    matches!(outcome, Err(errors::Error::Protocol { message, .. }) if *message == expected)
+    HekateVerifier::<Block256, DefaultHasher>::verify(
+        &pinned_id,
+        air,
+        instance,
+        proof,
+        &mut transcript,
+        config,
+    )
 }
 
 fn with_mode(base: &Config, zero_knowledge: bool) -> Config {
