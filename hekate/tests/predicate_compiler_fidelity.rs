@@ -8,6 +8,7 @@ use hekate_math::{Block256, Flat, HardwareField, TowerField};
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::Air;
+use hekate_program::constraint::{ConstraintExpr, ExprId};
 use hekate_program::predicate::{ClaimLayout, compile, wire_values};
 
 const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
@@ -35,15 +36,42 @@ fn check<A: Air<F>>(name: &str, air: &A) {
 
     let wires = wire_values(&ast, &node_values);
 
+    let mut reads = vec![false; width];
+    for id in 0..ast.arena.len() as u32 {
+        if let ConstraintExpr::Cell(cell) = ast.arena.get(ExprId(id)) {
+            reads[cell.col_idx] |= cell.next_row;
+        }
+    }
+
+    let mut shipped = 0;
+    let next_slots: Vec<Option<usize>> = reads
+        .iter()
+        .map(|&read| {
+            read.then(|| {
+                shipped += 1;
+
+                shipped - 1
+            })
+        })
+        .collect();
+
     let layout = ClaimLayout {
         pad_first: 0,
         half: width as u32,
+        next: &next_slots,
     };
-    let rows = compile(&ast, layout);
+
+    let rows = compile(&ast, layout).unwrap();
 
     assert_eq!(wires.len(), rows.mul_nodes as usize, "{name}: wire count");
 
-    let claims: Vec<Flat<F>> = current.iter().chain(next.iter()).copied().collect();
+    let shifted = next_slots
+        .iter()
+        .zip(&next)
+        .filter(|(slot, _)| slot.is_some())
+        .map(|(_, &value)| value);
+
+    let claims: Vec<Flat<F>> = current.iter().copied().chain(shifted).collect();
     let pad = vec![Flat::from_raw(F::ZERO); claims.len()];
 
     let expected = ast.evaluate(&current, &next);

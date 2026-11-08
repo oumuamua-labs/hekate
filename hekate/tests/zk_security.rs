@@ -20,9 +20,9 @@ use hekate_program::outer::{TableParts, TableShape, table_plan};
 use hekate_program::permutation::{PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::site::{CONSTRAINTS, EVAL_SUMCHECK, MULTIPROOF, ZEROCHECK};
-use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{FoldStage, PoolStage, Rejection, Table, ZerocheckStage};
 use rand::{TryRngCore, rngs::OsRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,8 +89,9 @@ fn generate_fib_trace(num_vars: usize) -> ColumnTrace {
 
 fn fold_pool(air: &CircuitProgram<F>, num_vars: usize, config: &Config) -> FoldPool {
     let parts = TableParts::of(air);
-    let shape = TableShape::from_air(air, &parts.statics()).unwrap();
-    let plan = table_plan(air, &shape, config).unwrap();
+    let statics = parts.statics();
+    let shape = TableShape::from_air(air, &statics).unwrap();
+    let plan = table_plan(air, &statics, &shape, config).unwrap();
 
     FoldPool::new(&[(&plan, num_vars)], config).unwrap()
 }
@@ -269,30 +270,28 @@ fn seed_nondeterminism() {
     assert_ne!(leaves_a, leaves_b, "Opened leaves must differ");
 
     let mut vt_a = Transcript::<H>::new(b"ZK_Seed");
-    let ok_a = HekateVerifier::<F, H>::verify(
+    let outcome_a = HekateVerifier::<F, H>::verify(
         &program_id(&air).unwrap(),
         &air,
         &instance,
         &proof_a,
         &mut vt_a,
         &config_a,
-    )
-    .unwrap();
+    );
 
-    assert!(ok_a, "Proof A must verify");
+    assert_eq!(outcome_a, Ok(()), "Proof A must verify");
 
     let mut vt_b = Transcript::<H>::new(b"ZK_Seed");
-    let ok_b = HekateVerifier::<F, H>::verify(
+    let outcome_b = HekateVerifier::<F, H>::verify(
         &program_id(&air).unwrap(),
         &air,
         &instance,
         &proof_b,
         &mut vt_b,
         &config_b,
-    )
-    .unwrap();
+    );
 
-    assert!(ok_b, "Proof B must verify");
+    assert_eq!(outcome_b, Ok(()), "Proof B must verify");
 }
 
 #[test]
@@ -334,8 +333,8 @@ fn noise_integrity_check() {
     )
     .unwrap();
 
-    let (honest, _) = verify_logged(&air, &instance, &config, &proof, b"ZK_Integrity");
-    assert!(matches!(honest, Ok(true)), "got {honest:?}");
+    let honest = verify(&air, &instance, &config, &proof, b"ZK_Integrity");
+    assert_eq!(honest, Ok(()));
 
     let leaf_bytes = fold_pool(&air, num_vars, &config).layout().trees()[0].leaf_bytes;
 
@@ -346,9 +345,9 @@ fn noise_integrity_check() {
         *b = 0;
     }
 
-    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ZK_Integrity");
+    let outcome = verify(&air, &instance, &config, &proof, b"ZK_Integrity");
 
-    assert!(rejected_with(&outcome, MULTIPROOF), "got {outcome:?}");
+    assert_eq!(outcome, Err(Rejection::Fold(FoldStage::Multiproof)));
 }
 
 /// Malicious AIR that bypasses degree checks
@@ -462,12 +461,15 @@ fn trust_me_bro_knowledge() {
     // Switch to Verifier mode
     air.is_prover.store(false, Ordering::SeqCst);
 
-    let (outcome, log) = verify_logged(&air, &instance, &config_zk, &proof_zk, b"Exploit");
+    let outcome = verify(&air, &instance, &config_zk, &proof_zk, b"Exploit");
 
     // The verifier must reject the proof
-    assert!(
-        rejected_at(&outcome, &log, ZEROCHECK),
-        "got {outcome:?}\n{log}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 
     // ==========================================
@@ -495,11 +497,14 @@ fn trust_me_bro_knowledge() {
 
     air.is_prover.store(false, Ordering::SeqCst);
 
-    let (outcome, log) = verify_logged(&air, &instance, &config_no_zk, &proof_no_zk, b"Exploit2");
+    let outcome = verify(&air, &instance, &config_no_zk, &proof_no_zk, b"Exploit2");
 
-    assert!(
-        rejected_at(&outcome, &log, CONSTRAINTS),
-        "got {outcome:?}\n{log}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Constraints,
+        })
     );
 }
 
@@ -593,7 +598,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
     // Verifier successfully reconstructs P(0) from 0
     // and validates the proof.
     let mut vt1 = Transcript::<H>::new(b"ZK_Hiding");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -601,13 +606,13 @@ fn algebraic_and_evaluation_perfect_hiding() {
             &p_no_zk,
             &mut vt1,
             &config_no_zk,
-        )
-        .unwrap(),
+        ),
+        Ok(()),
         "No-ZK proof failed to verify"
     );
 
     let mut vt2 = Transcript::<H>::new(b"ZK_Hiding");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -615,13 +620,13 @@ fn algebraic_and_evaluation_perfect_hiding() {
             &p_zk_a,
             &mut vt2,
             &config_zk,
-        )
-        .unwrap(),
+        ),
+        Ok(()),
         "ZK proof A failed to verify"
     );
 
     let mut vt3 = Transcript::<H>::new(b"ZK_Hiding");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -629,8 +634,8 @@ fn algebraic_and_evaluation_perfect_hiding() {
             &p_zk_b,
             &mut vt3,
             &config_zk,
-        )
-        .unwrap(),
+        ),
+        Ok(()),
         "ZK proof B failed to verify"
     );
 
@@ -702,9 +707,9 @@ fn algebraic_and_evaluation_perfect_hiding() {
     );
 }
 
-/// Per column: `(claim, MLE(r_final))` for the
-/// base and next-row halves of the trace opening.
-fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<[(F, F); 2]> {
+/// Per column: `(claim, MLE(r_final))` for the base claim
+/// and, where the column ships one, the next-row claim.
+fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<((F, F), Option<(F, F)>)> {
     let num_vars = 6;
     let num_rows = 1 << num_vars;
     let trace = generate_fib_trace(num_vars);
@@ -728,7 +733,7 @@ fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<[(F, F); 2]> {
     let proof = prove(b"ZK_Hiding", &air, &instance, &witness, &config, seed, None).unwrap();
 
     let mut vt = Transcript::<H>::new(b"ZK_Hiding");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -736,16 +741,20 @@ fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<[(F, F); 2]> {
             &proof,
             &mut vt,
             &config,
-        )
-        .unwrap()
+        ),
+        Ok(())
     );
 
     let (r_final, claims) = &proof.main_point_evaluation;
     let num_cols = air.num_columns();
-    let k = config.blind_units();
+
+    let pool = fold_pool(&air, num_vars, &config);
+    let plan = &pool.tables()[0].plan;
+    let half = plan.total_claims();
+    let slots = plan.next_slots();
 
     assert_eq!(r_final.len(), num_vars);
-    assert_eq!(claims.len(), 2 * (num_cols + k));
+    assert_eq!(claims.len(), half + plan.next_claims());
 
     let r_hw: Vec<Flat<F>> = r_final.iter().map(|x| x.to_hardware()).collect();
     let weights = PolyVariant::<F>::expand_mle_weights(&r_hw);
@@ -754,27 +763,35 @@ fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<[(F, F); 2]> {
         .map(|col| {
             let (base, next) = column_mle_pair(&trace, col, &weights);
 
-            [
+            (
                 (claims[col], base.to_tower()),
-                (claims[num_cols + k + col], next.to_tower()),
-            ]
+                slots[col].map(|slot| (claims[half + slot], next.to_tower())),
+            )
         })
         .collect()
 }
 
 #[test]
 fn point_evaluation_claims_are_not_witness_functionals() {
-    for (col, [base, next]) in point_evaluation_claims_vs_mle(false)
-        .into_iter()
-        .enumerate()
-    {
-        assert_eq!(base.0, base.1, "raw base claim of column {col}");
-        assert_eq!(next.0, next.1, "raw next-row claim of column {col}");
-    }
+    for zero_knowledge in [false, true] {
+        let pairs = point_evaluation_claims_vs_mle(zero_knowledge);
+        let shipped: Vec<bool> = pairs.iter().map(|(_, next)| next.is_some()).collect();
 
-    for (col, [base, next]) in point_evaluation_claims_vs_mle(true).into_iter().enumerate() {
-        assert_ne!(base.0, base.1, "base claim of column {col}");
-        assert_ne!(next.0, next.1, "next-row claim of column {col}");
+        assert_eq!(
+            shipped,
+            [true, true, false],
+            "zero_knowledge {zero_knowledge}"
+        );
+
+        for (col, (base, next)) in pairs.into_iter().enumerate() {
+            let pairs = [Some(base), next];
+            for (claim, mle) in pairs.into_iter().flatten() {
+                match zero_knowledge {
+                    false => assert_eq!(claim, mle, "raw claim of column {col}"),
+                    true => assert_ne!(claim, mle, "masked claim of column {col}"),
+                }
+            }
+        }
     }
 }
 
@@ -927,10 +944,10 @@ fn opened_symbol_top_byte_tamper_rejected() {
     };
 
     // 2. Verify the corrupted proof
-    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ZK_Truncation");
+    let outcome = verify(&air, &instance, &config, &proof, b"ZK_Truncation");
 
     // 3. Guarantee rejection
-    assert!(rejected_with(&outcome, MULTIPROOF), "got {outcome:?}");
+    assert_eq!(outcome, Err(Rejection::Fold(FoldStage::Multiproof)));
 }
 
 #[test]
@@ -981,21 +998,21 @@ fn noise_shift_sign_forgery() {
     // Swap the base noise value and the next-row
     // noise value. This "disconnects" the algebraic
     // claim from the physical Merkle tree data.
-    let expected_trace_len = proof.main_point_evaluation.1.len() / 2;
+    let pool = fold_pool(&air, num_vars, &config);
+    let plan = &pool.tables()[0].plan;
+    let next_noise_idx = plan.total_claims() + plan.next_slots()[noise_col_idx].unwrap();
+
     let base_noise = proof.main_point_evaluation.1[noise_col_idx];
-    let next_noise = proof.main_point_evaluation.1[expected_trace_len + noise_col_idx];
+    let next_noise = proof.main_point_evaluation.1[next_noise_idx];
 
     proof.main_point_evaluation.1[noise_col_idx] = next_noise;
-    proof.main_point_evaluation.1[expected_trace_len + noise_col_idx] = base_noise;
+    proof.main_point_evaluation.1[next_noise_idx] = base_noise;
 
     // 2. Verify the forged proof
-    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, b"ZK_NoiseShift");
+    let outcome = verify(&air, &instance, &config, &proof, b"ZK_NoiseShift");
 
     // 3. Guarantee rejection
-    assert!(
-        rejected_at(&outcome, &log, EVAL_SUMCHECK),
-        "got {outcome:?}\n{log}"
-    );
+    assert_eq!(outcome, Err(Rejection::PoolEval(PoolStage::Sumcheck)));
 }
 
 #[test]
@@ -1310,7 +1327,7 @@ fn chiplet_pipeline_witness_isolation() {
     .expect("ZK proof generation must succeed");
 
     let mut vt_zk = Transcript::<H>::new(b"ChipletWitnessIsolation");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -1318,8 +1335,8 @@ fn chiplet_pipeline_witness_isolation() {
             &proof_zk,
             &mut vt_zk,
             &config_zk,
-        )
-        .unwrap(),
+        ),
+        Ok(()),
         "ZK proof must verify",
     );
 
