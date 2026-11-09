@@ -155,7 +155,7 @@ fn main() {
     let mut verifier_transcript = Transcript::<H>::new(b"RsaPkcs1");
 
     let pinned_id = args.run.audited_id::<F, _>(program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             program,
@@ -164,8 +164,7 @@ fn main() {
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }

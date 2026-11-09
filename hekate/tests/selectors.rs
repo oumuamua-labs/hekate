@@ -13,9 +13,9 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::site::ZEROCHECK;
-use hekate_testkit::verdict::{rejected_at, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{Rejection, Table, ZerocheckStage};
 
 /// Selector Discipline & Ghost Protocol
 ///
@@ -235,16 +235,16 @@ fn halt_violation_rejected(label: &'static [u8], violating: fn(usize) -> ColumnT
         )
         .expect("halt prove");
 
-        verify_logged(&air, &instance, &config, &proof, label)
+        verify(&air, &instance, &config, &proof, label)
     };
 
-    let (honest, _) = verdict(generate_valid_trace(num_vars));
-    assert!(matches!(honest, Ok(true)), "got {honest:?}");
-
-    let (outcome, log) = verdict(violating(num_vars));
-    assert!(
-        rejected_at(&outcome, &log, ZEROCHECK),
-        "got {outcome:?}\n{log}"
+    assert_eq!(verdict(generate_valid_trace(num_vars)), Ok(()));
+    assert_eq!(
+        verdict(violating(num_vars)),
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -294,13 +294,7 @@ fn valid_halt_trace_passes() {
         &config,
     );
 
-    match result {
-        Ok(true) => {} // Success
-        Ok(false) => panic!("Valid halt trace verification returned false"),
-        Err(e) => panic!("Valid halt trace verification failed with error: {:?}", e),
-    }
-
-    assert!(result.unwrap(), "Valid halt trace should verify");
+    assert_eq!(result, Ok(()));
 }
 
 // =======================================================================
@@ -367,7 +361,7 @@ fn boolean_selector_trace_verifies() {
     )
     .expect("boolean trace prove");
 
-    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"phase1_boolean");
+    let outcome = verify(&air, &instance, &config, &proof, b"phase1_boolean");
 
-    assert!(matches!(outcome, Ok(true)), "got {outcome:?}");
+    assert_eq!(outcome, Ok(()));
 }

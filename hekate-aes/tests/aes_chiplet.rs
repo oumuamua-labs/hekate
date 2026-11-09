@@ -143,7 +143,7 @@ fn exploit_128_shiftrows_bypass() {
 fn exploit_128_round_skip() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes128Columns::S_ROUND)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -157,7 +157,7 @@ fn exploit_128_round_skip() {
 fn exploit_128_ghost_injection() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes128Columns::S_ROUND)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -263,7 +263,7 @@ fn exploit_128_round_index_shift() {
             (ROUND, Aes128Columns::ROUND_BITS + 2),
             (ROUND, Aes128Columns::ROUND_BITS + 3),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -280,7 +280,7 @@ fn exploit_128_round_index_init() {
             (ROUND, Aes128Columns::ROUND_BITS),
             (ROUND, Aes128Columns::ROUND_BITS + 1),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -347,7 +347,7 @@ fn exploit_128_s_input_forgery() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes128Columns::S_INPUT)],
         buses: &[AesRound128Air::KEY_BUS_ID],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -361,7 +361,7 @@ fn exploit_128_s_input_forgery() {
 fn exploit_128_s_final_on_round_row() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes128Columns::S_FINAL)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -409,7 +409,7 @@ fn exploit_128_sbox_rom_deactivation() {
     let fault = Fault {
         pin_columns: &[(ROM, SboxRomColumns::SELECTOR)],
         buses: &[SBOX_128],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -451,7 +451,7 @@ fn exploit_128_ghost_protocol_mid_block() {
             (ROUND, Aes128Columns::S_ACTIVE),
             (ROM, SboxRomColumns::SELECTOR),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -636,7 +636,7 @@ fn exploit_aes256_mixcol_bypass() {
 fn exploit_aes256_round_skip() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes256Columns::S_ROUND)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -650,7 +650,7 @@ fn exploit_aes256_round_skip() {
 fn exploit_aes256_ghost_injection() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes256Columns::S_ROUND)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -752,7 +752,7 @@ fn exploit_aes256_round_index_shift() {
             (ROUND, Aes256Columns::ROUND_BITS + 2),
             (ROUND, Aes256Columns::ROUND_BITS + 3),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -769,7 +769,7 @@ fn exploit_aes256_round_index_init() {
             (ROUND, Aes256Columns::ROUND_BITS),
             (ROUND, Aes256Columns::ROUND_BITS + 1),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -786,7 +786,7 @@ fn exploit_aes256_round_index_final() {
             (ROUND, Aes256Columns::ROUND_BITS + 12),
             (ROUND, Aes256Columns::ROUND_BITS + 13),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -832,7 +832,7 @@ fn exploit_aes256_s_input_forgery() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes256Columns::S_INPUT)],
         buses: &[AesRound256Air::KEY_BUS_ID],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -846,7 +846,7 @@ fn exploit_aes256_s_input_forgery() {
 fn exploit_aes256_s_final_on_round_row() {
     let fault = Fault {
         pin_columns: &[(ROUND, Aes256Columns::S_FINAL)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -952,7 +952,7 @@ fn exploit_aes256_sbox_rom_deactivation() {
     let fault = Fault {
         pin_columns: &[(ROM, SboxRomColumns::SELECTOR)],
         buses: &[SBOX_256],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -1008,7 +1008,7 @@ fn exploit_aes256_round_index_parity_preserved() {
             (ROUND, Aes256Columns::ROUND_BITS + 2),
             (ROUND, Aes256Columns::ROUND_BITS + 4),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -1065,7 +1065,7 @@ fn exploit_aes256_ghost_protocol_mid_block() {
             (ROUND, Aes256Columns::S_ACTIVE),
             (ROM, SboxRomColumns::SELECTOR),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 

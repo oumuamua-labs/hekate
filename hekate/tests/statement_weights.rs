@@ -94,20 +94,21 @@ fn kem(params: MlKemParams) -> errors::Result<Vec<ChipletDef<F>>> {
 /// A record over `def`'s AST, bus specs and fixed
 /// pins with random masked values, its pads taken
 /// from `base` on; returns the next free pad.
-fn record(
-    def: &ChipletDef<F>,
+fn record<'d>(
+    def: &'d ChipletDef<F>,
     shape: TableShape,
+    next_slots: &[Option<usize>],
     blind_units: usize,
     base: u32,
-) -> (TableRecord<'_, F>, u32) {
+) -> (TableRecord<'d, F>, u32) {
     let statics = def.statics();
     let seed = base as u128;
 
     let half = shape.eval_claims() as u32;
-    let columns = shape.num_columns as u32;
+    let claims = half + shape.next_claims as u32;
     let planes = h_planes::<F>();
 
-    let h_pad = base + 2 * half;
+    let h_pad = base + claims;
     let sums_pad = h_pad + shape.h_columns() as u32;
     let mask_pad = sums_pad + shape.bus_columns as u32;
 
@@ -170,7 +171,7 @@ fn record(
     assert_eq!(first_wire as usize, shape.mul_wires());
 
     let record = TableRecord {
-        claims_masked: (0..2 * half as u128).map(|i| mix(seed + 500 + i)).collect(),
+        claims_masked: (0..claims as u128).map(|i| mix(seed + 500 + i)).collect(),
         ast: statics.ast,
         consistency: ConsistencyInputs {
             pad_first: base,
@@ -189,8 +190,12 @@ fn record(
                     )
                 })
                 .collect(),
-            telescope: (0..blind_units as u32)
-                .map(|k| (columns + k, half + columns + k))
+            telescope: (0..blind_units)
+                .map(|k| {
+                    let b = shape.num_columns + k;
+
+                    (b as u32, half + next_slots[b].unwrap() as u32)
+                })
                 .collect(),
             buses,
             val_final_form: (0..3)
@@ -209,6 +214,7 @@ fn record(
             .collect(),
         claimed_sums,
         bindings: Vec::new(),
+        next_slots: next_slots.to_vec(),
         shape,
     };
 
@@ -239,7 +245,7 @@ fn eval(subfield_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32
             })
             .collect();
 
-        RingGadget::new(entries, mu, first_wire)
+        RingGadget::new(entries, mu, first_wire).unwrap()
     });
 
     if let Some(gadget) = &gadget {
@@ -277,7 +283,7 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
         let plans: Vec<RingSwitchPlan> = defs
             .iter()
             .zip(&shapes)
-            .map(|(def, shape)| table_plan(def, shape, &config).unwrap())
+            .map(|(def, shape)| table_plan(def, &def.statics(), shape, &config).unwrap())
             .collect();
 
         let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
@@ -287,7 +293,9 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
         let mut base = 0;
 
         for ((def, shape), layout) in defs.iter().zip(&shapes).zip(pool.tables()) {
-            let (table, next) = record(def, shape.at(layout), blind_units, base);
+            let slots = layout.plan.next_slots();
+            let (table, next) = record(def, shape.at(layout), slots, blind_units, base);
+
             records.push(table);
 
             base = next;

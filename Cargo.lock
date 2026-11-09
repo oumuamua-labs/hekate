@@ -1046,8 +1046,6 @@ dependencies = [
  "hekate-prover-sys",
  "hekate-sdk",
  "hekate-verifier",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

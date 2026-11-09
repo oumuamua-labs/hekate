@@ -189,7 +189,7 @@ fn chiplets_integration() {
         &config,
     );
 
-    assert!(result.unwrap(), "Verification failed");
+    assert_eq!(result, Ok(()));
 
     // 3. Bus Consistency
     // Both spec endpoints share a single bus_id on the main trace.

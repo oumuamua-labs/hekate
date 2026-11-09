@@ -142,7 +142,7 @@ fn shipped_tables_fit_outer_statement() {
     let plans: Vec<RingSwitchPlan> = defs
         .iter()
         .zip(&shapes)
-        .map(|(def, shape)| table_plan(def, shape, &config).unwrap())
+        .map(|(def, shape)| table_plan(def, &def.statics(), shape, &config).unwrap())
         .collect();
 
     let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();

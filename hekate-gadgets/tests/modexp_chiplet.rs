@@ -25,8 +25,7 @@ const CPU_S: usize = LIMBS32;
 const CPU_R: usize = 2 * LIMBS32;
 const CPU_ACTIVE: usize = 3 * LIMBS32;
 
-/// `R = pow(S, 65537, N)` from CPython's `pow`,
-/// `random.seed(20260911)`.
+/// `R = pow(S, 65537, N)` from CPython's `pow`, `random.seed(20260911)`.
 #[rustfmt::skip]
 const N: [u32; LIMBS32] = [
     0xcf15a761, 0x9a82b719, 0x5cb61f8e, 0x03e92daa,

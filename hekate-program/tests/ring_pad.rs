@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::config::Config;
-use hekate_core::trace::ColumnType;
+use hekate_core::trace::{ColumnType, TraceCompatibleField};
 use hekate_math::{Block128, Block256, Flat, HardwareField, TowerField};
 use hekate_program::expander::{
     RingMaps, RingSwitchPlan, VirtualExpander, claim_weights, field_bits, field_coeffs, ring_target,
@@ -16,7 +16,7 @@ use hekate_program::outer::{
 };
 use hekate_program::predicate::{Unknown, WireRole};
 
-trait Draw: TowerField + HardwareField + From<u128> {
+trait Draw: TraceCompatibleField + From<u128> {
     fn next(state: &mut u128) -> Self;
 }
 
@@ -94,11 +94,14 @@ fn horner_delta<F: Draw>(seed: u128) {
         .unwrap();
 
     let entries = expander.expansion_entries();
+    let reads: Vec<bool> = (0..expander.num_virtual_columns())
+        .map(|c| c % 3 == 0)
+        .collect();
 
     let mut state = seed;
     for num_h in [0, 2] {
-        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, num_h).unwrap();
-        let total = 2 * plan.total_claims();
+        let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, num_h, &reads).unwrap();
+        let total = plan.total_claims() + plan.next_claims();
 
         let claims: Vec<F> = (0..total).map(|_| F::next(&mut state)).collect();
         let pad: Vec<F> = (0..total).map(|_| F::next(&mut state)).collect();
@@ -117,23 +120,10 @@ fn horner_delta<F: Draw>(seed: u128) {
 
         let mut ring_maps = RingMaps::new(&r_mix);
 
-        let t_masked = ring_target(
-            &plan,
-            &unit_weights,
-            &to_flat(&masked),
-            &mut ring_maps,
-            true,
-        )
-        .unwrap();
+        let t_masked =
+            ring_target(&plan, &unit_weights, &to_flat(&masked), &mut ring_maps).unwrap();
 
-        let t_plain = ring_target(
-            &plan,
-            &unit_weights,
-            &to_flat(&claims),
-            &mut ring_maps,
-            true,
-        )
-        .unwrap();
+        let t_plain = ring_target(&plan, &unit_weights, &to_flat(&claims), &mut ring_maps).unwrap();
 
         let expected = (t_masked - t_plain).to_hardware();
 
@@ -142,13 +132,13 @@ fn horner_delta<F: Draw>(seed: u128) {
         let mut ring_pad: Vec<Flat<F>> = Vec::new();
         let mut fields: Vec<ColumnType> = Vec::new();
 
-        let weights = claim_weights(&plan, &unit_weights, true);
+        let weights = claim_weights(&plan, &unit_weights);
 
         for (c, (field, weight)) in weights.into_iter().enumerate() {
             let h = pad[c].to_hardware();
 
             if field == ColumnType::B128 {
-                whole_part += weight.to_hardware() * h;
+                whole_part += weight * h;
                 continue;
             }
 
@@ -160,7 +150,7 @@ fn horner_delta<F: Draw>(seed: u128) {
                 }
             };
 
-            ring.push((c as u32, weight.to_hardware(), k));
+            ring.push((c as u32, weight, k));
             ring_pad.push(h);
         }
 
@@ -171,7 +161,7 @@ fn horner_delta<F: Draw>(seed: u128) {
 
         let mu = linearized_coeffs(&maps).unwrap();
 
-        let gadget = RingGadget::new(ring, mu, 0);
+        let gadget = RingGadget::new(ring, mu, 0).unwrap();
 
         assert_eq!(
             whole_part + gadget.delta(&ring_pad).unwrap(),
@@ -214,12 +204,13 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
         Some(&entries),
         config.blind_units(),
         0,
+        &vec![true; expander.num_virtual_columns()],
     )
     .unwrap();
 
     let pool = FoldPool::new(&[(&plan, 6)], &config).unwrap();
     let plan = &pool.tables()[0].plan;
-    let total = 2 * plan.total_claims();
+    let total = plan.total_claims() + plan.next_claims();
 
     let ring_claim = plan
         .units
@@ -246,15 +237,9 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
     let unit_weights = pool.unit_weights(0, eta, &rho).unwrap();
 
     let target = |claims: &[Flat<K>]| {
-        ring_target(
-            plan,
-            &unit_weights,
-            claims,
-            &mut RingMaps::new(&r_mix),
-            true,
-        )
-        .unwrap()
-        .to_hardware()
+        ring_target(plan, &unit_weights, claims, &mut RingMaps::new(&r_mix))
+            .unwrap()
+            .to_hardware()
     };
 
     let swapped: Vec<Flat<K>> = masked.iter().zip(&truth).map(|(&m, &c)| m + c).collect();
@@ -267,7 +252,6 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
         eta: eta.to_tower(),
         rho: &rho_tower,
         r_mix: &r_mix,
-        shifted_claims: true,
         challenges: &[],
         claim_masked: target(&masked),
         fin: target(&truth),

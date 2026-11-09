@@ -16,6 +16,7 @@ use hekate_program::permutation::{EMIT_RANK_LABEL, PermutationCheckSpec, Side, S
 use hekate_program::{Air, FixedColumn, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{OuterStage, Rejection};
 
 type F = Block256;
 type H = DefaultHasher;
@@ -253,7 +254,11 @@ fn build_responder_trace(rows: &[(Block32, Bit)], num_rows: usize) -> ColumnTrac
 // Runners
 // =======
 
-fn run_lookup(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
+fn run_lookup(
+    reader: &[(Block32, Bit)],
+    table: &[(Block32, Bit)],
+    zero_knowledge: bool,
+) -> Result<(), Rejection> {
     let num_rows = 4;
     let seed = [0xAAu8; 32];
 
@@ -268,18 +273,16 @@ fn run_lookup(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
     let config = Config {
         num_queries: 4,
         min_security_bits: 0,
-        zero_knowledge: false,
+        zero_knowledge,
         fold_arity_log: 1,
         early_stop_vars: 1,
         ..Config::default()
     };
 
-    let proof = match prove(
+    let proof = prove(
         b"FORGERY", &program, &instance, &witness, &config, seed, None,
-    ) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
+    )
+    .expect("the prover does not refuse");
 
     let mut verifier_ts = Transcript::<H>::new(b"FORGERY");
     let pinned_id = program_id(&program).unwrap();
@@ -292,10 +295,13 @@ fn run_lookup(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
         &mut verifier_ts,
         &config,
     )
-    .unwrap_or(false)
 }
 
-fn run_rank(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
+fn run_rank(
+    reader: &[(Block32, Bit)],
+    table: &[(Block32, Bit)],
+    zero_knowledge: bool,
+) -> Result<(), Rejection> {
     let num_rows = 4;
     let seed = [0xAAu8; 32];
 
@@ -310,18 +316,16 @@ fn run_rank(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
     let config = Config {
         num_queries: 4,
         min_security_bits: 0,
-        zero_knowledge: false,
+        zero_knowledge,
         fold_arity_log: 1,
         early_stop_vars: 1,
         ..Config::default()
     };
 
-    let proof = match prove(
+    let proof = prove(
         b"FORGERY", &program, &instance, &witness, &config, seed, None,
-    ) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
+    )
+    .expect("the prover does not refuse");
 
     let mut verifier_ts = Transcript::<H>::new(b"FORGERY");
     let pinned_id = program_id(&program).unwrap();
@@ -334,7 +338,6 @@ fn run_rank(reader: &[(Block32, Bit)], table: &[(Block32, Bit)]) -> bool {
         &mut verifier_ts,
         &config,
     )
-    .unwrap_or(false)
 }
 
 // =========
@@ -401,24 +404,36 @@ fn cancelling_rank_table() -> Vec<(Block32, Bit)> {
 
 #[test]
 fn permutation_with_emit_rank_rejects_forged_pair() {
-    let accepted = run_rank(&forged_reader(), &cancelling_rank_table());
-    assert!(!accepted);
+    let outcome =
+        |zero_knowledge| run_rank(&forged_reader(), &cancelling_rank_table(), zero_knowledge);
+
+    assert_eq!(outcome(false), Err(Rejection::BusSum));
+    assert_eq!(outcome(true), Err(Rejection::Outer(OuterStage::Linear)));
 }
 
 #[test]
 fn permutation_with_emit_rank_accepts_honest_match() {
-    let accepted = run_rank(&matched_reader(), &honest_rank_table());
-    assert!(accepted);
+    let outcome =
+        |zero_knowledge| run_rank(&matched_reader(), &honest_rank_table(), zero_knowledge);
+
+    assert_eq!(outcome(false), Ok(()));
+    assert_eq!(outcome(true), Ok(()));
 }
 
 #[test]
 fn lookup_bus_rejects_forged_pair() {
-    let accepted = run_lookup(&forged_reader(), &cancelling_lookup_table());
-    assert!(!accepted);
+    let outcome =
+        |zero_knowledge| run_lookup(&forged_reader(), &cancelling_lookup_table(), zero_knowledge);
+
+    assert_eq!(outcome(false), Err(Rejection::BusSum));
+    assert_eq!(outcome(true), Err(Rejection::Outer(OuterStage::Linear)));
 }
 
 #[test]
 fn lookup_bus_accepts_honest_match() {
-    let accepted = run_lookup(&matched_reader(), &honest_lookup_table());
-    assert!(accepted);
+    let outcome =
+        |zero_knowledge| run_lookup(&matched_reader(), &honest_lookup_table(), zero_knowledge);
+
+    assert_eq!(outcome(false), Ok(()));
+    assert_eq!(outcome(true), Ok(()));
 }

@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use alloc::collections::BTreeMap;
-use hekate_core::errors::{self, Error};
 use hekate_math::{Flat, HardwareField, TowerField};
 use hekate_program::permutation::{BusFraction, BusGroup, BusWeights};
+
+use crate::rejection::Rejection;
 
 /// An `h` column's LogUp terms at the claims: its consistency,
 /// `g·D + s` or for a pair `(g·D₁ + s₁)·D₂ + s₂·D₁`, and its
@@ -51,17 +52,14 @@ impl<F: TowerField + HardwareField> ColumnTerms<F> {
 
 /// Rejects unless every group's claimed sums cancel,
 /// one `(group, sum)` entry per `h` column.
-pub fn check_bus_sum_matching<F: TowerField>(columns: &[(BusGroup, F)]) -> errors::Result<()> {
+pub fn check_bus_sum_matching<F: TowerField>(columns: &[(BusGroup, F)]) -> Result<(), Rejection> {
     let mut by_group: BTreeMap<&BusGroup, F> = BTreeMap::new();
     for (group, sum) in columns {
         *by_group.entry(group).or_insert(F::ZERO) += *sum;
     }
 
     if by_group.values().any(|&total| total != F::ZERO) {
-        return Err(Error::Protocol {
-            protocol: "LogUp",
-            message: "bus endpoint sums do not cancel to zero",
-        });
+        return Err(Rejection::BusSum);
     }
 
     Ok(())
@@ -185,14 +183,14 @@ mod tests {
             (BusGroup::Lookup("rom_link".to_string()), base + F::ONE),
         ];
 
-        assert!(check_bus_sum_matching(&columns).is_err());
+        assert_eq!(check_bus_sum_matching(&columns), Err(Rejection::BusSum));
     }
 
     #[test]
     fn bus_matching_rejects_unpaired_column() {
         let columns = vec![(BusGroup::Permutation, F::from(0x9999u128))];
 
-        assert!(check_bus_sum_matching(&columns).is_err());
+        assert_eq!(check_bus_sum_matching(&columns), Err(Rejection::BusSum));
     }
 
     #[test]
@@ -230,7 +228,7 @@ mod tests {
 
         check_bus_sum_matching(&balanced).unwrap();
 
-        assert!(check_bus_sum_matching(&crossed).is_err());
+        assert_eq!(check_bus_sum_matching(&crossed), Err(Rejection::BusSum));
     }
 
     #[test]

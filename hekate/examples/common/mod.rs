@@ -8,6 +8,7 @@ use hekate_crypto::Digest;
 use hekate_math::TowerField;
 use hekate_program::Program;
 use hekate_program::digest::{ProgramId, program_id, program_id_hex};
+use hekate_verifier::rejection::Rejection;
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -297,13 +298,15 @@ where
     segment_sz
 }
 
-pub fn result(is_valid: bool) {
+pub fn result(outcome: Result<(), Rejection>) {
     println!("==================================================");
 
-    if is_valid {
-        println!("SUCCESS");
-    } else {
-        println!("FAILURE");
+    match outcome {
+        Ok(()) => println!("SUCCESS"),
+        Err(rejection) => {
+            println!("FAILURE: {rejection}");
+            std::process::exit(1);
+        }
     }
 }
 

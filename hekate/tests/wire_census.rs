@@ -263,14 +263,17 @@ fn pool_polys<P: Program<F>>(program: &P, chiplet_num_vars: &[usize]) -> usize {
 
     let mut plans = Vec::with_capacity(defs.len() + 1);
     for def in &defs {
-        let shape = TableShape::from_air(def, &def.statics()).unwrap();
-        plans.push(table_plan(def, &shape, &config).unwrap());
+        let statics = def.statics();
+        let shape = TableShape::from_air(def, &statics).unwrap();
+
+        plans.push(table_plan(def, &statics, &shape, &config).unwrap());
     }
 
     let parts = TableParts::of(program);
-    let shape = TableShape::from_air(program, &parts.statics()).unwrap();
+    let statics = parts.statics();
+    let shape = TableShape::from_air(program, &statics).unwrap();
 
-    plans.push(table_plan(program, &shape, &config).unwrap());
+    plans.push(table_plan(program, &statics, &shape, &config).unwrap());
 
     let heights: Vec<(&RingSwitchPlan, usize)> = plans
         .iter()
@@ -314,7 +317,7 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
     .unwrap();
 
     let mut vt = Transcript::<H>::new(b"Census_Step");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -322,8 +325,8 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
             &proof,
             &mut vt,
             &config()
-        )
-        .unwrap()
+        ),
+        Ok(())
     );
 
     let counted = census(&proof);
@@ -390,7 +393,7 @@ fn every_scalar_of_bus_proof_is_accounted() {
     .unwrap();
 
     let mut vt = Transcript::<H>::new(b"Census_Ram");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -398,8 +401,8 @@ fn every_scalar_of_bus_proof_is_accounted() {
             &proof,
             &mut vt,
             &config()
-        )
-        .unwrap()
+        ),
+        Ok(())
     );
 
     let counted = census(&proof);
@@ -472,7 +475,7 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
     .unwrap();
 
     let mut vt = Transcript::<H>::new(b"Census_Keccak");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -480,8 +483,8 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
             &proof,
             &mut vt,
             &config()
-        )
-        .unwrap()
+        ),
+        Ok(())
     );
 
     let counted = census(&proof);

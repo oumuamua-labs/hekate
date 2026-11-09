@@ -18,6 +18,7 @@ use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_target
 use hekate_sdk::preflight;
 use hekate_sha2::sha256_words;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{OuterStage, Rejection};
 
 type F = Block256;
 type H = DefaultHasher;
@@ -80,19 +81,11 @@ fn statement() -> Pkcs1Statement {
 fn prove_and_verify(
     st: &Pkcs1Statement,
     witness: ProgramWitness<F, ColumnTrace>,
-) -> Result<bool, String> {
+) -> Result<(), Rejection> {
     let instance = st.instance(&N);
+    let report = preflight(st.program(), &instance, &witness).unwrap();
 
-    let report =
-        preflight(st.program(), &instance, &witness).map_err(|e| format!("preflight: {e:?}"))?;
-
-    if !report.is_clean() {
-        for v in &report.constraint_violations {
-            eprintln!("constraint={} row={}", v.constraint_idx, v.row_idx);
-        }
-
-        return Err("preflight violations".into());
-    }
+    assert!(report.is_clean(), "{report}");
 
     verdict_without_preflight(st, witness)
 }
@@ -100,7 +93,7 @@ fn prove_and_verify(
 fn verdict_without_preflight(
     st: &Pkcs1Statement,
     witness: ProgramWitness<F, ColumnTrace>,
-) -> Result<bool, String> {
+) -> Result<(), Rejection> {
     let instance = st.instance(&N);
 
     let config = Config {
@@ -117,7 +110,7 @@ fn verdict_without_preflight(
         [11u8; 32],
         None,
     )
-    .map_err(|e| format!("prover: {e:?}"))?;
+    .expect("the prover does not refuse");
 
     let mut vt = Transcript::<H>::new(b"RsaPkcs1_E2E");
     let pinned_id = program_id(st.program()).unwrap();
@@ -130,7 +123,6 @@ fn verdict_without_preflight(
         &mut vt,
         &config,
     )
-    .map_err(|e| format!("verifier: {e:?}"))
 }
 
 fn assert_rejected_at_compare(st: &Pkcs1Statement, witness: ProgramWitness<F, ColumnTrace>) {
@@ -148,7 +140,10 @@ fn assert_rejected_at_compare(st: &Pkcs1Statement, witness: ProgramWitness<F, Co
             .all(|v| v.row_idx == verify_row)
     );
 
-    assert_eq!(verdict_without_preflight(st, witness), Ok(false));
+    assert_eq!(
+        verdict_without_preflight(st, witness),
+        Err(Rejection::Outer(OuterStage::Linear))
+    );
 }
 
 #[test]
@@ -176,11 +171,7 @@ fn honest_proof_verifies() {
     let st = statement();
     let witness = st.witness(&message(), &N, &S).unwrap();
 
-    match prove_and_verify(&st, witness) {
-        Ok(true) => {}
-        Ok(false) => panic!("verifier rejected an honest proof"),
-        Err(e) => panic!("{e}"),
-    }
+    assert_eq!(prove_and_verify(&st, witness), Ok(()));
 }
 
 #[test]

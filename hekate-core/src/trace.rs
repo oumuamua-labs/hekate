@@ -17,6 +17,53 @@ use zeroize::Zeroize;
 #[cfg(feature = "secure-memory")]
 use zeroize::ZeroizeOnDrop;
 
+/// Bound for the proving field `F`:
+/// it must losslessly represent every `ColumnType`
+/// used by the trace (Bit, B8, B16, B32, B64, B128)
+/// and carry the additive-FFT substrate the
+/// Reed-Solomon codes encode over.
+pub trait TraceCompatibleField:
+    TowerField
+    + HardwareField
+    + PackableField
+    + BinaryFieldExtras
+    + FlatPromote<Block8>
+    + FlatPromote<Block16>
+    + FlatPromote<Block32>
+    + FlatPromote<Block64>
+    + FlatPromote<Block128>
+    + From<Bit>
+    + From<Block8>
+    + From<Block16>
+    + From<Block32>
+    + From<Block64>
+    + From<Block128>
+    + Send
+    + Sync
+{
+}
+
+impl<T> TraceCompatibleField for T where
+    T: TowerField
+        + HardwareField
+        + PackableField
+        + BinaryFieldExtras
+        + FlatPromote<Block8>
+        + FlatPromote<Block16>
+        + FlatPromote<Block32>
+        + FlatPromote<Block64>
+        + FlatPromote<Block128>
+        + From<Bit>
+        + From<Block8>
+        + From<Block16>
+        + From<Block32>
+        + From<Block64>
+        + From<Block128>
+        + Send
+        + Sync
+{
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidParameters {
@@ -83,53 +130,6 @@ impl fmt::Display for Error {
             ),
         }
     }
-}
-
-/// Bound for the proving field `F`:
-/// it must losslessly represent every `ColumnType`
-/// used by the trace (Bit, B8, B16, B32, B64, B128)
-/// and carry the additive-FFT substrate the
-/// Reed-Solomon codes encode over.
-pub trait TraceCompatibleField:
-    TowerField
-    + HardwareField
-    + PackableField
-    + BinaryFieldExtras
-    + FlatPromote<Block8>
-    + FlatPromote<Block16>
-    + FlatPromote<Block32>
-    + FlatPromote<Block64>
-    + FlatPromote<Block128>
-    + From<Bit>
-    + From<Block8>
-    + From<Block16>
-    + From<Block32>
-    + From<Block64>
-    + From<Block128>
-    + Send
-    + Sync
-{
-}
-
-impl<T> TraceCompatibleField for T where
-    T: TowerField
-        + HardwareField
-        + PackableField
-        + BinaryFieldExtras
-        + FlatPromote<Block8>
-        + FlatPromote<Block16>
-        + FlatPromote<Block32>
-        + FlatPromote<Block64>
-        + FlatPromote<Block128>
-        + From<Bit>
-        + From<Block8>
-        + From<Block16>
-        + From<Block32>
-        + From<Block64>
-        + From<Block128>
-        + Send
-        + Sync
-{
 }
 
 // =========================================================

@@ -499,7 +499,7 @@ fn fibonacci_rejects_idle_trace() {
             (TableId::Main, layout.s_add),
             (TableId::Main, layout.s_output),
         ],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 
@@ -527,7 +527,7 @@ fn fibonacci_raw_rejects_idle_trace() {
         constraint_tables: &[TableId::Main],
         boundary_columns: &[(TableId::Main, host.b)],
         pin_columns: &[(TableId::Main, host.q)],
-        first_check: Some(Check::Zerocheck),
+        first_check: Some(Check::Sumcheck),
         ..Fault::NONE
     };
 

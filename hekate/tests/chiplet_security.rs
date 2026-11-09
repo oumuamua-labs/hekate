@@ -23,9 +23,9 @@ use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
-use hekate_testkit::site::{CHIPLET_ZEROCHECK, OUTER_LINEAR, ZEROCHECK};
-use hekate_testkit::verdict::{rejected_at, rejected_with, verify_logged};
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{FoldStage, OuterStage, Rejection, Table, ZerocheckStage};
 
 type F = Block256;
 type H = DefaultHasher;
@@ -134,7 +134,7 @@ fn prove_and_verify(
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F, ColumnTrace>,
     config: &Config,
-) -> (hekate_core::proofs::InnerProof<F>, bool) {
+) -> (hekate_core::proofs::InnerProof<F>, Result<(), Rejection>) {
     let seed = [0xBBu8; 32];
     let proof = prove(
         b"ChipletSecurity",
@@ -150,10 +150,10 @@ fn prove_and_verify(
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(&pinned_id, air, instance, &proof, &mut vt, config)
-        .unwrap_or(false);
+    let baseline =
+        HekateVerifier::<F, H>::verify(&pinned_id, air, instance, &proof, &mut vt, config);
 
-    (proof, ok)
+    (proof, baseline)
 }
 
 // ==========================================================
@@ -167,8 +167,8 @@ fn prove_and_verify(
 #[test]
 fn extra_chiplet_rows_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
-    assert!(ok, "Baseline proof must verify");
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
+    assert_eq!(baseline, Ok(()));
 
     // ATTACK:
     // Duplicate the first chiplet height
@@ -181,9 +181,12 @@ fn extra_chiplet_rows_rejected() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        result.is_err() || !result.unwrap(),
-        "SECURITY FAILURE: Extra chiplet height accepted"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "chiplet height count mismatch",
+        }))
     );
 }
 
@@ -197,8 +200,8 @@ fn extra_chiplet_rows_rejected() {
 #[test]
 fn missing_chiplet_rows_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
-    assert!(ok, "Baseline proof must verify");
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
+    assert_eq!(baseline, Ok(()));
 
     // ATTACK:
     // Remove all chiplet heights
@@ -210,9 +213,12 @@ fn missing_chiplet_rows_rejected() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        result.is_err(),
-        "SECURITY FAILURE: Missing chiplet heights accepted"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "chiplet height count mismatch",
+        }))
     );
 }
 
@@ -226,8 +232,8 @@ fn missing_chiplet_rows_rejected() {
 #[test]
 fn chiplet_eval_values_forgery() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
-    assert!(ok, "Baseline proof must verify");
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
+    assert_eq!(baseline, Ok(()));
 
     // ATTACK:
     // Corrupt first chiplet's
@@ -237,11 +243,14 @@ fn chiplet_eval_values_forgery() {
 
     c_eval.1[0] += F::ONE;
 
-    let (outcome, log) = verify_logged(&air, &instance, &config, &proof, b"ChipletSecurity");
+    let outcome = verify(&air, &instance, &config, &proof, b"ChipletSecurity");
 
-    assert!(
-        rejected_at(&outcome, &log, ZEROCHECK),
-        "got {outcome:?}\n{log}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -257,18 +266,21 @@ fn chiplet_eval_values_forgery() {
 #[test]
 fn pool_root_swap_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
-    assert!(ok, "Baseline proof must verify");
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
+    assert_eq!(baseline, Ok(()));
 
     // ATTACK:
     // Replace the pool root with zeros
     proof.trace_root = vec![0u8; <<DefaultHasher as Hasher>::Digest as Digest>::BYTES];
 
-    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ChipletSecurity");
+    let outcome = verify(&air, &instance, &config, &proof, b"ChipletSecurity");
 
-    assert!(
-        rejected_with(&outcome, CHIPLET_ZEROCHECK),
-        "got {outcome:?}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Chiplet(0),
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -283,8 +295,8 @@ fn pool_root_swap_rejected() {
 #[test]
 fn chiplet_eval_values_truncated() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
-    assert!(ok, "Baseline proof must verify");
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
+    assert_eq!(baseline, Ok(()));
 
     // ATTACK:
     // Truncate chiplet's combined trace values
@@ -298,9 +310,12 @@ fn chiplet_eval_values_truncated() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        result.is_err(),
-        "SECURITY FAILURE: Truncated chiplet eval values accepted (should reject)"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "combined trace values length mismatch with physical trace",
+        }))
     );
 }
 
@@ -315,8 +330,8 @@ fn chiplet_eval_values_truncated() {
 #[test]
 fn chiplet_logup_sum_mismatch() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
-    assert!(ok, "Baseline proof must verify");
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
+    assert_eq!(baseline, Ok(()));
 
     assert_eq!(proof.chiplet_logup_aux.len(), 1);
     assert!(!proof.chiplet_logup_aux[0].claimed_sums.is_empty());
@@ -326,11 +341,14 @@ fn chiplet_logup_sum_mismatch() {
     // so the bus no longer cancels.
     proof.chiplet_logup_aux[0].claimed_sums[0] += F::ONE;
 
-    let (outcome, _) = verify_logged(&air, &instance, &config, &proof, b"ChipletSecurity");
+    let outcome = verify(&air, &instance, &config, &proof, b"ChipletSecurity");
 
-    assert!(
-        rejected_with(&outcome, CHIPLET_ZEROCHECK),
-        "got {outcome:?}"
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Chiplet(0),
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -371,9 +389,9 @@ fn phantom_bus_air(num_rows: usize) -> CircuitProgram<F> {
 #[test]
 fn unmatched_main_bus_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (_, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (_, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     let phantom_air = phantom_bus_air(instance.num_rows());
 
@@ -395,18 +413,14 @@ fn unmatched_main_bus_rejected() {
         .expect("phantom prove");
 
         // The verifier must reject: "phantom_bus" has no chiplet/gadget counterpart
-        let (outcome, log) =
-            verify_logged(&phantom_air, &instance, &config, &proof, b"ChipletSecurity");
+        let outcome = verify(&phantom_air, &instance, &config, &proof, b"ChipletSecurity");
 
-        let rejected = match zero_knowledge {
-            false => rejected_with(&outcome, "bus endpoint sums do not cancel to zero"),
-            true => rejected_at(&outcome, &log, OUTER_LINEAR),
+        let expected = match zero_knowledge {
+            false => Rejection::BusSum,
+            true => Rejection::Outer(OuterStage::Linear),
         };
 
-        assert!(
-            rejected,
-            "zero_knowledge={zero_knowledge}: got {outcome:?}\n{log}"
-        );
+        assert_eq!(outcome, Err(expected), "zero_knowledge={zero_knowledge}");
     }
 }
 
@@ -417,9 +431,9 @@ fn unmatched_main_bus_rejected() {
 #[test]
 fn chiplet_sumcheck_degree_inflation_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     let pad = proof.chiplet_zerocheck_proofs[0].round_polys[0].evals[0];
     proof.chiplet_zerocheck_proofs[0].round_polys[0]
@@ -432,15 +446,12 @@ fn chiplet_sumcheck_degree_inflation_rejected() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                message: "round polynomial degree mismatch",
-                ..
-            })
-        ),
-        "got {result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Zerocheck {
+            table: Table::Chiplet(0),
+            stage: ZerocheckStage::Degree,
+        })
     );
 }
 
@@ -452,9 +463,9 @@ fn chiplet_sumcheck_degree_inflation_rejected() {
 #[test]
 fn chiplet_rows_non_power_of_two_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     proof.chiplet_rows[0] = 5;
 
@@ -464,24 +475,21 @@ fn chiplet_rows_non_power_of_two_rejected() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "verifier",
-                message: "chiplet_rows[c] must be a non-zero power of two",
-            })
-        ),
-        "{result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "chiplet_rows[c] must be a non-zero power of two",
+        }))
     );
 }
 
 #[test]
 fn chiplet_rows_zero_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     proof.chiplet_rows[0] = 0;
 
@@ -491,15 +499,12 @@ fn chiplet_rows_zero_rejected() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "verifier",
-                message: "chiplet_rows[c] must be a non-zero power of two",
-            })
-        ),
-        "{result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "chiplet_rows[c] must be a non-zero power of two",
+        }))
     );
 }
 
@@ -514,9 +519,9 @@ fn chiplet_rows_zero_rejected() {
 #[test]
 fn tampered_leaf_part_rejected_at_merkle_check() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     let pinned_id = program_id(&air).unwrap();
 
@@ -537,15 +542,10 @@ fn tampered_leaf_part_rejected_at_merkle_check() {
                 &pinned_id, &air, &instance, &forged, &mut vt, &config,
             );
 
-            assert!(
-                matches!(
-                    result,
-                    Err(Error::Protocol {
-                        protocol: "fold",
-                        message: "fold tree multiproof rejected",
-                    })
-                ),
-                "h_tree {h_tree}, chiplet_part {chiplet_part}: {result:?}"
+            assert_eq!(
+                result,
+                Err(Rejection::Fold(FoldStage::Multiproof)),
+                "h_tree {h_tree}, chiplet_part {chiplet_part}"
             );
         }
     }
@@ -554,9 +554,9 @@ fn tampered_leaf_part_rejected_at_merkle_check() {
 #[test]
 fn chiplet_rows_above_height_bound_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     proof.chiplet_rows[0] = 1 << (MAX_TABLE_VARS + 1);
 
@@ -566,24 +566,21 @@ fn chiplet_rows_above_height_bound_rejected() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "verifier",
-                message: "chiplet_rows[c] exceeds the table height bound",
-            })
-        ),
-        "{result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "chiplet_rows[c] exceeds the table height bound",
+        }))
     );
 }
 
 #[test]
 fn main_rows_above_height_bound_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     let tall = ProgramInstance::new(1 << (MAX_TABLE_VARS + 1), vec![]);
 
@@ -592,24 +589,21 @@ fn main_rows_above_height_bound_rejected() {
 
     let result = HekateVerifier::<F, H>::verify(&pinned_id, &air, &tall, &proof, &mut vt, &config);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "verifier",
-                message: "num_rows exceeds the table height bound",
-            })
-        ),
-        "{result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "num_rows exceeds the table height bound",
+        }))
     );
 }
 
 #[test]
 fn height_spread_rejected_at_chiplet_zerocheck() {
     let (air, instance, witness, config) = build_test_system(6);
-    let (mut proof, ok) = prove_and_verify(&air, &instance, &witness, &config);
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
 
-    assert!(ok, "Baseline proof must verify");
+    assert_eq!(baseline, Ok(()));
 
     proof.chiplet_rows[0] = 1 << 8;
 
@@ -619,14 +613,11 @@ fn height_spread_rejected_at_chiplet_zerocheck() {
     let result =
         HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::Protocol {
-                protocol: "verifier",
-                message: CHIPLET_ZEROCHECK,
-            })
-        ),
-        "{result:?}"
+    assert_eq!(
+        result,
+        Err(Rejection::Zerocheck {
+            table: Table::Chiplet(0),
+            stage: ZerocheckStage::Rounds,
+        })
     );
 }
