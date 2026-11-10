@@ -438,8 +438,10 @@ where
         info!(
             bits = fold_bits.min(draws.weakest()),
             fold = fold_bits,
+            radius = ?pool.layout().radius(),
             logup_bus = draws.bus,
             zerocheck = draws.zerocheck,
+            skip = ?draws.skip,
             sumcheck_round = draws.sumcheck,
             eval_batch = draws.eval_batch,
             eval_round = draws.eval_round,
