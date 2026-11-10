@@ -30,6 +30,11 @@ pub const OUTER_ROWS: usize = 32;
 /// `num_queries · 2⁻³²`, under one bit.
 pub(crate) const LOG2_FRAC_BITS: u32 = 32;
 
+/// The multiplicity `m` of the Guruswami-Sudan decoder
+/// behind the Johnson estimate, which runs at proximity
+/// `1 − (1 + 1/(2m))·√ρ`.
+const JOHNSON_MULTIPLICITY: u128 = 64;
+
 /// Failures of the `Config` checks and the `CodeRate` decode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -374,28 +379,70 @@ pub(crate) const fn log2_ratio_fixed(n: u128, m: u128) -> u128 {
     (int_part << LOG2_FRAC_BITS) | frac
 }
 
-/// `floor(-log₂(((1 + ρ)/2)^q))` in bits, ρ = msg_len / code_width.
-/// Integer-only, prover and verifier derive identical geometry;
-/// libm `powf`/`log2` are not bit-reproducible across platforms.
-pub(crate) const fn ldt_bits(num_queries: usize, msg_len: usize, code_width: usize) -> usize {
-    if msg_len >= code_width {
-        return 0;
-    }
-
-    let log2_ratio = log2_ratio_fixed(2 * code_width as u128, code_width as u128 + msg_len as u128);
+/// Returns the bits `num_queries` queries prove at unique decoding:
+/// `⌊t · log₂(2/(1 + ρ))⌋` in integers, as libm `powf`/`log2` are not
+/// bit-reproducible and prover and verifier derive one geometry.
+pub(crate) const fn unique_query_bits(num_queries: usize, log_inv_rate: usize) -> usize {
+    let inv_rate = 1u128 << log_inv_rate;
+    let log2_ratio = log2_ratio_fixed(2 * inv_rate, inv_rate + 1);
 
     ((num_queries as u128 * log2_ratio) >> LOG2_FRAC_BITS) as usize
 }
 
-/// Fewest queries whose fold term `⌊t · log2(2 / (1 + ρ))⌋`
-/// clears `bits` at `code_rate`.
-const fn fold_floor_queries(bits: usize, code_rate: CodeRate) -> usize {
-    let mut queries = 1;
-    while ldt_bits(queries, 1, code_rate.inv_rate()) < bits {
-        queries += 1;
+/// Returns the bits `num_queries` queries prove at the
+/// Johnson radius: `⌊t · (ω/2 − log₂(1 + 1/(2m)))⌋`.
+pub(crate) const fn johnson_query_bits(num_queries: usize, log_inv_rate: usize) -> usize {
+    let m = JOHNSON_MULTIPLICITY;
+    let gap_upper = log2_ratio_fixed(2 * m + 1, 2 * m) + 1;
+    let per_query = ((log_inv_rate as u128) << (LOG2_FRAC_BITS - 1)) - gap_upper;
+
+    ((num_queries as u128 * per_query) >> LOG2_FRAC_BITS) as usize
+}
+
+/// Returns the log₂ of the factor the Johnson proximity error
+/// puts on `|D|²/|F|`, rounded up: `(m + ½)^7 / (3ρ^{3/2})`
+/// (ePrint 2024/1571 Thm 2).
+pub(crate) const fn johnson_factor_log2(log_inv_rate: usize) -> usize {
+    let two_m_plus_one = 2 * JOHNSON_MULTIPLICITY + 1;
+    let upper = log2_ratio_fixed(two_m_plus_one.pow(7), 3 << 7)
+        + 1
+        + ((3 * log_inv_rate as u128) << (LOG2_FRAC_BITS - 1));
+
+    upper.div_ceil(1 << LOG2_FRAC_BITS) as usize
+}
+
+/// Returns the most codewords within the Johnson-radius proximity
+/// of any word: `⌈(m + ½)/√ρ⌉` (ePrint 2024/1571 Prop. 1).
+pub(crate) const fn johnson_list_bound(log_inv_rate: usize) -> u128 {
+    let two_m_plus_one = 2 * JOHNSON_MULTIPLICITY + 1;
+    let target = (two_m_plus_one * two_m_plus_one) << log_inv_rate;
+
+    let mut bound = 1;
+    while 4 * bound * bound < target {
+        bound += 1;
     }
 
-    queries
+    bound
+}
+
+/// Fewest queries whose fold term clears `bits` at `code_rate`.
+const fn fold_floor_queries(bits: usize, code_rate: CodeRate) -> usize {
+    let log_inv_rate = code_rate.log_inv_rate() as usize;
+    let johnson = bits <= MIN_PRODUCTION_BITS;
+
+    let mut queries = 1;
+    loop {
+        let term = match johnson {
+            true => johnson_query_bits(queries, log_inv_rate),
+            false => unique_query_bits(queries, log_inv_rate),
+        };
+
+        if term >= bits {
+            return queries;
+        }
+
+        queries += 1;
+    }
 }
 
 /// Fewest outer queries clearing `bits` (Ligero journal Lemma 4.6).
@@ -423,20 +470,21 @@ mod tests {
 
     #[test]
     fn prod_queries_are_fewest_clearing_fold_floor() {
-        for (rate, queries) in [(CodeRate::Half, 309), (CodeRate::Quarter, 189)] {
+        for (rate, queries) in [(CodeRate::Half, 262), (CodeRate::Quarter, 130)] {
             let t = Config::prod_at(rate).num_queries;
+            let log_inv_rate = rate.log_inv_rate() as usize;
 
             assert_eq!(t, queries);
-            assert!(ldt_bits(t, 1, rate.inv_rate()) >= MIN_PRODUCTION_BITS);
-            assert!(ldt_bits(t - 1, 1, rate.inv_rate()) < MIN_PRODUCTION_BITS);
+            assert!(johnson_query_bits(t, log_inv_rate) >= MIN_PRODUCTION_BITS);
+            assert!(johnson_query_bits(t - 1, log_inv_rate) < MIN_PRODUCTION_BITS);
         }
     }
 
     #[test]
     fn at_bits_derives_fold_and_outer_queries() {
         for (bits, half, quarter, outer) in [
-            (100, 241, 148, 121),
-            (128, 309, 189, 155),
+            (100, 205, 102, 121),
+            (128, 262, 130, 155),
             (220, 531, 325, 266),
         ] {
             let config = Config::at_bits(bits, CodeRate::Half);
@@ -477,14 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn ldt_bits_matches_float_within_one_bit() {
+    fn unique_query_bits_matches_float_within_one_bit() {
         for rate in [CodeRate::Half, CodeRate::Quarter] {
             let inv_rate = rate.inv_rate();
             let per_query = (1.0 + 1.0 / inv_rate as f64) / 2.0;
 
             for num_queries in (50..=400).step_by(7) {
                 let reference = (-per_query.powf(num_queries as f64).log2()).floor();
-                let integer = ldt_bits(num_queries, 1, inv_rate) as f64;
+                let integer = unique_query_bits(num_queries, rate.log_inv_rate() as usize) as f64;
 
                 assert!(
                     (integer - reference).abs() <= 1.0,
@@ -551,6 +599,39 @@ mod tests {
                 CodeRate::try_from(log_inv_rate),
                 Err(Error::UnsupportedCodeRate { log_inv_rate })
             );
+        }
+    }
+
+    #[test]
+    fn johnson_query_bits_matches_float_within_one_bit() {
+        let gap = (1.0 + 1.0 / (2 * JOHNSON_MULTIPLICITY) as f64).log2();
+        for rate in [CodeRate::Half, CodeRate::Quarter] {
+            let log_inv_rate = rate.log_inv_rate() as usize;
+            let per_query = log_inv_rate as f64 / 2.0 - gap;
+
+            for num_queries in (50..=400).step_by(7) {
+                let reference = (num_queries as f64 * per_query).floor();
+                let integer = johnson_query_bits(num_queries, log_inv_rate) as f64;
+
+                assert!(
+                    (integer - reference).abs() <= 1.0,
+                    "rate 1/{}, {num_queries} queries: {integer} vs {reference}",
+                    rate.inv_rate(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn johnson_factor_and_list_bound_round_up() {
+        let half_m = JOHNSON_MULTIPLICITY as f64 + 0.5;
+        for log_inv_rate in [1, 2] {
+            let rho = 0.5f64.powi(log_inv_rate as i32);
+            let factor = (half_m.powi(7) / (3.0 * rho.powf(1.5))).log2().ceil();
+            let list = (half_m / rho.sqrt()).ceil();
+
+            assert_eq!(johnson_factor_log2(log_inv_rate), factor as usize);
+            assert_eq!(johnson_list_bound(log_inv_rate), list as u128);
         }
     }
 }
