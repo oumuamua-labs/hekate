@@ -463,6 +463,17 @@ mod tests {
         }
     }
 
+    fn lift(basis: &CantorBasis<F>, word: &[Flat<F>]) -> Vec<Flat<F>> {
+        word.iter()
+            .enumerate()
+            .flat_map(|(j, &v)| {
+                let x = basis.point(2 * j).unwrap();
+
+                [v + x * v, x * v]
+            })
+            .collect()
+    }
+
     fn narrow_code_matches_wide<S>(field: CodeField, seed: u128)
     where
         S: TowerField + HardwareField + BinaryFieldExtras,
@@ -555,5 +566,109 @@ mod tests {
         narrow_code_matches_wide::<Block32>(CodeField::B32, 0x94_0471);
         narrow_code_matches_wide::<Block64>(CodeField::B64, 0x94_0472);
         narrow_code_matches_wide::<Block128>(CodeField::B128, 0x94_0473);
+    }
+
+    #[test]
+    fn lift_folds_back_to_word() {
+        let (vars, log_inv_rate) = (5, 2);
+        let k = kernel(vars + 1 + log_inv_rate);
+
+        let word = values(0x94_0501, 1 << (vars + log_inv_rate));
+        let lifted = lift(&k.basis, &word);
+
+        for (i, &challenge) in values(0x94_0502, 4).iter().enumerate() {
+            for (j, &v) in word.iter().enumerate() {
+                let pair = &lifted[2 * j..2 * j + 2];
+
+                assert_eq!(
+                    k.fold_coset(pair, 2 * j, &[challenge]).unwrap(),
+                    v,
+                    "challenge {i}, position {j}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lift_of_codeword_encodes_doubled_message() {
+        let vars = 5;
+        for log_inv_rate in 1..=2 {
+            let k = kernel(vars + 1 + log_inv_rate);
+
+            let message = values(0x94_0511 + log_inv_rate as u128, 1 << vars);
+            let doubled: Vec<Flat<F>> = message.iter().flat_map(|&m| [m, m]).collect();
+
+            assert_eq!(
+                lift(&k.basis, &encode(&message, vars + log_inv_rate)),
+                encode(&doubled, vars + 1 + log_inv_rate),
+                "rate 2^-{log_inv_rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn lift_keeps_subfield_word_in_subfield() {
+        let (vars, log_inv_rate) = (5, 1);
+        let k = kernel(vars + MAX_FOLD_ARITY_LOG + log_inv_rate);
+
+        let mut word: Vec<Flat<F>> = values(0x94_0531, 1 << (vars + log_inv_rate))
+            .iter()
+            .map(|v| Block256::new(v.to_tower().split().0, Block128::ZERO).to_hardware())
+            .collect();
+
+        for depth in 1..=MAX_FOLD_ARITY_LOG {
+            word = lift(&k.basis, &word);
+            assert!(
+                word.iter()
+                    .all(|v| v.to_tower().split().1 == Block128::ZERO),
+                "lift {depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn join_term_equals_fold_of_lifted_word() {
+        let (vars, log_inv_rate) = (6, 1);
+        let k = kernel(vars + log_inv_rate);
+
+        for a in 1..=MAX_FOLD_ARITY_LOG {
+            for depth in 1..=a {
+                let seed = 0x94_0521 + 64 * a as u128 + 4 * depth as u128;
+                let prefold = a - depth;
+
+                let tall = values(seed, 1 << (vars + log_inv_rate));
+                let short = values(seed + 1, 1 << (vars - depth + log_inv_rate));
+                let challenges = values(seed + 2, a);
+                let lambdas = values(seed + 3, 2);
+
+                let mut lifted = short.clone();
+                for _ in 0..depth {
+                    lifted = lift(&k.basis, &lifted);
+                }
+
+                let scaled: Vec<Flat<F>> = tall.iter().map(|&t| lambdas[0] * t).collect();
+                let batch: Vec<Flat<F>> = scaled
+                    .iter()
+                    .zip(&lifted)
+                    .map(|(&t, &s)| t + lambdas[1] * s)
+                    .collect();
+
+                for q in 0..(1 << (vars - a + log_inv_rate)) {
+                    let (lo, hi) = (q << a, (q + 1) << a);
+                    let leaf = &short[q << prefold..(q + 1) << prefold];
+
+                    let joined = k
+                        .fold_coset(leaf, q << prefold, &challenges[a - prefold..a])
+                        .unwrap();
+
+                    assert_eq!(
+                        k.fold_coset(&batch[lo..hi], lo, &challenges).unwrap(),
+                        k.fold_coset(&scaled[lo..hi], lo, &challenges).unwrap()
+                            + lambdas[1] * joined,
+                        "arity 2^{a}, lift {depth}, position {q}"
+                    );
+                }
+            }
+        }
     }
 }
