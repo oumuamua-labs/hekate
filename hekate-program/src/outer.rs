@@ -1721,12 +1721,14 @@ where
     I::IntoIter: Clone,
 {
     let tables = tables.into_iter();
+    let list = pool.layout().list_bound();
 
     let bus_events = bus_draw_events(
         tables
             .clone()
             .map(|(statics, shape)| (statics.specs, 1u64 << shape.num_vars)),
-    );
+    )
+    .saturating_mul(list);
 
     let shapes: Vec<TableShape> = tables.clone().map(|(_, shape)| shape).collect();
 
@@ -1747,6 +1749,10 @@ where
         sumcheck_events = sumcheck_events.max(round as u128);
     }
 
+    let zerocheck_events = zerocheck_events.saturating_mul(list);
+    let skip_events = skip_events.saturating_mul(list);
+    let sumcheck_events = sumcheck_events.saturating_mul(list);
+
     let skip = match skip_events {
         0 => None,
         events => {
@@ -1762,8 +1768,9 @@ where
 
     // The eval batch identity's degree: `2Σ - 1` in η over both
     // claim halves, multilinear in ρ and, on a ring, in r_mix.
-    let batch_events = ((2 * pool.num_sigma()).saturating_sub(1) + pool.rho_vars() + mix) as u128;
-    let round_events = EVAL_SUMCHECK_DEGREE as u128;
+    let batch_events = (((2 * pool.num_sigma()).saturating_sub(1) + pool.rho_vars() + mix) as u128)
+        .saturating_mul(list);
+    let round_events = (EVAL_SUMCHECK_DEGREE as u128).saturating_mul(list);
 
     config.check_draw("bus draw", F::BITS, bus_events)?;
     config.check_draw("zerocheck draw", F::BITS, zerocheck_events)?;
@@ -3511,5 +3518,47 @@ mod tests {
     #[test]
     fn ast_cell_outside_virtual_columns_rejected() {
         assert!(next_row_reads(&rich_ast(), 2).is_err());
+    }
+
+    #[test]
+    fn johnson_pool_charges_list_bound_on_every_draw() {
+        let roots = rich_ast();
+        let specs = one_bus();
+        let table = [(statics(&roots, &specs), shape(10, 3, 3, 1))];
+
+        let plan = RingSwitchPlan::new(&[ColumnType::B128], None, 0, 0, &[true]).unwrap();
+        let pool_at = |num_queries| {
+            let config = Config {
+                num_queries,
+                ..raw_at(config::MIN_PRODUCTION_BITS)
+            };
+
+            FoldPool::new(&[(&plan, 10)], &config).unwrap()
+        };
+
+        let unique = pool_at(309);
+        let johnson = pool_at(262);
+
+        assert_eq!(
+            (unique.layout().list_bound(), johnson.layout().list_bound()),
+            (1, 92)
+        );
+
+        let unique = check_draws(&raw_at(0), &unique, table).unwrap();
+        let johnson = check_draws(&raw_at(0), &johnson, table).unwrap();
+
+        for (unique_bits, johnson_bits) in [
+            (unique.bus, johnson.bus),
+            (unique.zerocheck, johnson.zerocheck),
+            (unique.skip.unwrap(), johnson.skip.unwrap()),
+            (unique.sumcheck, johnson.sumcheck),
+            (unique.eval_batch, johnson.eval_batch),
+            (unique.eval_round, johnson.eval_round),
+        ] {
+            assert!(
+                matches!(unique_bits - johnson_bits, 6 | 7),
+                "{unique_bits} against {johnson_bits}"
+            );
+        }
     }
 }

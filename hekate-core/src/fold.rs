@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 use hekate_crypto::merkle::layer_log;
 use hekate_math::{Block256, TowerField};
 
-use crate::config::{self, Config, ldt_bits};
+use crate::config::{
+    self, Config, johnson_factor_log2, johnson_list_bound, johnson_query_bits, unique_query_bits,
+};
 use crate::errors;
 
 const MASKS: usize = 2;
@@ -129,6 +131,18 @@ pub enum TreeKind {
     Round(usize),
 }
 
+/// Selects the bounds a fold layout's security estimate uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Radius {
+    /// Estimates at unique decoding, where one
+    /// codeword lies within `(1 − ρ)/2` of any word.
+    Unique,
+
+    /// Estimates at the Johnson radius, where a query proves more
+    /// bits and every draw pays for the codewords near a word.
+    Johnson,
+}
+
 /// One Merkle tree of the fold and the geometry its opening follows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FoldTree {
@@ -178,6 +192,9 @@ pub struct FoldLayout {
 
     /// Every tree in commitment and opening order.
     trees: Vec<FoldTree>,
+
+    /// The radius whose bounds the estimate uses.
+    radius: Radius,
 }
 
 impl FoldLayout {
@@ -305,7 +322,7 @@ impl FoldLayout {
             ));
         }
 
-        let layout = Self {
+        let mut layout = Self {
             num_vars,
             stop_vars,
             arity_log,
@@ -313,22 +330,24 @@ impl FoldLayout {
             num_queries,
             polys,
             trees,
+            radius: Radius::Unique,
         };
 
-        let terms = [
-            ("fold queries", layout.query_bits()),
-            ("fold proximity", layout.proximity_bits()),
-        ];
+        if layout.weakest_term().1 < config.min_security_bits
+            && layout.johnson_proximity_bits() >= config.min_security_bits
+        {
+            layout.radius = Radius::Johnson;
+        }
 
-        for (round, bits) in terms {
-            if bits < config.min_security_bits {
-                return Err(config::Error::SecurityTooLow {
-                    round,
-                    estimated_bits: bits,
-                    min_bits: config.min_security_bits,
-                }
-                .into());
+        let (round, estimated_bits) = layout.weakest_term();
+
+        if estimated_bits < config.min_security_bits {
+            return Err(config::Error::SecurityTooLow {
+                round,
+                estimated_bits,
+                min_bits: config.min_security_bits,
             }
+            .into());
         }
 
         Ok(layout)
@@ -374,10 +393,24 @@ impl FoldLayout {
         &self.trees
     }
 
+    /// Returns the radius the security estimate runs at.
+    pub fn radius(&self) -> Radius {
+        self.radius
+    }
+
+    /// Returns how many codewords can lie near a committed
+    /// word at the layout's radius: 1 at unique decoding.
+    pub fn list_bound(&self) -> u128 {
+        match self.radius {
+            Radius::Unique => 1,
+            Radius::Johnson => johnson_list_bound(self.log_inv_rate),
+        }
+    }
+
     /// Returns the fold's security estimate, the
     /// weaker of its query and proximity terms.
     pub fn estimated_security_bits(&self) -> usize {
-        self.query_bits().min(self.proximity_bits())
+        self.weakest_term().1
     }
 
     /// Returns an upper bound on the fold's proof bytes
@@ -408,17 +441,55 @@ impl FoldLayout {
     }
 
     /// Returns the query term, `⌊t · log2(2 / (1 + ρ))⌋` (DP24 Prop 4.24).
-    fn query_bits(&self) -> usize {
-        ldt_bits(self.num_queries, 1, 1 << self.log_inv_rate)
+    fn unique_query_bits(&self) -> usize {
+        unique_query_bits(self.num_queries, self.log_inv_rate)
     }
 
     /// Returns the proximity term, `256 − ⌈log2((|K| + 2) · |D_ℓ|)⌉`:
     /// `|K|` for the `λ` curve (BCIKS20 Thm 1.5), one for the folds
     /// (DP24 Prop 4.23) and one the bound does not need.
-    fn proximity_bits(&self) -> usize {
+    fn unique_proximity_bits(&self) -> usize {
         let domain_vars = self.num_vars + self.log_inv_rate;
 
         Block256::BITS.saturating_sub(ceil_log2(self.polys.len() + 2) + domain_vars)
+    }
+
+    /// Returns the Johnson query term,
+    /// `⌊t · (ω/2 − log2(1 + 1/(2m)))⌋` (ePrint 2024/1571 Thm 1).
+    fn johnson_query_bits(&self) -> usize {
+        johnson_query_bits(self.num_queries, self.log_inv_rate)
+    }
+
+    /// Returns the Johnson proximity term: 256 bits less
+    /// `⌈log2(|K| + 2)⌉`, `2 · log2 |D_ℓ|` and the factor
+    /// [`johnson_factor_log2`] (ePrint 2024/1571 Thm 1).
+    fn johnson_proximity_bits(&self) -> usize {
+        let domain_vars = self.num_vars + self.log_inv_rate;
+
+        Block256::BITS.saturating_sub(
+            ceil_log2(self.polys.len() + 2)
+                + johnson_factor_log2(self.log_inv_rate)
+                + 2 * domain_vars,
+        )
+    }
+
+    /// Returns the fold's weakest term at its radius, with its label.
+    fn weakest_term(&self) -> (&'static str, usize) {
+        let [queries, proximity] = match self.radius {
+            Radius::Unique => [
+                ("fold queries", self.unique_query_bits()),
+                ("fold proximity", self.unique_proximity_bits()),
+            ],
+            Radius::Johnson => [
+                ("fold queries (Johnson)", self.johnson_query_bits()),
+                ("fold proximity (Johnson)", self.johnson_proximity_bits()),
+            ],
+        };
+
+        match queries.1 <= proximity.1 {
+            true => queries,
+            false => proximity,
+        }
     }
 }
 
@@ -491,7 +562,7 @@ fn ceil_log2(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CodeRate, MAX_FOLD_ARITY_LOG};
+    use crate::config::{CodeRate, MAX_FOLD_ARITY_LOG, MIN_PRODUCTION_BITS};
 
     fn config(arity_log: usize, early_stop_vars: usize, zero_knowledge: bool) -> Config {
         Config {
@@ -759,7 +830,7 @@ mod tests {
 
             FoldLayout::new(&config, &[trace(20, 0)])
                 .unwrap()
-                .query_bits()
+                .unique_query_bits()
         };
 
         assert!(bits(CodeRate::Half, 241) >= 100);
@@ -773,7 +844,7 @@ mod tests {
         let shapes = vec![trace(29, 0); 64];
         let layout = FoldLayout::new(&config(2, 10, false), &shapes).unwrap();
 
-        assert_eq!(layout.proximity_bits(), 256 - 7 - 30);
+        assert_eq!(layout.unique_proximity_bits(), 256 - 7 - 30);
     }
 
     #[test]
@@ -787,7 +858,7 @@ mod tests {
         assert!(matches!(
             rejection(&weak, &[trace(20, 0)]),
             config::Error::SecurityTooLow {
-                round: "fold queries",
+                round: "fold queries (Johnson)",
                 ..
             }
         ));
@@ -926,6 +997,146 @@ mod tests {
             config::Error::PoolAboveWord {
                 num_vars: wide,
                 log_inv_rate: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn radius_falls_back_to_johnson_below_unique_floor() {
+        let at = |num_queries| Config {
+            num_queries,
+            min_security_bits: MIN_PRODUCTION_BITS,
+            ..config(4, 11, false)
+        };
+
+        let unique = FoldLayout::new(&at(309), &[trace(20, 0)]).unwrap();
+        let johnson = FoldLayout::new(&at(262), &[trace(20, 0)]).unwrap();
+
+        assert_eq!((unique.radius(), unique.list_bound()), (Radius::Unique, 1));
+        assert_eq!(
+            (johnson.radius(), johnson.list_bound()),
+            (Radius::Johnson, 92)
+        );
+        assert_eq!(johnson.estimated_security_bits(), MIN_PRODUCTION_BITS);
+
+        assert_eq!(
+            rejection(&at(261), &[trace(20, 0)]),
+            config::Error::SecurityTooLow {
+                round: "fold queries (Johnson)",
+                estimated_bits: MIN_PRODUCTION_BITS - 1,
+                min_bits: MIN_PRODUCTION_BITS,
+            }
+        );
+    }
+
+    #[test]
+    fn johnson_proximity_term_charges_batch_and_squared_domain() {
+        let shapes = vec![trace(29, 0); 64];
+        let layout = FoldLayout::new(&config(2, 10, false), &shapes).unwrap();
+
+        assert_eq!(layout.johnson_proximity_bits(), 256 - 7 - 42 - 2 * 30);
+    }
+
+    #[test]
+    fn johnson_pools_admitted_keep_each_note_term_below_floor() {
+        let (multiplicity, polys) = (64.0f64, 64);
+        let floor = 2f64.powi(-(MIN_PRODUCTION_BITS as i32));
+
+        for (rate, note_edge) in [(CodeRate::Half, 38), (CodeRate::Quarter, 37)] {
+            let prod = Config {
+                zero_knowledge: false,
+                ..Config::prod_at(rate)
+            };
+
+            let omega = rate.log_inv_rate() as f64;
+            let kappa = (multiplicity + 0.5).powi(7) * 2f64.powf(1.5 * omega) / 3.0;
+            let per_query = (1.0 + 1.0 / (2.0 * multiplicity)) * 2f64.powf(-omega / 2.0);
+
+            let fold_term = |vars: usize| {
+                let domain = 2f64.powf(vars as f64 + omega);
+
+                (polys + 1) as f64 * kappa * domain * domain * 2f64.powi(-256)
+            };
+
+            assert!(per_query.powf(prod.num_queries as f64) < floor);
+
+            for vars in 20..=42 {
+                let admitted = matches!(
+                    FoldLayout::new(&prod, &vec![trace(vars, 0); polys]),
+                    Ok(layout) if layout.radius() == Radius::Johnson
+                );
+
+                assert!(
+                    !admitted || fold_term(vars) < floor,
+                    "rate 1/{}, {vars} vars",
+                    rate.inv_rate()
+                );
+            }
+
+            assert_eq!(
+                (20..=42).take_while(|&vars| fold_term(vars) < floor).last(),
+                Some(note_edge)
+            );
+        }
+    }
+
+    #[test]
+    fn pool_past_johnson_proximity_needs_unique_count() {
+        let prod = Config {
+            zero_knowledge: false,
+            ..Config::prod()
+        };
+
+        assert_eq!(
+            rejection(&prod, &[trace(42, 0)]),
+            config::Error::SecurityTooLow {
+                round: "fold queries",
+                estimated_bits: unique_query_bits(prod.num_queries, 1),
+                min_bits: MIN_PRODUCTION_BITS,
+            }
+        );
+
+        let unique = Config {
+            num_queries: 309,
+            ..prod
+        };
+
+        let layout = FoldLayout::new(&unique, &[trace(42, 0)]).unwrap();
+
+        assert_eq!(layout.radius(), Radius::Unique);
+        assert_eq!(layout.johnson_proximity_bits(), 256 - 2 - 42 - 2 * 43);
+    }
+
+    #[test]
+    fn fold_at_220_bits_stays_at_unique_decoding() {
+        let strict = Config {
+            zero_knowledge: false,
+            ..Config::at_bits(220, CodeRate::Half)
+        };
+
+        let layout = FoldLayout::new(&strict, &[trace(20, 0)]).unwrap();
+
+        assert_eq!((layout.radius(), layout.list_bound()), (Radius::Unique, 1));
+
+        let short = Config {
+            num_queries: 500,
+            ..strict.clone()
+        };
+
+        assert_eq!(
+            rejection(&short, &[trace(20, 0)]),
+            config::Error::SecurityTooLow {
+                round: "fold queries",
+                estimated_bits: unique_query_bits(short.num_queries, 1),
+                min_bits: 220,
+            }
+        );
+        assert_eq!(
+            rejection(&strict, &[trace(34, 0)]),
+            config::Error::SecurityTooLow {
+                round: "fold proximity",
+                estimated_bits: 256 - 2 - 35,
+                min_bits: 220,
             }
         );
     }

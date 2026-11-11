@@ -476,7 +476,7 @@ fn quarter_rate_proof_verifies_at_derived_count() {
 
     let quarter = Config::prod_at(CodeRate::Quarter);
 
-    assert_eq!(quarter.num_queries, 189);
+    assert_eq!(quarter.num_queries, 130);
 
     let proof = prove(
         b"FibAir_Quarter",

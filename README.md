@@ -1,7 +1,9 @@
 # Hekate ZK Engine
 
-[![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](./LICENSE)
+[![Quick Start](https://img.shields.io/badge/tutorial-quick%20start-informational)](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program)
+[![Hekate overview](https://img.shields.io/badge/overview-hekate-informational)](https://oumuamua.dev/hekate)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
+[![project chat](https://img.shields.io/badge/telegram-join_chat-brightgreen.svg)](https://t.me/hekatezk)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
