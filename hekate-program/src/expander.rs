@@ -1438,7 +1438,7 @@ fn mix_vars<F: TowerField>(field: ColumnType) -> usize {
 mod tests {
     use super::*;
     use hekate_core::trace::TraceBuilder;
-    use hekate_math::{Block128, TowerField};
+    use hekate_math::{Block128, Block256, TowerField};
 
     fn keccak_expander() -> VirtualExpander {
         VirtualExpander::new()
@@ -1530,6 +1530,87 @@ mod tests {
         match width {
             BITS => x,
             _ => (x >> (j * width)) & ((1u128 << width) - 1),
+        }
+    }
+
+    fn subfield_batch_binds<F: TowerField + From<u128>>(
+        next: &mut impl FnMut() -> Block128,
+        element: impl Fn(Block128, Block128) -> F,
+        bit: impl Fn(F, usize) -> bool,
+    ) {
+        let rows = 8;
+        let r_mix: Vec<F> = (0..mix_vars::<F>(ColumnType::Bit))
+            .map(|_| element(next(), next()))
+            .collect();
+
+        let pi = |index: usize| F::from(1u128 << index);
+
+        for field in [
+            ColumnType::Bit,
+            ColumnType::B8,
+            ColumnType::B16,
+            ColumnType::B32,
+            ColumnType::B64,
+        ] {
+            let width = field_bits(field);
+            let mask = (1u128 << width) - 1;
+            let members = BITS / width - 1;
+            let coeffs = field_coeffs(field, &r_mix);
+
+            let phi = |x: F| {
+                coeffs
+                    .iter()
+                    .enumerate()
+                    .filter(|&(u, _)| bit(x, u))
+                    .fold(F::ZERO, |acc, (_, &m)| acc + m)
+            };
+
+            let weights: Vec<F> = (0..rows).map(|_| element(next(), next())).collect();
+            let columns: Vec<Vec<F>> = (0..members)
+                .map(|_| (0..rows).map(|_| F::from(next().0 & mask)).collect())
+                .collect();
+
+            let block: Vec<F> = (0..rows)
+                .map(|x| {
+                    columns
+                        .iter()
+                        .enumerate()
+                        .fold(F::ZERO, |acc, (m, column)| acc + pi(m * width) * column[x])
+                })
+                .collect();
+
+            let target = columns
+                .iter()
+                .enumerate()
+                .fold(F::ZERO, |acc, (m, column)| {
+                    let claim = weights
+                        .iter()
+                        .zip(column)
+                        .fold(F::ZERO, |acc, (&w, &c)| acc + w * c);
+
+                    acc + pi(m * width) * phi(claim)
+                });
+
+            let batched = |block: &[F]| {
+                weights
+                    .iter()
+                    .zip(block)
+                    .fold(F::ZERO, |acc, (&w, &f)| acc + phi(w) * f)
+            };
+
+            assert_eq!(batched(&block), target, "{field:?}, {} bits", F::BITS);
+
+            let padded: Vec<F> = block
+                .iter()
+                .map(|&f| f + pi(members * width) * F::from((next().0 & mask) | 1))
+                .collect();
+
+            assert_ne!(
+                batched(&padded),
+                target,
+                "{field:?} padded, {} bits",
+                F::BITS
+            );
         }
     }
 
@@ -2220,5 +2301,44 @@ mod tests {
     #[test]
     fn next_reads_not_covering_virtual_columns_rejected() {
         assert!(RingSwitchPlan::new(&[ColumnType::B32; 3], None, 0, 0, &[true; 2]).is_err());
+    }
+
+    #[test]
+    fn tower_bits_below_width_form_subfield() {
+        let mut next = xorshift(0x5eed_0601);
+        for width in [8, 16, 32, 64] {
+            let mask = (1u128 << width) - 1;
+            for _ in 0..64 {
+                let product = Block128(next().0 & mask) * Block128(next().0 & mask);
+                assert_eq!(product.0 & !mask, 0, "width {width}");
+            }
+        }
+
+        let pi = |bit: usize| match bit < BITS {
+            true => Block256::new(Block128(1 << bit), Block128::ZERO),
+            false => Block256::new(Block128::ZERO, Block128(1 << (bit - BITS))),
+        };
+
+        for width in [8, 16, 32, 64, 128] {
+            for v in 0..Block256::BITS / width {
+                for j in 0..width {
+                    assert_eq!(
+                        pi(v * width + j),
+                        pi(v * width) * pi(j),
+                        "width {width}, coordinate {v}, bit {j}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subfield_batch_binds_block_to_member_claims() {
+        let mut next = xorshift(0x5eed_0701);
+
+        subfield_batch_binds(&mut next, |lo, _| lo, |x: Block128, u| (x.0 >> u) & 1 == 1);
+        subfield_batch_binds(&mut next, Block256::new, |x: Block256, u| {
+            (x.0[u / BITS] >> (u % BITS)) & 1 == 1
+        });
     }
 }
