@@ -1038,6 +1038,49 @@ mod tests {
     }
 
     #[test]
+    fn johnson_pools_admitted_keep_each_note_term_below_floor() {
+        let (multiplicity, polys) = (64.0f64, 64);
+        let floor = 2f64.powi(-(MIN_PRODUCTION_BITS as i32));
+
+        for (rate, note_edge) in [(CodeRate::Half, 38), (CodeRate::Quarter, 37)] {
+            let prod = Config {
+                zero_knowledge: false,
+                ..Config::prod_at(rate)
+            };
+
+            let omega = rate.log_inv_rate() as f64;
+            let kappa = (multiplicity + 0.5).powi(7) * 2f64.powf(1.5 * omega) / 3.0;
+            let per_query = (1.0 + 1.0 / (2.0 * multiplicity)) * 2f64.powf(-omega / 2.0);
+
+            let fold_term = |vars: usize| {
+                let domain = 2f64.powf(vars as f64 + omega);
+
+                (polys + 1) as f64 * kappa * domain * domain * 2f64.powi(-256)
+            };
+
+            assert!(per_query.powf(prod.num_queries as f64) < floor);
+
+            for vars in 20..=42 {
+                let admitted = matches!(
+                    FoldLayout::new(&prod, &vec![trace(vars, 0); polys]),
+                    Ok(layout) if layout.radius() == Radius::Johnson
+                );
+
+                assert!(
+                    !admitted || fold_term(vars) < floor,
+                    "rate 1/{}, {vars} vars",
+                    rate.inv_rate()
+                );
+            }
+
+            assert_eq!(
+                (20..=42).take_while(|&vars| fold_term(vars) < floor).last(),
+                Some(note_edge)
+            );
+        }
+    }
+
+    #[test]
     fn pool_past_johnson_proximity_needs_unique_count() {
         let prod = Config {
             zero_knowledge: false,

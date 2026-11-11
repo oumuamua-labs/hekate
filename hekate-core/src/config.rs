@@ -634,4 +634,57 @@ mod tests {
             assert_eq!(johnson_list_bound(log_inv_rate), list as u128);
         }
     }
+
+    #[test]
+    fn johnson_list_bound_covers_counting_bound() {
+        let m = JOHNSON_MULTIPLICITY as f64;
+
+        for log_inv_rate in [1, 2] {
+            let rho = 0.5f64.powi(log_inv_rate as i32);
+            let alpha = (1.0 + 1.0 / (2.0 * m)) * rho.sqrt();
+            let counting = (alpha - rho) / (alpha * alpha - rho);
+
+            assert!(
+                counting < johnson_list_bound(log_inv_rate) as f64,
+                "rate 1/{}: {counting}",
+                1 << log_inv_rate
+            );
+        }
+    }
+
+    #[test]
+    fn johnson_binding_error_clears_floor_through_36_vars() {
+        let polys = 64.0f64;
+        let m = JOHNSON_MULTIPLICITY as f64;
+        let floor = 2f64.powi(-(MIN_PRODUCTION_BITS as i32));
+
+        for rate in [CodeRate::Half, CodeRate::Quarter] {
+            let log_inv_rate = rate.log_inv_rate() as usize;
+            let omega = log_inv_rate as f64;
+            let queries = Config::prod_at(rate).num_queries as f64;
+
+            let kappa = (m + 0.5).powi(7) * 2f64.powf(1.5 * omega) / 3.0;
+            let nu = johnson_list_bound(log_inv_rate) as f64;
+            let per_query = (1.0 + 1.0 / (2.0 * m)) * 2f64.powf(-omega / 2.0);
+
+            let error = |vars: f64| {
+                let domain = 2f64.powf(vars + omega);
+                let degrees = (polys + 1.0) * kappa * domain * domain
+                    + nu * (2.0 * polys - 1.0 + vars)
+                    + 2.0 * vars * nu;
+
+                degrees * 2f64.powi(-256) + per_query.powf(queries)
+            };
+
+            for vars in 1..=36 {
+                assert!(
+                    error(vars as f64) < floor,
+                    "rate 1/{}, {vars} vars",
+                    rate.inv_rate()
+                );
+            }
+
+            assert!(error(37.0) >= floor, "rate 1/{}", rate.inv_rate());
+        }
+    }
 }
