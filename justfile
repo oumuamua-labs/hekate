@@ -11,6 +11,7 @@ publish-all:
         hekate-verifier
         hekate-sdk
         hekate-prover-sys
+        hekate-testkit
         hekate-scribble
         hekate-gadgets
         hekate-keccak
@@ -47,7 +48,7 @@ publish-all:
         fi
 
         case "$c" in
-            hekate-prover-sys)
+            hekate-prover-sys|hekate-testkit)
                 cargo publish -p "$c" --features ct ;;
             *)
                 cargo publish -p "$c" ;;

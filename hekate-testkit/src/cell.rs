@@ -9,6 +9,7 @@ use hekate_math::{Bit, Block8, Block16, Block32, Block64, HardwareField, TowerFi
 
 macro_rules! cell_access {
     ($variant:ident, $block:ident, $int:ty, $at:ident, $set:ident, $xor:ident, $swap:ident) => {
+        /// Reads cell `row` of `col` in the tower basis.
         pub fn $at(trace: &ColumnTrace, col: usize, row: usize) -> $int {
             match &trace.columns[col] {
                 TraceColumn::$variant(cells) => cells[row].to_tower().0,
@@ -16,6 +17,7 @@ macro_rules! cell_access {
             }
         }
 
+        /// Writes `value` to cell `row` in the tower basis.
         pub fn $set(trace: &mut ColumnTrace, col: usize, row: usize, value: $int) {
             match &mut trace.columns[col] {
                 TraceColumn::$variant(cells) => cells[row] = $block(value).to_hardware(),
@@ -23,6 +25,7 @@ macro_rules! cell_access {
             }
         }
 
+        /// Flips the tower-basis bits of `mask` in cell `row`.
         pub fn $xor(trace: &mut ColumnTrace, col: usize, row: usize, mask: $int) {
             let value = $at(trace, col, row);
             $set(trace, col, row, value ^ mask);

@@ -15,20 +15,39 @@ pub enum Check {
     FixedColumn,
 }
 
+/// The violations preflight must find in a forged trace.
+/// Empty row, label and cell lists skip their checks.
 #[derive(Clone, Copy)]
 pub struct Fault<'a> {
     pub constraint_tables: &'a [TableId],
+
+    /// Every failing constraint as `(table, row, label)`.
     pub constraint_rows: &'a [(TableId, usize, Option<&'a str>)],
+
+    /// The labels of the failing constraints.
     pub constraint_labels: &'a [(TableId, &'a str)],
+
     pub boundary_columns: &'a [(TableId, usize)],
+
+    /// Fixed columns with a violated pin, outside `pin_tables`.
     pub pin_columns: &'a [(TableId, usize)],
+
+    /// Every violated pin as `(table, column, row)`.
     pub pin_cells: &'a [(TableId, usize, usize)],
+
+    /// Tables with violated pins whose columns go unchecked.
     pub pin_tables: &'a [TableId],
+
     pub buses: &'a [&'a str],
+
+    /// The check that rejects the forged table, the sumcheck
+    /// when unset. Required when that table has violated pins.
     pub first_check: Option<Check>,
 }
 
 impl<'a> Fault<'a> {
+    /// The base of every fault, built as
+    /// `Fault { field: value, ..Fault::NONE }`.
     pub const NONE: Fault<'a> = Fault {
         constraint_tables: &[],
         constraint_rows: &[],
@@ -41,6 +60,7 @@ impl<'a> Fault<'a> {
         first_check: None,
     };
 
+    /// Asserts that `report` holds exactly the violations of this fault.
     pub fn assert_sole(self, report: &PreflightReport<Block256>) {
         let tables: BTreeSet<TableId> = report
             .constraint_violations
@@ -123,6 +143,9 @@ impl<'a> Fault<'a> {
         assert_eq!(buses, self.buses.iter().copied().collect(), "{report}");
     }
 
+    /// The rejection the verifier returns: the outer linear
+    /// test under zero knowledge, else the zerocheck of the
+    /// first failing table, chiplets first, else the bus sum.
     pub fn rejection(
         self,
         air: &impl Program<Block256>,

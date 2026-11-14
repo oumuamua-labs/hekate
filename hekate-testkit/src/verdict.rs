@@ -21,6 +21,8 @@ const SEED: [u8; 32] = [0x5A; 32];
 
 pub type Statement<'a> = (&'a ProgramInstance<Block256>, &'a ProgramWitness<Block256>);
 
+/// Asserts that `statement` passes preflight cleanly and
+/// that its proofs verify with and without zero knowledge.
 pub fn assert_verifies(
     air: &(impl Program<Block256> + Sync),
     statement: Statement<'_>,
@@ -37,6 +39,9 @@ pub fn assert_verifies(
     }
 }
 
+/// Asserts that preflight finds exactly `fault` in `forged`,
+/// and that in both proof modes `honest` verifies while
+/// `forged` is rejected with the rejection `fault` predicts.
 pub fn assert_rejected(
     air: &(impl Program<Block256> + Sync),
     honest: Statement<'_>,
@@ -62,6 +67,8 @@ pub fn assert_rejected(
     }
 }
 
+/// Proves `statement` under `config` and returns the verifier's
+/// verdict. Panics if the prover refuses the statement.
 pub fn verdict(
     air: &(impl Program<Block256> + Sync),
     (instance, witness): Statement<'_>,
@@ -73,6 +80,8 @@ pub fn verdict(
     verify(air, instance, config, &proof, LABEL)
 }
 
+/// Verifies `proof` of `instance` against the program id that
+/// `air` computes. Panics if that id cannot be computed.
 pub fn verify(
     air: &(impl Program<Block256> + Sync),
     instance: &ProgramInstance<Block256>,

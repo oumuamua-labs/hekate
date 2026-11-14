@@ -7,11 +7,13 @@ license.workspace = true
 homepage.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Verdict oracles and trace-cell helpers shared by the Hekate test suites."
-publish = false
+description = "Test oracles for Hekate programs: honest statements must verify and forged traces must fail for the expected reason."
+keywords = ["zk", "testing", "hekate", "verifier", "oracle"]
+categories = ["cryptography", "development-tools::testing"]
+readme = "README.md"
 
 [features]
-default = ["blake3", "public"]
+default = ["blake3"]
 blake3 = [
     "hekate-core/blake3",
     "hekate-sdk/blake3",
