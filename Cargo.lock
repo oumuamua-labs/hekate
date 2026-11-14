@@ -787,7 +787,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hekate"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "bincode",
  "clap",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-aes"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-core"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "criterion",
  "dhat",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-crypto"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-gadgets"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-keccak"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "criterion",
  "hekate-core",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-pqc"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-program"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "hashbrown",
  "hekate-core",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-prover-sys"
-version = "0.38.1"
+version = "0.39.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-rsa"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-scribble"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "hekate-core",
  "hekate-gadgets",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-sdk"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "flatbuffers",
  "hashbrown",
@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-sha2"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-testkit"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "hekate-verifier"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "hekate-core",
  "hekate-crypto",
@@ -1947,7 +1947,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
