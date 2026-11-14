@@ -138,7 +138,7 @@ impl RamChiplet {
         RamColumns::NUM_COLUMNS
     }
 
-    /// Physical layout for Brakedown commitment.
+    /// The committed columns, before virtual expansion.
     pub fn build_physical_layout() -> Vec<ColumnType> {
         let mut layout = Vec::with_capacity(NUM_PHYSICAL_COLUMNS);
 
