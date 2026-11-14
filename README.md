@@ -11,10 +11,15 @@ Hekate is a general-purpose zero-knowledge proof system for proving where the da
 the edge. You write your ZK program in Rust as tables and AIR constraints, and Hekate takes care of the field, the
 commitment and zero knowledge. The default configuration gives 128 bits of security.
 
+The engine is built from binary tower field arithmetic machine-checked in Verus, BaseFold commitments, Sumcheck and
+logUp buses between tables and chiplets. It is not a VM, so you pay only for what you prove. Every challenge is drawn
+from GF(2^256), which lets the fold queries work at the Johnson radius for the default 128 bits; for a target the
+Johnson bound cannot reach, such as 220 bits, the engine switches to the unique decoding radius.
+
 Learn more: [oumuamua.dev/hekate](https://oumuamua.dev/hekate)
 
 > [!IMPORTANT]  
-> Hekate's open code is AGPL-3.0-only; its signed prover ships as free binaries for macOS (Apple Silicon),
+> Hekate's open code is AGPL-3.0; its signed prover ships as free binaries for macOS (Apple Silicon),
 > Linux (ARM64, glibc), iOS (ARM64, device and simulator), and Android (ARM64).
 > Experiments, research, personal projects and products released under the AGPL are free.
 > A commercial license lets you ship closed-source products, or open-source products under a license of your
@@ -28,7 +33,15 @@ Learn more: [oumuamua.dev/hekate](https://oumuamua.dev/hekate)
 
 > [!WARNING]  
 > This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
-> without notice. Do not deploy to mainnet.
+> without notice.
+
+### Hardware Support
+
+| Architecture | Status     | Instructions                          |
+|:-------------|:-----------|:--------------------------------------|
+| aarch64      | Production | PMULL, NEON                           |
+| x86_64       | Fallback   | Software fallback (PCLMULQDQ roadmap) |
+| WASM         | Planned    | Software multiply                     |
 
 ---
 
@@ -66,7 +79,7 @@ The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in r
   secrets
 - [Verifier Logic](https://oumuamua.dev/hekate/docs/basics/verifier-logic), pinning the program id, one proof, a
   prepared program, a batch
-- [LogUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses), a multiset check as a sum of fractions, a bus of
+- [logUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses), a multiset check as a sum of fractions, a bus of
   your own
 - [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), the chiplet set, calling a
   chiplet, a chiplet of your own
@@ -79,37 +92,33 @@ The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in r
 
 ---
 
-## The Satellites
+## Crates
 
-Hekate is not one crate. The prover is the engine; the math core, hardware chiplets, mobile toolchain,
-and fuzzer ship as independent crates you compose as needed.
+Hekate is not one crate. The prover is the engine; the math and protocol core, chiplets, mobile toolchain,
+the fuzzer and the test oracles ship as independent crates you compose as
+needed. [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture#the-crates)
+draws all of them as one stack, and each chiplet has a page at
+[oumuamua.dev/primitives](https://oumuamua.dev/primitives) stating what it proves, which values a program can
+publish and what stays outside the proof.
 
 | Crate                                                                                      | Role                                                                                                        |
 |:-------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------------------|
 | [`hekate-math`](https://github.com/oumuamua-labs/hekate-math)                              | Binary tower field arithmetic, constant-time, PMULL on aarch64. The mathematical core.                      |
+| [`hekate-crypto`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-crypto)         | Hash functions (BLAKE3, SHA-256, SHA3-256, SHAKE256), Merkle trees and the Fiat-Shamir transcript.          |
+| [`hekate-core`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-core)             | `Config` and its security estimate, execution traces and proof types.                                       |
+| [`hekate-program`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-program)       | Circuit DSL: columns, constraints, fixed columns, public inputs, chiplets, logUp buses and program ids.     |
+| [`hekate-verifier`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-verifier)     | Verifier in pure Rust. Runs no prover code and names the first failing check in a typed `Rejection`.        |
+| [`hekate-sdk`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-sdk)               | Preflight diagnostics, the proof wire format and the bundle the prover binary reads.                        |
 | [`hekate-prover-sys`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-prover-sys) | Open FFI shim. Links the signed prover cdylib over a stable C ABI; the only crate that can call the prover. |
 | [`hekate-gadgets`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-gadgets)       | Base AIR chiplets: 32- and 64-bit integer arithmetic, RAM, ROM and modular exponentiation.                  |
-| [`hekate-keccak`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-keccak)         | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~16x memory savings.                            |
+| [`hekate-keccak`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-keccak)         | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~8x memory savings.                             |
 | [`hekate-aes`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-aes)               | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
 | [`hekate-sha2`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-sha2)             | SHA-256 compression chiplet (FIPS 180-4). Bit-expanded B32 columns, degree 2, 1-16 rounds per row.          |
 | [`hekate-rsa`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-rsa)               | RSA-2048 PKCS#1 v1.5 signature statements (RFC 8017) over the modexp and SHA-256 chiplets.                  |
 | [`hekate-pqc`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-pqc)               | ML-KEM KeyGen, Encaps and Decaps and ML-DSA verification (FIPS 203 / 204) over NTT, Sampler, Codec tables.  |
 | [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile)                          | Wraps a Rust prover into a signed iOS `.xcframework` / Android `.aar` with a typed Swift / Kotlin API.      |
 | [`hekate-scribble`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-scribble)     | Trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.                   |
-
-The workspace also holds `hekate-core`, `hekate-crypto`, `hekate-program`, `hekate-verifier` and
-`hekate-sdk`. [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture#the-crates)
-draws all of them as one stack, and each chiplet has a page at
-[oumuamua.dev/primitives](https://oumuamua.dev/primitives) stating what it proves, which values a program can
-publish and what stays outside the proof.
-
-### Hardware Support
-
-| Architecture | Status     | Instructions                          |
-|:-------------|:-----------|:--------------------------------------|
-| aarch64      | Production | PMULL, NEON                           |
-| x86_64       | Fallback   | Software fallback (PCLMULQDQ roadmap) |
-| WASM         | Planned    | Software multiply                     |
+| [`hekate-testkit`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-testkit)       | Test oracles. Honest statements must verify, and forged traces must fail with the `Rejection` you predict.  |
 
 ---
 
