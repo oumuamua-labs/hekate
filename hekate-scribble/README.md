@@ -22,18 +22,19 @@ cargo add --dev hekate-scribble hekate-math hekate-program
 ```
 
 ```rust
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::{Program, ProgramInstance, ProgramWitness};
 use hekate_scribble::{
-    Mutation, ScribbleConfig, Target, Verdict, assert_all_caught_all_targets,
-    check_single_mutation,
+    Mutation, ScribbleConfig, Target, Verdict, assert_all_caught_all_targets, check_single_mutation,
 };
 
-type F = Block128;
+type F = Block256;
 
 fn fuzz<P: Program<F>>(program: &P, instance: &ProgramInstance<F>, witness: &ProgramWitness<F>) {
+    // 512 random tampers on the main trace and 512 on each chiplet trace
     let config = ScribbleConfig::default().cases(512);
 
+    // Panics with the smallest tamper preflight misses
     assert_all_caught_all_targets(program, instance, witness, config);
 }
 
@@ -42,12 +43,14 @@ fn swapped_rows_are_caught<P: Program<F>>(
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F>,
 ) -> bool {
+    // One tamper you choose: rows 0 and 1 of the main trace swapped
     let swap = Mutation::SwapRows {
         target: Target::Main,
         row_a: 0,
         row_b: 1,
     };
 
+    // Caught: preflight reports a failing check for the tamper
     matches!(
         check_single_mutation(program, instance, witness, &swap),
         Verdict::Caught(_)
@@ -55,10 +58,10 @@ fn swapped_rows_are_caught<P: Program<F>>(
 }
 ```
 
-Call both from tests with a witness your generator built. `fuzz` runs 512 random tampers on the main trace and 512
-on each chiplet trace; a tamper that changes no cell, or a selector flip only a fixed column catches, is skipped,
-not counted. `check_single_mutation` runs one tamper you choose and returns `Verdict::Caught` with the report of the
-checks that caught it, `Escaped` for a tamper preflight misses, or `Unchanged` for one that changes no cell.
+Call both from tests with a witness your generator built. A random tamper that changes no cell, or a selector flip
+only a fixed column catches, is skipped, not counted. `check_single_mutation` returns `Verdict::Caught` with the
+report of the checks that caught it, `Escaped` for a tamper preflight misses, or `Unchanged` for one that changes no
+cell.
 
 | Tampers                | Kinds                                                                                                                            |
 |:-----------------------|:---------------------------------------------------------------------------------------------------------------------------------|

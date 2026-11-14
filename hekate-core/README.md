@@ -17,8 +17,7 @@ proof parameters, and `InnerProof` is what the prover returns.
 cargo add hekate-core hekate-math
 ```
 
-The trace of a XOR checksum over private words. Row `i` holds word `i` and the checksum of the words before it, and
-the row after the last word holds the result:
+The trace of a XOR checksum over private words:
 
 ```rust
 use hekate_core::errors;
@@ -32,26 +31,33 @@ const ACTIVE: usize = 2;
 const LAYOUT: [ColumnType; 3] = [ColumnType::B32, ColumnType::B32, ColumnType::Bit];
 
 fn generate_trace(words: &[u32], rows: usize) -> errors::Result<ColumnTrace> {
+    // The table has 2^num_vars rows: rows is a power of two above words.len()
     let num_vars = rows.trailing_zeros() as usize;
+
+    // new_secret zeroizes the columns when the trace drops
     let mut tb = TraceBuilder::new_secret(&LAYOUT, num_vars)?;
     let mut acc = 0;
 
     for (row, &word) in words.iter().enumerate() {
         tb.set_b32(WORD, row, Block32::from(word))?;
+
+        // ACC holds the XOR of the words before this row
         tb.set_b32(ACC, row, Block32::from(acc))?;
 
         acc ^= word;
     }
 
+    // The row after the last word holds the checksum
     tb.set_b32(ACC, words.len(), Block32::from(acc))?;
+
+    // ACTIVE is 1 on the word rows and 0 on the rest
     tb.fill_selector(ACTIVE, words.len())?;
 
     Ok(tb.build())
 }
 ```
 
-`rows` is a power of two above `words.len()`. `new_secret` zeroizes
-the columns when the trace drops. The `hekate-program` README builds the circuit this trace satisfies.
+The `hekate-program` README builds the circuit this trace satisfies.
 
 ## Features
 
@@ -61,6 +67,7 @@ the columns when the trace drops. The `hekate-program` README builds the circuit
 | `parallel`      | yes     | Rayon threads, here and in `hekate-crypto` and `hekate-math`             |
 | `blake3`        | yes     | BLAKE3 as `DefaultHasher`                                                |
 | `sha2`, `sha3`  | no      | SHA-256 or SHA3-256 as `DefaultHasher`; the prover must hash the same way |
+| `shake256`      | no      | SHAKE256 at 512 bits as `DefaultHasher`; the prover must match it         |
 | `secure-memory` | no      | Zeroize every trace on drop, also those built with `TraceBuilder::new`   |
 
 ## Documentation

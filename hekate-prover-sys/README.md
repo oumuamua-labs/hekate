@@ -22,28 +22,37 @@ cargo add hekate-core hekate-math hekate-program rand
 ```rust
 use hekate_core::config::Config;
 use hekate_core::proofs::InnerProof;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::{Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use rand::{TryRng, rngs::SysRng};
 use std::error::Error;
 
-fn prove_once<P: Program<Block128>>(
+fn prove_once<P: Program<Block256>>(
     program: &P,
-    instance: &ProgramInstance<Block128>,
-    witness: &ProgramWitness<Block128>,
+    instance: &ProgramInstance<Block256>,
+    witness: &ProgramWitness<Block256>,
     config: &Config,
-) -> Result<InnerProof<Block128>, Box<dyn Error>> {
+) -> Result<InnerProof<Block256>, Box<dyn Error>> {
+    // A fresh seed per proof: one seed for two witnesses discloses them
     let mut seed = [0; 32];
     SysRng.try_fill_bytes(&mut seed)?;
 
-    Ok(prove(b"my-program", program, instance, witness, config, seed, None)?)
+    // The label keeps this program's transcripts apart; the verifier uses it too
+    Ok(prove(
+        b"my-program",
+        program,
+        instance,
+        witness,
+        config,
+        seed,
+        None,
+    )?)
 }
 ```
 
-The label keeps your program's transcript apart from every other program's, and the verifier must use the same bytes.
-Draw the seed fresh for every proof: one seed used for two different witnesses discloses them. To stop a proof early,
-pass `Some(&token)` with a `CancelToken` and call `token.request()` from another thread.
+To stop a proof early, pass `Some(&token)` with a `CancelToken` in place of `None` and call `token.request()` from
+another thread.
 
 ## Variants
 
@@ -52,8 +61,9 @@ pass `Some(&token)` with a `CancelToken` and call `token.request()` from another
 | `ct`     | Constant-time                | Any witness that holds private data                     |
 | `public` | Variable-time tables, faster | Public data only: the timing of a run leaks the witness |
 
-The build needs exactly one of them and stops with an error that names both otherwise. The hash features, `blake3` by
-default, `sha2` and `sha3`, must match the hash the linked binary was built with and the verifier's, or no proof verifies.
+The build needs exactly one of them and stops with an error that names both otherwise. The same holds for the hash:
+exactly one of `blake3` (the default), `sha2`, `sha3` and `shake256` picks the binary built with it, and the verifier
+must use the same hash, or no proof verifies.
 
 ## The binary
 

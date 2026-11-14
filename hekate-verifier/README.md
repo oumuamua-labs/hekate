@@ -60,8 +60,10 @@ fn verify_one<P: Program<F> + Sync>(
     instance: &ProgramInstance<F>,
     proof_bytes: &[u8],
 ) -> Result<(), Rejection> {
+    // Bytes that do not parse return Rejection::Malformed
     let proof = deserialize_proof::<F>(proof_bytes)?;
 
+    // The prover's label and Config; the id is recomputed from program and compared
     HekateVerifier::<F, DefaultHasher>::verify(
         audited_id,
         program,
@@ -89,7 +91,8 @@ fn verify_one<P: Program<F> + Sync>(
 | `std`              | yes     | Standard library. Without it the crate is `no_std` with `alloc`.                   |
 | `blake3`           | yes     | BLAKE3 transcript and Merkle hashing.                                              |
 | `sha2`, `sha3`     | no      | SHA-256 or SHA3-256 hashing. The prover must use the same hash.                    |
-| `parallel`         | yes     | Rayon pool for leaf hashing, proximity checks, the outer tests and `verify_batch`. |
+| `shake256`         | no      | SHAKE256 hashing at 512 bits. The prover must use the same hash.                   |
+| `parallel`         | yes     | Rayon pool for leaf hashing, the outer tests and `verify_batch`.                   |
 | `table-math`       | no      | Variable-time basis conversion, faster.                                            |
 | `transcript-trace` | no      | Records every transcript operation, to locate a prover/verifier divergence.        |
 

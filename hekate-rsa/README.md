@@ -12,7 +12,7 @@ zero-knowledge proof engine. `Pkcs1Statement` proves `s^65537 mod N == PKCS1-v1_
 chained over committed block words with FIPS 180-4 §5.1.1 padding left to the caller. `N` is public, the signature
 and the message are witness.
 
-The host table chains SHA-256 one block per row and requests two chiplets over the LogUp bus: modexp from
+The host table chains SHA-256 one block per row and requests two chiplets over the logUp bus: modexp from
 `hekate-gadgets` and the compression function from `hekate-sha2`.
 
 ## ⚠️ Security Warning
@@ -30,12 +30,12 @@ A PKCS#1 v1.5 statement for one RSA-2048 signature over `message`:
 ```rust
 use hekate_core::errors;
 use hekate_core::trace::ColumnTrace;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::{ProgramInstance, ProgramWitness};
 use hekate_rsa::Pkcs1Statement;
 use hekate_sha2::{ROUNDS, pad_message};
 
-type F = Block128;
+type F = Block256;
 
 fn pkcs1(
     message: &[u8],
@@ -47,8 +47,11 @@ fn pkcs1(
     ProgramWitness<F, ColumnTrace>,
 )> {
     let blocks = pad_message(message).len();
+
+    // SHA-256 rounds per chiplet row
     let rounds_per_row = 2;
 
+    // Blocks, rounds per row, the SHA-256 table height and the host height
     let statement = Pkcs1Statement::new(
         blocks,
         rounds_per_row,
@@ -56,14 +59,17 @@ fn pkcs1(
         blocks.next_power_of_two().max(2),
     )?;
 
+    // Public: the modulus N
     let instance = statement.instance(modulus);
+
+    // Private: the message and the signature
     let witness = statement.witness(message, modulus, signature)?;
 
     Ok((statement, instance, witness))
 }
 ```
 
-`modulus` and `signature` are 64 little-endian 32-bit limbs, and `instance` publishes the modulus. The prover takes
+`modulus` and `signature` are 64 little-endian 32-bit limbs. The prover takes
 `statement.program()`, `instance` and `witness`; the verifier takes the program and `instance`.
 
 [`rsa_pkcs1.rs`](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/rsa_pkcs1.rs) runs RSA-2048 with

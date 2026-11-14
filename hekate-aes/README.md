@@ -9,7 +9,7 @@
 
 AES-128 and AES-256 encryption in zero knowledge for [Hekate](https://oumuamua.dev/hekate), the Rust zero-knowledge
 proof engine. A round table proves the FIPS 197 round function (SubBytes, ShiftRows, MixColumns, AddRoundKey) as a
-binary-field AIR with an S-box ROM chiplet for the GF(2^8) inversion, and a LogUp bus wires the round table to your
+binary-field AIR with an S-box ROM chiplet for the GF(2^8) inversion, and a logUp bus wires the round table to your
 host table.
 
 ## ⚠️ Security Warning
@@ -18,8 +18,8 @@ This crate has not been independently audited and may contain bugs and security 
 
 USE AT YOUR OWN RISK!
 
-The proof binds at **100 bits**, below both AES parameter sets: the proof is the weaker link for AES-128 and AES-256
-alike, and the ciphertext is still full AES. Trace generation is constant-time: the S-box is field arithmetic, the
+The proof binds at 128 bits, the level of AES-128 and below AES-256: the proof is the weaker link for AES-256, and
+the ciphertext is still full AES. Trace generation is constant-time: the S-box is field arithmetic, the
 GF(2^8) inverse plus the FIPS 197 affine map, with no key-dependent index, branch or memory access.
 
 ## Usage
@@ -35,11 +35,11 @@ use hekate_aes::trace::{Aes256Call, expand_key_256};
 use hekate_aes::{Aes256Chiplet, AesRound256Air, host_key_selector_shape, host_selector_shape};
 use hekate_core::errors;
 use hekate_core::trace::ColumnTrace;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::define_columns;
 
-type F = Block128;
+type F = Block256;
 
 define_columns! {
     HostColumns {
@@ -55,8 +55,11 @@ fn encrypt(
     plaintexts: &[[u8; 16]],
 ) -> errors::Result<(CircuitProgram<F>, Vec<ColumnTrace>)> {
     let blocks = plaintexts.len();
+
+    // Table height for per_block rows per block
     let rows = |per_block: usize| (per_block * blocks).next_power_of_two();
 
+    // The round table's height, the S-box ROM's height and the block count
     let aes = Aes256Chiplet::new(
         rows(AesRound256Air::BLOCK_ROWS),
         rows(AesRound256Air::ACTIVE_ROWS),
@@ -73,8 +76,10 @@ fn encrypt(
         })
         .collect();
 
+    // The witness's chiplet traces: the round table's, then the S-box ROM's
     let traces = aes.generate_traces(&calls)?;
 
+    // Two host rows per block: its input and its ciphertext
     let mut cx = Circuit::<F>::new("Host", rows(2))?;
 
     let host = cx.schema(&HostColumns::build_layout());
@@ -86,12 +91,15 @@ fn encrypt(
 
     let key_bytes: Vec<Col> = (0..32).map(|j| host.at(HostColumns::KEY + j)).collect();
 
+    // Each block's input and ciphertext go to the round table, and the key once per block
     cx.call(&AesRound256Air::link_service(), &data, sel)?;
     cx.call(&AesRound256Air::key_service(), &key_bytes, key_sel)?;
 
+    // SELECTOR on both rows of a block, KEY_SELECTOR on the first
     cx.fix(sel, host_selector_shape(2, blocks));
     cx.fix(key_sel, host_key_selector_shape(2, blocks));
 
+    // Both tables in one namespace; only the external buses meet the host
     cx.attach_namespaced("aes256", aes.defs()?, &Aes256Chiplet::EXTERNAL_BUS_IDS)?;
 
     Ok((cx.compile()?, traces))
@@ -99,9 +107,8 @@ fn encrypt(
 ```
 
 The host trace holds block `b`'s input `plaintext ⊕ round_keys[0]` and the key on row `2b` and its ciphertext
-`aes256_encrypt_block(&round_keys, &plaintext)` on row `2b + 1`, with `SELECTOR` set on both and `KEY_SELECTOR` on the
-first. `traces` holds the round table and the S-box ROM, the witness's chiplet traces in that order. The host publishes
-nothing, and its instance carries no public inputs. AES-128 runs on `Aes128Chiplet`, `AesRound128Air` and `Aes128Call`
+`aes256_encrypt_block(&round_keys, &plaintext)` on row `2b + 1`. The host publishes nothing, and its instance carries no
+public inputs. AES-128 runs on `Aes128Chiplet`, `AesRound128Air` and `Aes128Call`
 with a 16-byte key and round keys from `trace::expand_key`; the crate has no AES-128 block function, and `aes.rs` reads
 each ciphertext from the round table's trace.
 

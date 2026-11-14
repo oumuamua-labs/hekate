@@ -29,13 +29,13 @@ The Keccak-f[1600] calls of one SHA3-256 hash, with the chiplet mounted in the h
 ```rust
 use hekate_core::errors;
 use hekate_keccak::{KeccakCall, KeccakChiplet, sha3_256};
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::define_columns;
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 
 define_columns! {
     HostColumns {
@@ -45,9 +45,12 @@ define_columns! {
 }
 
 fn sha3(message: &[u8]) -> errors::Result<(CircuitProgram<F>, Zeroizing<Vec<KeccakCall>>)> {
+    // The permutation calls of one SHA3-256 hash, computed in the clear
     let (_, calls) = sha3_256(message);
 
     let blocks = calls.len();
+
+    // 25 rows per call: 24 rounds between the input row and the output row
     let rows = (blocks * KeccakChiplet::BLOCK_ROWS).next_power_of_two();
 
     let mut cx = Circuit::<F>::new("Host", rows)?;
@@ -57,13 +60,16 @@ fn sha3(message: &[u8]) -> errors::Result<(CircuitProgram<F>, Zeroizing<Vec<Kecc
     let sel = host.at(HostColumns::SELECTOR);
     let lanes: Vec<Col> = (0..25).map(|i| host.at(HostColumns::LANES + i)).collect();
 
+    // Input and output lanes go to the chiplet, which proves the permutation
     cx.call(&KeccakChiplet::service(), &lanes, sel)?;
 
+    // SELECTOR is 1 on each call's input row and output row
     cx.fix(
         sel,
         KeccakChiplet::host_selector_shape(KeccakChiplet::BLOCK_ROWS, blocks),
     );
 
+    // mount puts the chiplet's columns in this table, beside the host's
     cx.mount(ChipletDef::from_air(&KeccakChiplet::new(rows, blocks))?);
 
     // Public: the digest, the first 4 lanes of the last output
@@ -77,10 +83,9 @@ fn sha3(message: &[u8]) -> errors::Result<(CircuitProgram<F>, Zeroizing<Vec<Kecc
 }
 ```
 
-The host trace holds call `k`'s input lanes on row `25k` and its output lanes on row `25k + 24`, `SELECTOR` set on
-both, and the columns `generate_keccak_trace` builds from the call inputs are appended to the same trace. Binding the
-digest to a message is the host's job: each call's input is the previous output with the next block XORed into its
-rate lanes.
+The host trace holds call `k`'s input lanes on row `25k` and its output lanes on row `25k + 24`, and the columns
+`generate_keccak_trace` builds from the call inputs are appended to it. Binding the digest to a message is the host's
+job: each call's input is the previous output with the next block XORed into its rate lanes.
 
 [`keccak.rs`](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/keccak.rs) is a complete program, and
 `cargo bench --bench keccak` runs the Criterion suite at 2^12, 2^15 and 2^20 rows.
