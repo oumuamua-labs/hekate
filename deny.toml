@@ -32,6 +32,7 @@ exceptions = [
     { allow = ["AGPL-3.0-only"], crate = "hekate-sdk" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-prover-sys" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-scribble" },
+    { allow = ["AGPL-3.0-only"], crate = "hekate-testkit" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-keccak" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-aes" },
     { allow = ["AGPL-3.0-only"], crate = "hekate-sha2" },
