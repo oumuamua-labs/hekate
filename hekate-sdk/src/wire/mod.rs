@@ -23,6 +23,9 @@ pub mod trace;
 const MAX_LABEL_LEN: usize = 256;
 const MAX_TOTAL_LEAKED: usize = 64 * 1024;
 
+const APPARENT_SIZE_FACTOR: usize = 16;
+const APPARENT_SIZE_FLOOR: usize = 1 << 20;
+
 /// Per-decode leak budget, charged once per distinct
 /// label. Never shared across decodes: one client could
 /// fill a shared table and fail every later decode.
@@ -68,6 +71,20 @@ pub(crate) fn wire_err(message: &'static str) -> Error {
     Error::Protocol {
         protocol: "wire",
         message,
+    }
+}
+
+pub(crate) fn verifier_opts(len: usize) -> flatbuffers::VerifierOptions {
+    let defaults = flatbuffers::VerifierOptions::default();
+
+    // Default options cap apparent size at 2 GiB independent
+    // of input, letting aliased offsets amplify small buffers.
+    flatbuffers::VerifierOptions {
+        max_apparent_size: len
+            .saturating_mul(APPARENT_SIZE_FACTOR)
+            .max(APPARENT_SIZE_FLOOR)
+            .min(defaults.max_apparent_size),
+        ..defaults
     }
 }
 

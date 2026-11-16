@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::wire_err;
+use super::{verifier_opts, wire_err};
 use alloc::vec::Vec;
 use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::Result;
@@ -153,8 +153,9 @@ pub fn serialize_proof_bytes<F: TowerField>(proof: &InnerProof<F>) -> Vec<u8> {
 }
 
 pub fn deserialize_proof<F: TowerField>(bytes: &[u8]) -> Result<InnerProof<F>> {
-    let fb_proof =
-        flatbuffers::root::<fb::Proof>(bytes).map_err(|_| wire_err("invalid proof FlatBuffer"))?;
+    let opts = verifier_opts(bytes.len());
+    let fb_proof = flatbuffers::root_with_opts::<fb::Proof>(&opts, bytes)
+        .map_err(|_| wire_err("invalid proof FlatBuffer"))?;
 
     if fb_proof.version() != WIRE_PROOF_VERSION {
         return Err(wire_err("proof wire format version mismatch"));
@@ -584,6 +585,7 @@ fn deserialize_logup_aux<F: TowerField>(fb: fb::LogUpAux<'_>) -> Result<LogUpAux
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::APPARENT_SIZE_FACTOR;
     use hekate_core::errors::Error;
     use hekate_math::Block128;
 
@@ -635,6 +637,51 @@ mod tests {
             deserialize_proof::<Block128>(fbb.finished_data()),
             Err(Error::Protocol {
                 message: "missing trace_root",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn aliased_openings_rejected_under_size_cap() {
+        let mut fbb = FlatBufferBuilder::new();
+
+        let leaves = fbb.create_vector(&vec![0u8; 128 * 1024]);
+        let opening = fb::TreeOpening::create(
+            &mut fbb,
+            &fb::TreeOpeningArgs {
+                leaves: Some(leaves),
+                multiproof: None,
+            },
+        );
+
+        let openings = fbb.create_vector(&vec![opening; 4 * APPARENT_SIZE_FACTOR]);
+        let eval_proof = fb::FoldEvalProof::create(
+            &mut fbb,
+            &fb::FoldEvalProofArgs {
+                openings: Some(openings),
+                ..Default::default()
+            },
+        );
+
+        let proof = fb::Proof::create(
+            &mut fbb,
+            &fb::ProofArgs {
+                version: WIRE_PROOF_VERSION,
+                eval_proof: Some(eval_proof),
+                ..Default::default()
+            },
+        );
+
+        fbb.finish_minimal(proof);
+
+        let bytes = fbb.finished_data();
+
+        assert!(bytes.len() < 256 * 1024);
+        assert!(matches!(
+            deserialize_proof::<Block128>(bytes),
+            Err(Error::Protocol {
+                message: "invalid proof FlatBuffer",
                 ..
             })
         ));
