@@ -86,7 +86,7 @@ The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in r
 - [PIOP Protocol](https://oumuamua.dev/hekate/docs/advanced/piop-protocol), multilinear columns, Sumcheck down to one
   point, the commitment
 - [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge), how a proof hides the witness, and the
-  [ring-switching paper](https://oumuamua.dev/blog/zk-ring-switching) behind packed bit columns
+  [ring-switching paper](https://eprint.iacr.org/2026/2754) behind packed bit columns
 - [Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial
   test suite, Fiat-Shamir binding
 
