@@ -14,14 +14,13 @@ use hekate_core::outer::OuterGeometry;
 use hekate_core::proofs::OuterOpening;
 use hekate_crypto::merkle::MerkleTree;
 use hekate_crypto::{DefaultHasher, Digest, Hasher};
-use hekate_math::{Block128, Flat, HardwareField, TowerField};
+use hekate_math::{Block128, Block256, Flat, HardwareField, TowerField};
 use hekate_program::outer::{OuterLayout, aux_filler_len, build_aux_rows, build_pad_rows};
 
-type K = Block128;
+type K = Block256;
 type H = DefaultHasher;
 type D = <H as Hasher>::Digest;
 
-const FIELD_BITS: usize = 128;
 const MASKED_SCALARS: usize = 16;
 const WIRE_COUNTS: [usize; 2] = [6, 40];
 const SEED: u128 = 0x0f1e_2d3c_4b5a_6978_8796_a5b4_c3d2_e1f0;
@@ -96,7 +95,7 @@ fn rank(mut rows: Vec<Vec<Flat<K>>>) -> usize {
 
 fn outer(mul_wires: usize) -> Outer {
     let geom = Config::dev()
-        .outer_geom(MASKED_SCALARS, mul_wires, FIELD_BITS)
+        .outer_geom(MASKED_SCALARS, mul_wires, K::BITS)
         .unwrap();
     let layout = OuterLayout::new(&geom, MASKED_SCALARS, mul_wires).unwrap();
     let encoder = RowEncoder::<K>::new(&geom).unwrap();
@@ -168,11 +167,18 @@ fn product_code_basis(outer: &Outer) -> Vec<Vec<Flat<K>>> {
 }
 
 fn rnd(state: &mut u128) -> Flat<K> {
+    let lo = Block128(step(state));
+    let hi = Block128(step(state));
+
+    K::new(lo, hi).to_hardware()
+}
+
+fn step(state: &mut u128) -> u128 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;
 
-    K::from(*state).to_hardware()
+    *state
 }
 
 fn inv(v: Flat<K>) -> Flat<K> {
