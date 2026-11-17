@@ -236,6 +236,7 @@ jobs:
           - crate: hekate-gadgets
             filter: gadgets
             test_args: "--release"
+            clippy_args: "--features std,blake3,parallel"
           - crate: hekate-sdk
             filter: sdk
             test_args: "--all-features"
@@ -245,22 +246,26 @@ jobs:
           - crate: hekate-keccak
             filter: keccak
             test_args: "--release"
+            clippy_args: "--features std,blake3"
           - crate: hekate-aes
             filter: aes
             test_args: "--release"
+            clippy_args: "--features std,blake3"
           - crate: hekate-sha2
             filter: sha2
             test_args: "--release"
+            clippy_args: "--features std,blake3"
           - crate: hekate-rsa
             filter: rsa
             test_args: "--release"
           - crate: hekate-pqc
             filter: pqc
             test_args: "--release"
+            clippy_args: "--features std,blake3,forgery"
           - crate: hekate
             filter: hekate
             test_args: "--release"
-            clippy_args: "--features sha2,sha3,secure-memory,table-math,dhat-heap"
+            clippy_args: "--features secure-memory,table-math,dhat-heap"
     steps:
       - name: Should run
         id: run
