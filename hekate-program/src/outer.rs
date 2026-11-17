@@ -2167,15 +2167,16 @@ mod tests {
     use core::ops::Range;
     use hekate_core::config;
     use hekate_core::trace::ColumnType;
-    use hekate_math::Block128;
+    use hekate_math::{Block128, Block256};
 
-    type F = Block128;
+    type F = Block256;
 
     const BUS_PAD_FIRST: u32 = 10;
-    const BUS_H_PAD: u32 = 20;
+    const BUS_H_PAD: u32 = 30;
     const BUS_PUBLIC: u128 = 77;
 
-    /// `half - h_columns` at `bus_record`'s `half = 4` and one bus column of one plane.
+    /// `half - h_columns` at `bus_record`'s three
+    /// columns and one bus column, any plane count.
     const H_CLAIM: usize = 3;
 
     fn shape(num_vars: usize, num_columns: usize, degree: usize, buses: usize) -> TableShape {
@@ -2184,7 +2185,7 @@ mod tests {
             num_columns,
             sumcheck_degree: degree,
             bus_columns: buses,
-            h_planes: 1,
+            h_planes: h_planes::<F>(),
             bus_wires: buses,
             mul_nodes: 0,
             expands_bits: false,
@@ -2239,11 +2240,11 @@ mod tests {
     }
 
     fn mix(seed: u128) -> Flat<F> {
-        F::from(
-            seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                .wrapping_add(0x51ed_2701),
-        )
-        .to_hardware()
+        let lo = seed
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(0x51ed_2701);
+
+        F::new(Block128(lo), Block128(!lo)).to_hardware()
     }
 
     fn bus_ast() -> ConstraintAst<F> {
@@ -2260,20 +2261,44 @@ mod tests {
         }
     }
 
+    fn h_pads() -> Vec<u32> {
+        (0..h_planes::<F>() as u32).map(|j| BUS_H_PAD + j).collect()
+    }
+
+    /// Plane values `h_j` at full width, `h = Σ_j h_j · basis_j`,
+    /// and each plane masked by its pad at `BUS_H_PAD + j`.
+    fn h_split(seed: u128, pad: &[Flat<F>]) -> (Flat<F>, Vec<Flat<F>>, Vec<Flat<F>>) {
+        let basis = plane_basis::<F>().unwrap();
+        let parts: Vec<Flat<F>> = (0..basis.len() as u128).map(|j| mix(seed + j)).collect();
+
+        let h = parts
+            .iter()
+            .zip(&basis)
+            .fold(Flat::from_raw(F::ZERO), |acc, (&part, &b)| acc + part * b);
+
+        let h_masked = parts
+            .iter()
+            .zip(h_pads())
+            .map(|(&part, p)| part + pad[p as usize])
+            .collect();
+
+        (h, parts, h_masked)
+    }
+
     /// One table over [`bus_ast`]: `c0 · c1` as the only
     /// constraint, three columns, one Permutation bus column
     /// keying `c0` against a public constant, selector `c1`.
     fn bus_record(
         ast: &ConstraintAst<F>,
         claims_masked: Vec<Flat<F>>,
-        h_masked: Flat<F>,
+        h_masked: Vec<Flat<F>>,
     ) -> TableRecord<'_, F> {
         let mul_nodes = mul_node_count(ast);
         let half = claims_masked.len() / 2;
 
         let column = BusColumnRow {
-            h_pads: vec![BUS_H_PAD],
-            h_masked: vec![h_masked],
+            h_pads: h_pads(),
+            h_masked,
             first: bus_fraction(3, Some(1)),
             second: None,
             eq_lookup: Flat::from_raw(F::ONE),
@@ -2418,11 +2443,12 @@ mod tests {
         fixed: bool,
     ) -> TableRecord<'_, F> {
         let seed = base as u128;
-        let half = columns + buses;
+        let planes = h_planes::<F>() as u32;
+        let half = columns + planes * buses;
         let mul_nodes = mul_node_count(ast);
 
         let free = base + 2 * half;
-        let sums_pad = free + buses;
+        let sums_pad = free + planes * buses;
         let mask_pad = sums_pad + buses;
 
         let wires = |k: u32| match k {
@@ -2437,8 +2463,8 @@ mod tests {
             let s = seed + 100 * k as u128;
 
             bus_rows.push(BusColumnRow {
-                h_pads: vec![free + k],
-                h_masked: vec![mix(s + 10)],
+                h_pads: (0..planes).map(|j| free + planes * k + j).collect(),
+                h_masked: (0..planes).map(|j| mix(s + 10 + 7 * j as u128)).collect(),
                 first: BusFraction {
                     slots: vec![(0, value(s + 12)), (columns - 1, value(s + 13))],
                     constant: value(s + 14),
@@ -2496,7 +2522,7 @@ mod tests {
                 num_columns: columns as usize,
                 sumcheck_degree: 3,
                 bus_columns: buses as usize,
-                h_planes: 1,
+                h_planes: h_planes::<F>(),
                 bus_wires: (0..buses).map(wires).sum(),
                 mul_nodes,
                 expands_bits: false,
@@ -2625,7 +2651,7 @@ mod tests {
         let with = OuterStatement::new::<F>(&[ring, ring], 12);
 
         assert_eq!(ring.mul_wires(), plain.mul_wires());
-        assert_eq!(with.mul_wires - without.mul_wires, 127);
+        assert_eq!(with.mul_wires - without.mul_wires, 255);
     }
 
     #[test]
@@ -2751,30 +2777,33 @@ mod tests {
             ..with_bus
         });
 
-        let claimed_sum_and_h_eval = 2;
+        let planes = h_planes::<F>();
+        let claimed_sum_and_h_evals = 1 + planes;
 
-        let h_claim_halves = 2;
+        let h_claim_halves = 2 * planes;
         let h_blind_halves = 2 * with_bus.whole_blinds;
 
         assert_eq!(
             with_bus.masked_scalars() - without.masked_scalars(),
-            claimed_sum_and_h_eval + h_claim_halves + h_blind_halves
+            claimed_sum_and_h_evals + h_claim_halves + h_blind_halves
         );
     }
 
     #[test]
     fn masked_scalars_match_transcript_tally() {
+        let planes = h_planes::<F>();
+
         for whole_blinds in [1, 8] {
             let s = every_half(TableShape {
                 whole_blinds,
                 ..shape(12, 1977, 5, 3)
             });
 
-            let claimed_sums_and_h_evals = 3 + 3;
+            let claimed_sums_and_h_evals = 3 + 3 * planes;
             let skip_round = (5 << 6) - 1;
             let zerocheck_rounds = skip_round + (12 - 6) * 5;
             let h_blinds = whole_blinds;
-            let claims = 2 * (1977 + whole_blinds + 3 + h_blinds);
+            let claims = 2 * (1977 + whole_blinds + 3 * planes + h_blinds);
 
             assert_eq!(
                 s.masked_scalars(),
@@ -2818,9 +2847,10 @@ mod tests {
 
     #[test]
     fn every_hadamard_wire_operand_is_pinned_by_row() {
-        let claims: Vec<Flat<F>> = (0..8).map(|i| mix(100 + i)).collect();
+        let planes = h_planes::<F>() as u128;
+        let claims: Vec<Flat<F>> = (0..2 * (3 + planes)).map(|i| mix(100 + i)).collect();
         let ast = bus_ast();
-        let record = bus_record(&ast, claims, mix(8));
+        let record = bus_record(&ast, claims, (0..planes).map(|j| mix(8 + 50 * j)).collect());
         let statement = OuterStatement {
             masked_scalars: 32,
             mul_wires: record.shape.mul_wires(),
@@ -2847,8 +2877,7 @@ mod tests {
         let pad: Vec<Flat<F>> = (0..32).map(|i| mix(300 + i)).collect();
         let claims_masked = masked(&plain, &pad);
 
-        let h = value(400);
-        let h_masked = vec![h + pad[BUS_H_PAD as usize]];
+        let (h, _, h_masked) = h_split(1400, &pad);
 
         for second in [
             None,
@@ -2856,7 +2885,7 @@ mod tests {
             Some(bus_fraction(5, Some(1))),
         ] {
             let column = BusColumnRow {
-                h_pads: vec![BUS_H_PAD],
+                h_pads: h_pads(),
                 h_masked: h_masked.clone(),
                 first: bus_fraction(3, Some(1)),
                 second,
@@ -2915,10 +2944,10 @@ mod tests {
         let pad: Vec<Flat<F>> = (0..32).map(|i| mix(300 + i)).collect();
         let claims_masked = masked(&plain, &pad);
 
-        let h = value(400);
+        let (h, _, h_masked) = h_split(1400, &pad);
         let column = BusColumnRow {
-            h_pads: vec![BUS_H_PAD],
-            h_masked: vec![h + pad[BUS_H_PAD as usize]],
+            h_pads: h_pads(),
+            h_masked,
             first: bus_fraction(3, Some(1)),
             second: None,
             eq_lookup: Flat::from_raw(F::ONE),
@@ -3116,29 +3145,26 @@ mod tests {
     #[test]
     fn h_claim_pin_row_ties_h_eval_to_committed_claim() {
         let pad: Vec<Flat<F>> = (0..32).map(|i| mix(300 + i)).collect();
+        let zero = Flat::from_raw(F::ZERO);
         let one = Flat::from_raw(F::ONE);
 
-        let h = mix(400);
-        let h_masked = h + pad[BUS_H_PAD as usize];
+        let (_, parts, h_masked) = h_split(400, &pad);
+        let pads = h_pads();
 
         for whole_blinds in [0, 1] {
-            let half = 4 + 2 * whole_blinds;
-            let claim = H_CLAIM + whole_blinds;
+            let half = 3 + parts.len() + 2 * whole_blinds;
+            let first = H_CLAIM + whole_blinds;
 
-            let pin_form = [
-                (Unknown::Pad(BUS_H_PAD), one),
-                (Unknown::Pad(BUS_PAD_FIRST + claim as u32), one),
-            ];
-
-            for (h_claim, honest) in [(h, true), (h + one, false)] {
+            for (offset, honest) in [(zero, true), (one, false)] {
                 let mut plain: Vec<Flat<F>> = (0..2 * half).map(|i| mix(200 + i as u128)).collect();
-
-                plain[claim] = h_claim;
+                for (j, &part) in parts.iter().enumerate() {
+                    plain[first + j] = part + offset;
+                }
 
                 let claims_masked = masked(&plain, &pad);
                 let ast = bus_ast();
 
-                let mut record = bus_record(&ast, claims_masked.clone(), h_masked);
+                let mut record = bus_record(&ast, claims_masked.clone(), h_masked.clone());
                 record.shape.whole_blinds = whole_blinds;
 
                 let statement = OuterStatement {
@@ -3149,18 +3175,27 @@ mod tests {
                 let records = [record];
                 let eval = eval_without_gadget();
                 let rows = assemble(&records, &eval, &statement).unwrap();
-                let pins: Vec<&AffineRow<F>> = rows
-                    .affine
-                    .iter()
-                    .filter(|r| r.unknowns == pin_form)
-                    .collect();
 
-                assert_eq!(pins.len(), 1, "{whole_blinds} whole blinds");
-                assert_eq!(pins[0].constant, h_masked + claims_masked[claim]);
+                for (j, (&h_pad, &plane_masked)) in pads.iter().zip(&h_masked).enumerate() {
+                    let claim = first + j;
+                    let pin_form = [
+                        (Unknown::Pad(h_pad), one),
+                        (Unknown::Pad(BUS_PAD_FIRST + claim as u32), one),
+                    ];
 
-                let left = pad[BUS_H_PAD as usize] + pad[BUS_PAD_FIRST as usize + claim];
+                    let pins: Vec<&AffineRow<F>> = rows
+                        .affine
+                        .iter()
+                        .filter(|r| r.unknowns == pin_form)
+                        .collect();
 
-                assert_eq!(left == pins[0].constant, honest);
+                    assert_eq!(pins.len(), 1, "{whole_blinds} whole blinds, plane {j}");
+                    assert_eq!(pins[0].constant, plane_masked + claims_masked[claim]);
+
+                    let left = pad[h_pad as usize] + pad[BUS_PAD_FIRST as usize + claim];
+
+                    assert_eq!(left == pins[0].constant, honest);
+                }
             }
         }
     }
@@ -3325,25 +3360,25 @@ mod tests {
                 statics(&none, &specs),
                 shape(4, 2, 3, 1),
                 &empty,
-                124,
+                252,
                 "bus draw",
-                123,
+                251,
             ),
             (
                 statics(&roots, &[]),
                 shape(4, 3, 2, 0),
                 &empty,
-                126,
+                254,
                 "zerocheck draw",
-                125,
+                253,
             ),
             (
                 statics(&none, &[]),
                 shape(1, 1, 9, 0),
                 &empty,
-                125,
+                253,
                 "sumcheck round",
-                124,
+                252,
             ),
             (
                 statics(&none, &[]),
@@ -3352,33 +3387,33 @@ mod tests {
                     ..shape(1, 1, 1, 0)
                 },
                 &empty,
-                128,
+                256,
                 "sumcheck round",
-                127,
+                255,
             ),
             (
                 statics(&none, &[]),
                 shape(1, 1, 1, 0),
                 &packed,
-                127,
+                255,
                 "eval batch draw",
-                126,
+                254,
             ),
             (
                 statics(&none, &[]),
                 shape(1, 1, 1, 0),
                 &narrow,
-                126,
+                253,
                 "eval batch draw",
-                125,
+                252,
             ),
             (
                 statics(&none, &[]),
                 shape(1, 1, 1, 0),
                 &empty,
-                128,
+                256,
                 "eval sumcheck round",
-                127,
+                255,
             ),
         ];
 
@@ -3413,12 +3448,12 @@ mod tests {
         assert_eq!(
             draws,
             DrawBits {
-                bus: 123,
-                zerocheck: 124,
+                bus: 251,
+                zerocheck: 252,
                 skip: None,
-                sumcheck: 125,
-                eval_batch: 128,
-                eval_round: 127,
+                sumcheck: 253,
+                eval_batch: 256,
+                eval_round: 255,
                 outer: None,
             }
         );

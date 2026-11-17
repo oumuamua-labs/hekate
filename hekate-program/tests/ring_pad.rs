@@ -20,7 +20,7 @@ trait Draw: TraceCompatibleField + From<u128> {
     fn next(state: &mut u128) -> Self;
 }
 
-type K = Block128;
+type K = Block256;
 
 impl Draw for Block128 {
     fn next(state: &mut u128) -> Self {
@@ -232,7 +232,7 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
 
     let eta = draw();
     let rho: Vec<Flat<K>> = (0..pool.rho_vars()).map(|_| draw()).collect();
-    let r_mix: Vec<K> = (0..7).map(|_| draw().to_tower()).collect();
+    let r_mix: Vec<K> = (0..K::BITS.ilog2()).map(|_| draw().to_tower()).collect();
 
     let unit_weights = pool.unit_weights(0, eta, &rho).unwrap();
 
@@ -269,11 +269,7 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
     };
 
     let geom = config
-        .outer_geom(
-            statement.masked_scalars,
-            statement.mul_wires,
-            size_of::<K>() * 8,
-        )
+        .outer_geom(statement.masked_scalars, statement.mul_wires, K::BITS)
         .unwrap();
 
     let layout = OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires).unwrap();
