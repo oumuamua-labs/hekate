@@ -870,9 +870,9 @@ mod tests {
     use crate::{CadenceSegment, ProgramCell};
     use alloc::string::ToString;
     use alloc::vec;
-    use hekate_math::Block128;
+    use hekate_math::{Block128, Block256};
 
-    type F = Block128;
+    type F = Block256;
 
     #[derive(Clone)]
     struct MiniChiplet;
@@ -1003,7 +1003,9 @@ mod tests {
     }
 
     fn wide(seed: u128) -> F {
-        F::from(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835))
+        let lo = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835);
+
+        F::new(Block128(lo), Block128(!lo))
     }
 
     fn fixture_ast(seed: u128) -> ConstraintAst<F> {
@@ -1653,16 +1655,20 @@ mod tests {
     fn program_id_matches_recorded_ids() {
         let recorded = match hekate_crypto::default_hasher_name() {
             "hekate_crypto::blake3::Blake3Hasher" => [
-                "8731f993839ffc4a244d89bd1aa7980383b10d3b07ee1c33fc9e8406b09b7b1a",
-                "36ba6931e4b47ed20b9ba3a1da4b6091c2a85f0fd7ec0cfa9feb38e17911a2fa",
+                "b2ffe939865f3b608f1a0035b5e186254ecab1ba15ee835edf676ebef11da861",
+                "975ef2a5553cb69ad20c96aa58087ef84ea4036f1eb419d2a2a1bd8d0bd23e3c",
             ],
             "hekate_crypto::sha256::Sha256Hasher" => [
-                "94fea4a021dcad3b394122882b91e3ca9965adf0ef00eb39033398fe0f3694d1",
-                "ecd201fffd6b57d1fd00a3446c6fefe9ec98ac7f71bf0a84c11c326ea47185a1",
+                "189729e6d93811c94f5821e373f273e0f7cc0fe86e7e5d09200baad9eb388f37",
+                "626c2a1ab02f52142a0fac1c4df31dd5fd365e965c1fca49db0ada1bf3390bf2",
             ],
             "hekate_crypto::sha3::Sha3_256Hasher" => [
-                "f75b981a544fcdac0894b3e8d3232f165b8b0c24c6e3663db462a7fdb43a6a70",
-                "31adb38feaef7585294f2824924bb0cd190e5dc1dadbf26a5e15989e662ed2a7",
+                "154c1a72c9c243ed2b61f41e26118762722fd95de48613a907a897a6f5cd526d",
+                "fca651dc274b1856aea4dc2d816a95a807c15ba431233427deac3d6fbff5f219",
+            ],
+            "hekate_crypto::shake256::Shake256Hasher" => [
+                "3da638f63684656fbdb0891732e8f84950da9e7a33bef9909ad517bf42eab26ff0281a1de01287ae38eec9b1bb153aa4468714b097d91ba0c6c508355c9bf633",
+                "12d6e961ab5bce9b956113b154297fd5268d83906e2cc98231cd2fbbebfabf7e7567940644fd9eb26080188653b44f113a137cf3fbee59dbd0cfe7515cc7731f",
             ],
             other => panic!("no recorded ids for {other}"),
         };
