@@ -504,46 +504,51 @@ fn eq_and_k_p_tail<F: HardwareField>(point: &[Flat<F>], r_final: &[Flat<F>]) -> 
 mod tests {
     use super::*;
     use hekate_core::poly::PolyVariant;
-    use hekate_math::{Block128, TowerField};
+    use hekate_math::{Block128, Block256, TowerField};
     use hekate_program::expander::eq_tensor_b;
 
-    fn elems(seed: u128, n: usize) -> Vec<Block128> {
-        let g = Block128(0x2545F4914F6CDD1D_517CC1B727220A95);
+    type F = Block256;
 
-        let mut x = Block128(seed | 1);
+    fn elems(seed: u128, n: usize) -> Vec<F> {
+        let g = F::new(
+            Block128(0x2545F4914F6CDD1D_517CC1B727220A95),
+            Block128(0x9E3779B97F4A7C15_F39CC0605CEDC835),
+        );
+
+        let mut x = F::new(Block128(seed | 1), Block128(!seed));
         let mut out = Vec::with_capacity(n);
 
         for _ in 0..n {
-            x = x * g + Block128::ONE;
+            x = x * g + F::ONE;
             out.push(x);
         }
 
         out
     }
 
-    fn k_p_on_cube(point: &[Block128]) -> Vec<Block128> {
+    fn k_p_on_cube(point: &[F]) -> Vec<F> {
         let eq_p = eq_tensor_b(point);
         let n = eq_p.len();
 
         (0..n).map(|i| eq_p[(i + n - 1) & (n - 1)]).collect()
     }
 
-    fn mle_at(values: &[Block128], r: &[Block128]) -> Block128 {
+    fn mle_at(values: &[F], r: &[F]) -> F {
         let weights = eq_tensor_b(r);
 
         values
             .iter()
             .zip(weights.iter())
-            .fold(Block128::ZERO, |acc, (&v, &w)| acc + v * w)
+            .fold(F::ZERO, |acc, (&v, &w)| acc + v * w)
     }
 
-    fn contract_bits(values: &[Block128], coeffs: &[Block128]) -> Vec<Block128> {
+    fn contract_bits(values: &[F], coeffs: &[F]) -> Vec<F> {
         values
             .iter()
             .map(|v| {
-                let mut acc = Block128::ZERO;
+                let mut acc = F::ZERO;
                 for (u, &m) in coeffs.iter().enumerate() {
-                    if (v.0 >> u) & 1 == 1 {
+                    if (v.0[u / 128] >> (u % 128)) & 1 == 1 {
                         acc += m;
                     }
                 }
@@ -553,7 +558,14 @@ mod tests {
             .collect()
     }
 
-    fn flat(values: &[Block128]) -> Vec<Flat<Block128>> {
+    fn phi(field: ColumnType, values: &[F], r_mix: &[F]) -> Vec<F> {
+        match field {
+            ColumnType::B128 => values.to_vec(),
+            _ => contract_bits(values, &field_coeffs(field, r_mix)),
+        }
+    }
+
+    fn flat(values: &[F]) -> Vec<Flat<F>> {
         values.iter().map(|v| v.to_hardware()).collect()
     }
 
@@ -567,14 +579,14 @@ mod tests {
 
             let point = elems(1289 + num_vars as u128, num_vars);
             let col_tower = elems(53 + num_vars as u128, n);
-            let col: Vec<Flat<Block128>> = col_tower.iter().map(|v| v.to_hardware()).collect();
+            let col: Vec<Flat<F>> = col_tower.iter().map(|v| v.to_hardware()).collect();
 
             let shifted = PolyVariant::Shifted(&col);
             let eq_p = eq_tensor_b(&point);
             let k_p = k_p_on_cube(&point);
 
-            let mut via_variant = Block128::ZERO;
-            let mut via_k_p = Block128::ZERO;
+            let mut via_variant = F::ZERO;
+            let mut via_k_p = F::ZERO;
 
             for i in 0..n {
                 via_variant += shifted.get_at(i).to_tower() * eq_p[i];
@@ -613,9 +625,9 @@ mod tests {
             let r_final = elems(401 + tail_vars as u128, tail_vars + 2);
             let r_flat = flat(&r_final);
 
-            let weights: Vec<Block128> = point.expand().iter().map(|w| w.to_tower()).collect();
+            let weights: Vec<F> = point.expand().iter().map(|w| w.to_tower()).collect();
             let n = weights.len();
-            let shifted: Vec<Block128> = (0..n).map(|i| weights[(i + n - 1) & (n - 1)]).collect();
+            let shifted: Vec<F> = (0..n).map(|i| weights[(i + n - 1) & (n - 1)]).collect();
 
             let (eq, k_p) = eq_and_k_p_at(
                 &low,
@@ -639,7 +651,7 @@ mod tests {
 
     #[test]
     fn closed_forms_match_materialized() {
-        let kappa = Block128::BITS.ilog2() as usize;
+        let kappa = F::BITS.ilog2() as usize;
 
         let fields = [
             ColumnType::Bit,
@@ -656,16 +668,16 @@ mod tests {
             let r_mix = elems(919 + num_vars as u128, kappa);
             let eta = elems(503 + num_vars as u128, 1)[0];
 
-            let twists = twist_coeffs::<Block128>(fields, &r_mix).unwrap();
-            let blocks: Vec<(UnitClass, Flat<Block128>)> = fields
+            let twists = twist_coeffs::<F>(fields, &r_mix).unwrap();
+            let blocks: Vec<(UnitClass, Flat<F>)> = fields
                 .iter()
                 .flat_map(|&field| [false, true].map(|next| UnitClass { field, next }))
-                .map(|class| (class, Flat::from_raw(Block128::ZERO)))
+                .map(|class| (class, Flat::from_raw(F::ZERO)))
                 .collect();
 
             let r_flat = flat(&r_final);
 
-            let weights = |blocks: &[(UnitClass, Flat<Block128>)]| {
+            let weights = |blocks: &[(UnitClass, Flat<F>)]| {
                 master_weights_at(
                     &SkipPoint::multilinear(flat(&point)),
                     &[PolyAt {
@@ -682,9 +694,8 @@ mod tests {
             let joint = weights(&blocks);
 
             for (k, &field) in fields.iter().enumerate() {
-                let coeffs = field_coeffs(field, &r_mix);
-                let a = mle_at(&contract_bits(&eq_tensor_b(&point), &coeffs), &r_final);
-                let a_next = mle_at(&contract_bits(&k_p_on_cube(&point), &coeffs), &r_final);
+                let a = mle_at(&phi(field, &eq_tensor_b(&point), &r_mix), &r_final);
+                let a_next = mle_at(&phi(field, &k_p_on_cube(&point), &r_mix), &r_final);
 
                 let current = weights(&blocks[2 * k..=2 * k])[0];
                 let shifted = weights(&blocks[2 * k + 1..=2 * k + 1])[0];
@@ -706,7 +717,7 @@ mod tests {
 
     #[test]
     fn shared_rows_match_separate_calls() {
-        let kappa = Block128::BITS.ilog2() as usize;
+        let kappa = F::BITS.ilog2() as usize;
 
         let point = SkipPoint::new(flat(&elems(41, 4)), flat(&elems(43, 3))).unwrap();
         let r_mix = elems(47, kappa);
@@ -723,11 +734,11 @@ mod tests {
             ColumnType::B128,
         ];
 
-        let twists = twist_coeffs::<Block128>(fields, &r_mix).unwrap();
-        let blocks: Vec<(UnitClass, Flat<Block128>)> = fields
+        let twists = twist_coeffs::<F>(fields, &r_mix).unwrap();
+        let blocks: Vec<(UnitClass, Flat<F>)> = fields
             .iter()
             .flat_map(|&field| [false, true].map(|next| UnitClass { field, next }))
-            .map(|class| (class, Flat::from_raw(Block128::ZERO)))
+            .map(|class| (class, Flat::from_raw(F::ZERO)))
             .collect();
 
         let polys =
@@ -757,7 +768,7 @@ mod tests {
 
     #[test]
     fn skip_point_weights_match_materialized() {
-        let kappa = Block128::BITS.ilog2() as usize;
+        let kappa = F::BITS.ilog2() as usize;
 
         let fields = [
             ColumnType::Bit,
@@ -781,19 +792,18 @@ mod tests {
             let r_mix = elems(827 + seed, kappa);
             let eta = elems(89 + seed, 1)[0];
 
-            let twists = twist_coeffs::<Block128>(fields, &r_mix).unwrap();
+            let twists = twist_coeffs::<F>(fields, &r_mix).unwrap();
 
-            let weights: Vec<Block128> = point.expand().iter().map(|w| w.to_tower()).collect();
+            let weights: Vec<F> = point.expand().iter().map(|w| w.to_tower()).collect();
             let n = weights.len();
-            let shifted: Vec<Block128> = (0..n).map(|i| weights[(i + n - 1) & (n - 1)]).collect();
+            let shifted: Vec<F> = (0..n).map(|i| weights[(i + n - 1) & (n - 1)]).collect();
 
             for field in fields {
-                let coeffs = field_coeffs(field, &r_mix);
-                let a = mle_at(&contract_bits(&weights, &coeffs), &r_final);
-                let a_next = mle_at(&contract_bits(&shifted, &coeffs), &r_final);
+                let a = mle_at(&phi(field, &weights, &r_mix), &r_final);
+                let a_next = mle_at(&phi(field, &shifted, &r_mix), &r_final);
 
-                let blocks = [false, true]
-                    .map(|next| (UnitClass { field, next }, Flat::from_raw(Block128::ZERO)));
+                let blocks =
+                    [false, true].map(|next| (UnitClass { field, next }, Flat::from_raw(F::ZERO)));
 
                 let at_point = master_weights_at(
                     &point,
