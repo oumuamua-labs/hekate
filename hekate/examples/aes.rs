@@ -443,8 +443,8 @@ fn build_cpu256_trace(
                 .unwrap();
         }
 
-        for j in 0..32 {
-            tb.set_b8(CpuAes256Columns::KEY + j, row, Block8(call.key[j]))
+        for (j, &byte) in call.key.iter().enumerate() {
+            tb.set_b8(CpuAes256Columns::KEY + j, row, Block8(byte))
                 .unwrap();
         }
 

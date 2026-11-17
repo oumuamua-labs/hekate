@@ -901,8 +901,8 @@ fn malformed_hint_breaks_only_its_constraint() {
         let mut enc = case.encoding.clone();
         enc.hint.fill(0);
 
-        for s in 0..counts[k - 1].min(omega) {
-            enc.hint[s] = 10 + s as u8;
+        for (s, hint) in enc.hint[..counts[k - 1].min(omega)].iter_mut().enumerate() {
+            *hint = 10 + s as u8;
         }
 
         for (i, &count) in counts.iter().enumerate() {

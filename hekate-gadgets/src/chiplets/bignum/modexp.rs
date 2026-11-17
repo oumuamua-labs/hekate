@@ -621,9 +621,9 @@ impl Modexp {
         out.ctm = [end(4), end(6)];
         out.cto = [end(5), end(7)];
 
-        for k in 0..CARRY_WORDS {
+        for (k, fr) in out.fr.iter_mut().enumerate() {
             let mut acc = end(k);
-            for slot in out.fr[k].iter_mut() {
+            for slot in fr.iter_mut() {
                 acc = acc * acc;
                 acc = acc * acc;
                 *slot = acc;

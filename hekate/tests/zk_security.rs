@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 type F = Block256;
 type H = DefaultHasher;
+type ClaimVsMle = (F, F);
 
 fn fib_air(num_rows: usize) -> CircuitProgram<F> {
     let mut cx = Circuit::<F>::new("FibZk", num_rows).unwrap();
@@ -709,7 +710,7 @@ fn algebraic_and_evaluation_perfect_hiding() {
 
 /// Per column: `(claim, MLE(r_final))` for the base claim
 /// and, where the column ships one, the next-row claim.
-fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<((F, F), Option<(F, F)>)> {
+fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<(ClaimVsMle, Option<ClaimVsMle>)> {
     let num_vars = 6;
     let num_rows = 1 << num_vars;
     let trace = generate_fib_trace(num_vars);

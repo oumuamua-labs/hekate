@@ -546,12 +546,8 @@ pub fn generate_keccak_trace(
     let mut tb = TraceBuilder::new_secret(KeccakChiplet::physical_layout(), num_vars)?;
 
     for (i, row) in rows.iter().enumerate() {
-        for lane in 0..25 {
-            tb.set_b64(
-                PhysKeccakColumns::P_LANES + lane,
-                i,
-                Block64::from(row.state[lane]),
-            )?;
+        for (lane, &word) in row.state.iter().enumerate() {
+            tb.set_b64(PhysKeccakColumns::P_LANES + lane, i, Block64::from(word))?;
         }
 
         tb.set_b32(
@@ -655,8 +651,8 @@ impl KeccakSpongeNative {
         let rate_lanes = rate_bytes / 8;
 
         loop {
-            for i in 0..rate_lanes {
-                let bytes = self.state[i].to_le_bytes();
+            for lane in &self.state[..rate_lanes] {
+                let bytes = lane.to_le_bytes();
                 for &b in &bytes {
                     if output.len() < out_len {
                         output.push(b);
