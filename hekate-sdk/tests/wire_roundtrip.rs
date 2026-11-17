@@ -22,7 +22,9 @@ use hekate_gadgets::{
     IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp, MemoryEvent, RamChiplet,
     RomChiplet, generate_arithmetic_trace, generate_ram_trace, generate_rom_trace,
 };
-use hekate_math::{Bit, Block32, Block128, CanonicalDeserialize, CanonicalSerialize, TowerField};
+use hekate_math::{
+    Bit, Block32, Block128, Block256, CanonicalDeserialize, CanonicalSerialize, TowerField,
+};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::Circuit;
 use hekate_program::constraint::builder::ConstraintSystem;
@@ -38,7 +40,7 @@ use hekate_sdk::{
     serialize_bundle_header, serialize_proof_bytes,
 };
 
-type F = Block128;
+type F = Block256;
 
 // =================================================================
 // Test Programs
@@ -713,7 +715,9 @@ fn assert_bundle_eq<P: Program<F>>(
 }
 
 fn wide(i: u128) -> F {
-    F::from((i << 64) | (i.wrapping_mul(0x9E37_79B9) + 1))
+    let lo = (i << 64) | (i.wrapping_mul(0x9E37_79B9) + 1);
+
+    F::new(Block128(lo), Block128(!lo))
 }
 
 // =================================================================
@@ -1303,20 +1307,23 @@ fn chiplet_boundary_constant_one_round_trips() {
 
 #[test]
 fn chiplet_boundary_constant_nontrivial_round_trips() {
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0u8; 32];
     bytes[0] = 0xDE;
     bytes[1] = 0xAD;
     bytes[2] = 0xBE;
     bytes[3] = 0xEF;
     bytes[7] = 0x01;
     bytes[15] = 0xA5;
+    bytes[16] = 0xC3;
+    bytes[23] = 0x02;
+    bytes[31] = 0x5A;
 
     let val = F::deserialize(&bytes).unwrap();
 
     let restored = chiplet_bnd_roundtrip(val);
     assert_eq!(
         restored, val,
-        "non-trivial 128-bit constant must survive byte-order"
+        "non-trivial 256-bit constant must survive byte-order"
     );
 }
 
