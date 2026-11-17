@@ -12,13 +12,14 @@ use hekate_core::ligero::{
 };
 use hekate_core::outer::OuterGeometry;
 use hekate_core::proofs::OuterOpening;
-use hekate_crypto::DefaultHasher;
 use hekate_crypto::merkle::MerkleTree;
+use hekate_crypto::{DefaultHasher, Digest, Hasher};
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
 use hekate_program::outer::{OuterLayout, aux_filler_len, build_aux_rows, build_pad_rows};
 
 type K = Block128;
 type H = DefaultHasher;
+type D = <H as Hasher>::Digest;
 
 const FIELD_BITS: usize = 128;
 const MASKED_SCALARS: usize = 16;
@@ -46,8 +47,8 @@ struct Coins {
 }
 
 struct View {
-    pad_root: [u8; 32],
-    aux_root: [u8; 32],
+    pad_root: D,
+    aux_root: D,
     pad: OuterOpening<K>,
     aux: OuterOpening<K>,
     interleaved: Vec<Flat<K>>,
@@ -299,8 +300,8 @@ fn commit(
     coins: &Coins,
     opened: &[Vec<Flat<K>>],
     rows: core::ops::Range<usize>,
-) -> ([u8; 32], OuterOpening<K>) {
-    let mut leaves: Vec<[u8; 32]> = vec![[0u8; 32]; outer.geom.domain_len];
+) -> (D, OuterOpening<K>) {
+    let mut leaves = vec![D::ZERO; outer.geom.domain_len];
     for (i, &c) in coins.columns.iter().enumerate() {
         leaves[c] = column_leaf::<K, H>(opened[i][rows.clone()].iter().map(|v| v.to_tower()));
     }
