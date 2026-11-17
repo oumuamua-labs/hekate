@@ -7,10 +7,10 @@
 //!
 //! [`DefaultHasher`] is the hash every proof commits with:
 //! BLAKE3 by default, SHA-256 with `sha2`, SHA3-256 with `sha3`,
-//! which wins when several are on. The prover and the verifier
-//! must agree on it and on the label a [`transcript::Transcript`]
-//! opens with. [`merkle::MerkleTree`] builds the commitment trees
-//! and their batch openings.
+//! SHAKE256 at 512 bits with `shake256`; the later in that order
+//! wins when several are on. The prover and the verifier must agree
+//! on it and on the label a [`transcript::Transcript`] opens with.
+//! [`merkle::MerkleTree`] builds the commitment trees and their batch openings.
 //!
 //! - [Prover Engine: commit][commit]
 //! - [Prover Engine: challenges][challenges]

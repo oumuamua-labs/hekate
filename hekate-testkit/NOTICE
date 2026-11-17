@@ -1,0 +1,18 @@
+hekate
+Copyright 2026 Andrei Kochergin and Oumuamua Labs.
+
+Licensed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). See LICENSE.
+
+Combining this software with the Hekate prover shared
+library is covered by an additional permission under
+section 7 of that license. See LICENSE-EXCEPTION.
+
+This product includes software developed by:
+Oumuamua Labs <info@oumuamua.dev>
+Andrei Kochergin <andrei@oumuamua.dev>
+
+This product includes hekate-math
+(https://github.com/oumuamua-labs/hekate-math),
+Copyright 2026 Andrei Kochergin and Oumuamua Labs,
+licensed under the Apache License, Version 2.0.

@@ -4,9 +4,11 @@
 
 use hekate_core::config::{CodeRate, Config};
 use hekate_core::proofs::InnerProof;
+use hekate_crypto::Digest;
 use hekate_math::TowerField;
 use hekate_program::Program;
-use hekate_program::digest::{program_id, program_id_hex};
+use hekate_program::digest::{ProgramId, program_id, program_id_hex};
+use hekate_verifier::rejection::Rejection;
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -25,10 +27,10 @@ pub struct RunArgs {
     #[arg(long)]
     no_zk: bool,
 
-    /// The audited program_id a deployment pins, 64 lowercase hex chars.
+    /// The audited program_id a deployment pins, in lowercase hex.
     /// Unset, the run derives its own and the verifier's drift check cannot fire.
     #[arg(long, value_parser = parse_id)]
-    program_id: Option<[u8; 32]>,
+    program_id: Option<ProgramId>,
 }
 
 impl RunArgs {
@@ -41,7 +43,7 @@ impl RunArgs {
     }
 
     /// The `program_id` the verifier pins this run to.
-    pub fn audited_id<F: TowerField, P: Program<F>>(&self, program: &P) -> [u8; 32] {
+    pub fn audited_id<F: TowerField, P: Program<F>>(&self, program: &P) -> ProgramId {
         match self.program_id {
             Some(pinned) => pinned,
             None => {
@@ -161,12 +163,23 @@ where
     let main_pt_sz = enc_size(&proof.main_point_evaluation, bin_cfg);
 
     // Eval batch argument breakdown
-    let eval_sc_sz = enc_size(&proof.eval_proof.sumcheck_proof, bin_cfg);
-    let eval_tensor_sz = enc_size(&proof.eval_proof.tensor_vec, bin_cfg);
-    let eval_master_sz = enc_size(&proof.eval_proof.masters, bin_cfg);
-    let ldt_batch_sz = enc_size(&proof.eval_proof.ldt_proof.multiproof, bin_cfg);
-    let ldt_opened_sz = enc_size(&proof.eval_proof.ldt_proof.opened_columns, bin_cfg);
-    let eval_h_sz = enc_size(&proof.eval_proof.h_ldt_proof, bin_cfg);
+    let eval = &proof.eval_proof;
+    let eval_sc_sz = enc_size(&eval.sumcheck_proof, bin_cfg);
+    let eval_master_sz = enc_size(&eval.masters, bin_cfg);
+    let mask_master_sz = enc_size(&eval.mask_masters, bin_cfg);
+    let fold_rounds_sz = enc_size(&eval.fold_rounds, bin_cfg);
+    let round_roots_sz = enc_size(&eval.round_roots, bin_cfg);
+    let final_layer_sz = enc_size(&eval.final_layer, bin_cfg);
+    let paths_sz: usize = eval
+        .openings
+        .iter()
+        .map(|opening| enc_size(&opening.multiproof, bin_cfg))
+        .sum();
+    let leaves_sz: usize = eval
+        .openings
+        .iter()
+        .map(|opening| enc_size(&opening.leaves, bin_cfg))
+        .sum();
 
     println!("--------------------------------------------------");
     println!("  PROOF COMPONENT BREAKDOWN (bincode)");
@@ -177,11 +190,13 @@ where
     println!("  Main Point Evaluation:  {:>8} bytes", main_pt_sz);
     println!("  Eval Batch Argument:");
     println!("    Eval Sumcheck:        {:>8} bytes", eval_sc_sz);
-    println!("    Tensor Vector (q):    {:>8} bytes", eval_tensor_sz);
     println!("    Masters:              {:>8} bytes", eval_master_sz);
-    println!("    LDT Batch Path:       {:>8} bytes", ldt_batch_sz);
-    println!("    LDT Opened Columns:   {:>8} bytes", ldt_opened_sz);
-    println!("    H Opening:            {:>8} bytes", eval_h_sz);
+    println!("    Mask Masters:         {:>8} bytes", mask_master_sz);
+    println!("    Fold Rounds:          {:>8} bytes", fold_rounds_sz);
+    println!("    Round Roots:          {:>8} bytes", round_roots_sz);
+    println!("    Final Layer:          {:>8} bytes", final_layer_sz);
+    println!("    Opening Paths:        {:>8} bytes", paths_sz);
+    println!("    Opened Leaves:        {:>8} bytes", leaves_sz);
 
     if !proof.chiplet_rows.is_empty() {
         let n = proof.chiplet_rows.len();
@@ -195,21 +210,18 @@ where
         println!("    Point Evaluations:    {:>8} bytes", chip_pt_sz);
     }
 
-    let main_bus_count = proof.main_logup_aux.h_evals.len();
-    let chip_bus_count: usize = proof
+    let main_h_limbs = proof.main_logup_aux.h_evals.len();
+    let chip_h_limbs: usize = proof
         .chiplet_logup_aux
         .iter()
         .map(|a| a.h_evals.len())
         .sum();
 
-    if main_bus_count + chip_bus_count > 0 {
+    if main_h_limbs + chip_h_limbs > 0 {
         let main_logup_sz = enc_size(&proof.main_logup_aux, bin_cfg);
         let chip_logup_sz = enc_size(&proof.chiplet_logup_aux, bin_cfg);
 
-        println!(
-            "  LogUp Bus Aux ({} specs):",
-            main_bus_count + chip_bus_count
-        );
+        println!("  LogUp Bus Aux ({} h limbs):", main_h_limbs + chip_h_limbs);
         println!("    Main:                 {:>8} bytes", main_logup_sz);
         println!("    Chiplets:             {:>8} bytes", chip_logup_sz);
     }
@@ -286,13 +298,15 @@ where
     segment_sz
 }
 
-pub fn result(is_valid: bool) {
+pub fn result(outcome: Result<(), Rejection>) {
     println!("==================================================");
 
-    if is_valid {
-        println!("SUCCESS");
-    } else {
-        println!("FAILURE");
+    match outcome {
+        Ok(()) => println!("SUCCESS"),
+        Err(rejection) => {
+            println!("FAILURE: {rejection}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -304,20 +318,20 @@ fn parse_rate(s: &str) -> Result<CodeRate, String> {
     }
 }
 
-fn parse_id(s: &str) -> Result<[u8; 32], String> {
-    decode_id(s).ok_or_else(|| "expected 64 lowercase hex chars".to_string())
+fn parse_id(s: &str) -> Result<ProgramId, String> {
+    decode_id(s).ok_or_else(|| format!("expected {} lowercase hex chars", 2 * ProgramId::BYTES))
 }
 
-fn decode_id(s: &str) -> Option<[u8; 32]> {
+fn decode_id(s: &str) -> Option<ProgramId> {
     let hex = s.trim().as_bytes();
-    if hex.len() != 64 {
+    if hex.len() != 2 * ProgramId::BYTES {
         return None;
     }
 
-    let mut out = [0u8; 32];
-    for (i, pair) in hex.as_chunks::<2>().0.iter().enumerate() {
+    let mut out = ProgramId::ZERO;
+    for (byte, pair) in out.as_mut().iter_mut().zip(hex.as_chunks::<2>().0) {
         let text = core::str::from_utf8(pair).ok()?;
-        out[i] = u8::from_str_radix(text, 16).ok()?;
+        *byte = u8::from_str_radix(text, 16).ok()?;
     }
 
     Some(out)

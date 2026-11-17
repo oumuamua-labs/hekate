@@ -13,11 +13,11 @@ use hashbrown::HashMap;
 use hekate_core::errors;
 use hekate_core::poly::PolyVariant;
 use hekate_core::trace::{Trace, TraceColumn, TraceCompatibleField};
-use hekate_math::{Block128, Flat, TowerField};
+use hekate_math::{Flat, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::ConstraintAst;
 use hekate_program::permutation::{
-    BusKind, PermutationCheckSpec, RankClock, RankTable, Source, TableHeight, rank_clocks,
+    BusKind, PermutationCheckSpec, RankClock, RankTable, Source, TableHeight, bus_tag, rank_clocks,
 };
 use hekate_program::{
     Air, FixedColumn, Program, ProgramInstance, ProgramWitness, validate_fixed_columns,
@@ -118,7 +118,7 @@ pub struct BusEndpoint<F> {
     pub claimed_sum: Flat<F>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TableId {
     Main,
     Chiplet(usize),
@@ -767,6 +767,7 @@ fn resolve_source<F: TraceCompatibleField, T: Trace>(
 /// `BusKind::Lookup` specs (empty otherwise).
 /// `s_eff = s_send + s_recv` in char-2 when paired.
 fn compute_endpoint_product<F, A, T>(
+    bus_id: &str,
     spec: &PermutationCheckSpec,
     clock: Option<&RankClock>,
     air: &A,
@@ -784,6 +785,15 @@ where
 
     let zero = Flat::from_raw(F::ZERO);
     let one = Flat::from_raw(F::ONE);
+
+    let constant = match spec.kind {
+        BusKind::Permutation => {
+            let top = spec.slots().fold(one, |power, _| power * beta);
+
+            gamma + bus_tag::<F>(bus_id).to_hardware() * top
+        }
+        BusKind::Lookup => gamma,
+    };
 
     let has_rank = spec
         .sources
@@ -845,7 +855,7 @@ where
                 &columns,
                 &clock_column,
                 rows,
-                gamma,
+                constant,
                 beta,
                 &mut scratch,
                 h_out,
@@ -870,7 +880,7 @@ where
                     &columns,
                     &clock_column,
                     rows,
-                    gamma,
+                    constant,
                     beta,
                     scratch,
                     Some(h_out),
@@ -888,7 +898,7 @@ where
                     &columns,
                     &clock_column,
                     rows,
-                    gamma,
+                    constant,
                     beta,
                     scratch,
                     None,
@@ -956,7 +966,8 @@ where
         .enumerate()
         .map(|(i, (bus_id, spec))| {
             let clock = clocks[0][i].as_ref();
-            let stats = compute_endpoint_product(spec, clock, main, &witness.trace, gamma, beta)?;
+            let stats =
+                compute_endpoint_product(bus_id, spec, clock, main, &witness.trace, gamma, beta)?;
 
             Ok((
                 bus_id.clone(),
@@ -980,7 +991,8 @@ where
         .enumerate()
         .map(|(i, (bus_id, spec))| {
             let clock = clocks[0][i].as_ref();
-            let stats = compute_endpoint_product(spec, clock, main, &witness.trace, gamma, beta)?;
+            let stats =
+                compute_endpoint_product(bus_id, spec, clock, main, &witness.trace, gamma, beta)?;
 
             Ok((
                 bus_id.clone(),
@@ -1009,7 +1021,8 @@ where
                 .enumerate()
                 .map(move |(i, (bus_id, spec))| {
                     let clock = clocks[1 + c_idx][i].as_ref();
-                    let stats = compute_endpoint_product(spec, clock, def, trace, gamma, beta)?;
+                    let stats =
+                        compute_endpoint_product(bus_id, spec, clock, def, trace, gamma, beta)?;
 
                     Ok((
                         bus_id.clone(),
@@ -1039,7 +1052,8 @@ where
                 .enumerate()
                 .map(move |(i, (bus_id, spec))| {
                     let clock = clocks[1 + c_idx][i].as_ref();
-                    let stats = compute_endpoint_product(spec, clock, def, trace, gamma, beta)?;
+                    let stats =
+                        compute_endpoint_product(bus_id, spec, clock, def, trace, gamma, beta)?;
 
                     Ok((
                         bus_id.clone(),
@@ -1164,7 +1178,7 @@ pub fn preflight<F, P, T>(
     witness: &ProgramWitness<F, T>,
 ) -> errors::Result<PreflightReport<F>>
 where
-    F: TraceCompatibleField + Into<Block128>,
+    F: TraceCompatibleField,
     P: Program<F>,
     T: Trace,
 {
@@ -1378,7 +1392,7 @@ fn endpoint_chunk<F, T>(
     columns: &BusColumns<'_, F, T>,
     clock_column: &[Flat<F>],
     rows: Range<usize>,
-    gamma: Flat<F>,
+    constant: Flat<F>,
     beta: Flat<F>,
     scratch: &mut ChunkScratch<F>,
     mut h_out: Option<&mut [Flat<F>]>,
@@ -1401,7 +1415,7 @@ where
             continue;
         }
 
-        let mut key = gamma;
+        let mut key = constant;
         let mut current_beta = one;
 
         let rank = clock_column.get(row_idx).copied().unwrap_or(zero);
@@ -1507,7 +1521,7 @@ fn invert_batch<F: TraceCompatibleField>(values: &mut [Flat<F>], prefix: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hekate_math::HardwareField;
+    use hekate_math::{Block128, HardwareField};
 
     #[test]
     fn invert_batch_matches_single_inversions_around_zeros() {

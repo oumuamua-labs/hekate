@@ -5,24 +5,22 @@
 use hekate_core::config::Config;
 use hekate_core::errors::Error;
 use hekate_core::trace::{ColumnType, TraceBuilder};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_pqc::mlkem::{
     self, Forgery, MLKEM_DATA_BUS_ID, MlKemCall, MlKemChiplet, MlKemInput, MlKemOutput,
     MlKemParams, MlKemWitness,
 };
 use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_sdk::preflight::{PreflightReport, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 use ml_kem::{B32, Decapsulate, DecapsulationKey, KeyExport, MlKem512, MlKem768, MlKem1024, Seed};
 use sha3::{Digest, Sha3_256};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
+
+const CODEC: TableId = TableId::Chiplet(3);
 
 const CALLS: [MlKemCall; 4] = [
     MlKemCall::KeyGen,
@@ -46,42 +44,6 @@ struct Proof {
     program: CircuitProgram<F>,
     instance: ProgramInstance<F>,
     witness: ProgramWitness<F>,
-}
-
-impl Proof {
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"MlKemPipeline",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"MlKemPipeline");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
 }
 
 macro_rules! vectors {
@@ -159,54 +121,65 @@ fn honest(params: MlKemParams, v: &Vectors) {
 
     let proof = host(&pipeline, traced);
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
+}
+
+fn honest_call(params: MlKemParams, input: MlKemInput<'_>) -> Proof {
+    let pipeline = MlKemChiplet::<F>::new(params, &[kind(&input)]).unwrap();
+    let traced = pipeline.trace(&[input]).unwrap();
+
+    host(&pipeline, traced)
 }
 
 fn forged(params: MlKemParams, input: MlKemInput<'_>, forgeries: &[Forgery]) -> Proof {
-    let call = match input {
-        MlKemInput::KeyGen { .. } => MlKemCall::KeyGen,
-        MlKemInput::Encaps { .. } => MlKemCall::Encaps,
-        MlKemInput::Decaps { .. } => MlKemCall::Decaps,
-    };
-
-    let pipeline = MlKemChiplet::<F>::new(params, &[call]).unwrap();
+    let pipeline = MlKemChiplet::<F>::new(params, &[kind(&input)]).unwrap();
     let traced = pipeline.trace_forged(&[input], forgeries).unwrap();
 
     host(&pipeline, traced)
 }
 
-fn assert_breaks_only_bus(proof: &Proof, bus: &str) {
-    let report = proof.report();
-
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-
-    for d in &report.bus_diagnostics {
-        assert_eq!(d.bus_id, bus);
-    }
-
-    assert!(!proof.accepted(false));
-    assert!(!proof.accepted(true));
+fn assert_breaks_only_bus(honest: &Proof, forged: &Proof, bus: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            buses: &[bus],
+            ..Fault::NONE
+        },
+    );
 }
 
-fn assert_breaks_only_constraint(proof: &Proof, label: &str) {
-    let report = proof.report();
+fn assert_breaks_only_constraint(honest: &Proof, forged: &Proof, label: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            constraint_labels: &[(CODEC, label)],
+            ..Fault::NONE
+        },
+    );
+}
 
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.constraint_violations.is_empty());
+fn assert_fault(honest: &Proof, forged: &Proof, fault: Fault<'_>) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        fault,
+        &Config::prod(),
+    );
+}
 
-    for v in &report.constraint_violations {
-        assert_eq!(v.label, Some(label));
+fn kind(input: &MlKemInput<'_>) -> MlKemCall {
+    match input {
+        MlKemInput::KeyGen { .. } => MlKemCall::KeyGen,
+        MlKemInput::Encaps { .. } => MlKemCall::Encaps,
+        MlKemInput::Decaps { .. } => MlKemCall::Decaps,
     }
-
-    assert!(!proof.accepted(false));
-    assert!(!proof.accepted(true));
 }
 
 fn expanded_dk(params: MlKemParams, v: &Vectors) -> Vec<u8> {
@@ -327,13 +300,19 @@ fn key_from_another_message_breaks_word_bus() {
     let mut m = v.m;
     m[0] ^= 1;
 
+    let input = || MlKemInput::Encaps { ek: &v.ek, m: &v.m };
+
     let proof = forged(
         MlKemParams::ML_KEM_512,
-        MlKemInput::Encaps { ek: &v.ek, m: &v.m },
+        input(),
         &[Forgery::Message { call: 0, m }],
     );
 
-    assert_breaks_only_bus(&proof, "mlkem::word");
+    assert_breaks_only_bus(
+        &honest_call(MlKemParams::ML_KEM_512, input()),
+        &proof,
+        "mlkem::word",
+    );
 }
 
 #[test]
@@ -343,29 +322,41 @@ fn key_hash_other_than_h_of_ek_breaks_word_bus() {
     let mut h: [u8; 32] = Sha3_256::digest(&v.ek).into();
     h[5] ^= 0x10;
 
+    let input = || MlKemInput::Encaps { ek: &v.ek, m: &v.m };
+
     let proof = forged(
         MlKemParams::ML_KEM_512,
-        MlKemInput::Encaps { ek: &v.ek, m: &v.m },
+        input(),
         &[Forgery::KeyHash { call: 0, h }],
     );
 
-    assert_breaks_only_bus(&proof, "mlkem::word");
+    assert_breaks_only_bus(
+        &honest_call(MlKemParams::ML_KEM_512, input()),
+        &proof,
+        "mlkem::word",
+    );
 }
 
 #[test]
 fn non_canonical_encapsulation_key_breaks_codec_modulus() {
-    let mut v = vectors!(MlKem512, 0x33);
+    let v = vectors!(MlKem512, 0x33);
 
-    v.ek[1] |= 0x0f;
-    v.ek[2] = 0xff;
+    let mut ek = v.ek.clone();
+    ek[1] |= 0x0f;
+    ek[2] = 0xff;
 
     let proof = forged(
         MlKemParams::ML_KEM_512,
-        MlKemInput::Encaps { ek: &v.ek, m: &v.m },
+        MlKemInput::Encaps { ek: &ek, m: &v.m },
         &[],
     );
 
-    assert_breaks_only_constraint(&proof, "codec_kem_modulus");
+    let honest = honest_call(
+        MlKemParams::ML_KEM_512,
+        MlKemInput::Encaps { ek: &v.ek, m: &v.m },
+    );
+
+    assert_breaks_only_constraint(&honest, &proof, "codec_kem_modulus");
 }
 
 #[test]
@@ -373,13 +364,23 @@ fn decapsulation_key_with_foreign_hash_breaks_word_bus() {
     let params = MlKemParams::ML_KEM_512;
     let v = vectors!(MlKem512, 0x34);
 
-    let mut dk = expanded_dk(params, &v);
+    let honest_dk = expanded_dk(params, &v);
+    let mut dk = honest_dk.clone();
+
     let at = dk.len() - 64;
     dk[at] ^= 1;
 
     let proof = forged(params, MlKemInput::Decaps { dk: &dk, c: &v.c }, &[]);
 
-    assert_breaks_only_bus(&proof, "mlkem::word");
+    let honest = honest_call(
+        params,
+        MlKemInput::Decaps {
+            dk: &honest_dk,
+            c: &v.c,
+        },
+    );
+
+    assert_breaks_only_bus(&honest, &proof, "mlkem::word");
 }
 
 #[test]
@@ -388,9 +389,11 @@ fn codec_decoding_another_dk_pke_breaks_word_bus() {
     let v = vectors!(MlKem512, 0x35);
     let dk = expanded_dk(params, &v);
 
+    let input = || MlKemInput::Decaps { dk: &dk, c: &v.c };
+
     let proof = forged(
         params,
-        MlKemInput::Decaps { dk: &dk, c: &v.c },
+        input(),
         &[Forgery::DkPke {
             call: 0,
             word: 3,
@@ -398,7 +401,7 @@ fn codec_decoding_another_dk_pke_breaks_word_bus() {
         }],
     );
 
-    assert_breaks_only_bus(&proof, "mlkem::word");
+    assert_breaks_only_bus(&honest_call(params, input()), &proof, "mlkem::word");
 }
 
 #[test]
@@ -410,13 +413,11 @@ fn sampler_expanding_another_rho_breaks_lane_bus() {
     let mut rho: [u8; 32] = v.ek[v.ek.len() - 32..].try_into().unwrap();
     rho[0] ^= 1;
 
-    let proof = forged(
-        params,
-        MlKemInput::Decaps { dk: &dk, c: &v.c },
-        &[Forgery::Rho { call: 0, rho }],
-    );
+    let input = || MlKemInput::Decaps { dk: &dk, c: &v.c };
 
-    assert_breaks_only_bus(&proof, "mlkem::lane");
+    let proof = forged(params, input(), &[Forgery::Rho { call: 0, rho }]);
+
+    assert_breaks_only_bus(&honest_call(params, input()), &proof, "mlkem::lane");
 }
 
 #[test]
@@ -426,13 +427,19 @@ fn keygen_sampler_expanding_another_rho_breaks_lane_bus() {
     let mut rho: [u8; 32] = v.ek[v.ek.len() - 32..].try_into().unwrap();
     rho[0] ^= 1;
 
+    let input = || MlKemInput::KeyGen { d: &v.d };
+
     let proof = forged(
         MlKemParams::ML_KEM_512,
-        MlKemInput::KeyGen { d: &v.d },
+        input(),
         &[Forgery::Rho { call: 0, rho }],
     );
 
-    assert_breaks_only_bus(&proof, "mlkem::lane");
+    assert_breaks_only_bus(
+        &honest_call(MlKemParams::ML_KEM_512, input()),
+        &proof,
+        "mlkem::lane",
+    );
 }
 
 #[test]

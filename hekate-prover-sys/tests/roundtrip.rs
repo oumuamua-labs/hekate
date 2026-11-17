@@ -6,7 +6,7 @@ use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, Trace, TraceBuilder};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_program::FixedColumn;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
@@ -16,7 +16,7 @@ use hekate_program::{Air, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::{CancelToken, Error, ErrorCode, prove};
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 define_columns! {
@@ -142,10 +142,10 @@ fn shim_prove_verifies_against_hekate_verifier() {
     let mut t = Transcript::<H>::new(label);
     let pinned_id = program_id(&air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut t, &config)
-        .expect("verify");
+    let outcome =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut t, &config);
 
-    assert!(ok, "verifier rejected shim-produced proof");
+    assert_eq!(outcome, Ok(()), "verifier rejected shim-produced proof");
 }
 
 #[test]

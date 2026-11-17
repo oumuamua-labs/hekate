@@ -8,7 +8,7 @@ use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block32, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block32, Block256, HardwareField, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::digest::program_id;
 use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
@@ -21,17 +21,23 @@ use hekate_sha2::{
     pad_message, sha256_words,
 };
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{OuterStage, Rejection};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const CPU_ACTIVE: usize = CpuSha256Block::COLUMNS;
 const CPU_CHAIN: usize = CPU_ACTIVE + 1;
 
 const TWO_BLOCK_MSG: &[u8] = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+
+const UNBALANCED: [Result<(), Rejection>; 2] = [
+    Err(Rejection::BusSum),
+    Err(Rejection::Outer(OuterStage::Linear)),
+];
 
 struct Statement {
     program: CircuitProgram<F>,
@@ -50,9 +56,20 @@ fn cpu_layout() -> Vec<ColumnType> {
     layout
 }
 
+fn test_config(zero_knowledge: bool) -> Config {
+    Config {
+        num_queries: 2,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
+        zero_knowledge,
+        ..Config::dev()
+    }
+}
+
 fn build(msg: &[u8], rounds_per_row: usize) -> Statement {
     let blocks = pad_message(msg);
     let num_blocks = blocks.len();
+
     let cpu_rows = num_blocks.next_power_of_two().max(2);
     let chiplet_rows = (num_blocks * (ROUNDS / rounds_per_row)).next_power_of_two();
 
@@ -165,29 +182,12 @@ fn prove_and_verify(
     st: &Statement,
     cpu: ColumnTrace,
     chiplet: ColumnTrace,
-) -> Result<(bool, usize, f64), String> {
+) -> (Result<(), Rejection>, usize, f64) {
     let instance = instance(st);
     let witness = ProgramWitness::new(cpu).with_chiplets(vec![chiplet]);
+    let report = preflight(&st.program, &instance, &witness).unwrap();
 
-    let report =
-        preflight(&st.program, &instance, &witness).map_err(|e| format!("preflight: {e:?}"))?;
-
-    if !report.is_clean() {
-        for v in &report.constraint_violations {
-            eprintln!(
-                "constraint={} label={:?} row={}",
-                v.constraint_idx, v.label, v.row_idx
-            );
-        }
-
-        for d in &report.bus_diagnostics {
-            for ep in &d.endpoints {
-                eprintln!("bus \"{}\": active={}", d.bus_id, ep.active_rows);
-            }
-        }
-
-        return Err("preflight violations".into());
-    }
+    assert!(report.is_clean(), "{report}");
 
     verdict_without_preflight(st, witness)
 }
@@ -195,13 +195,9 @@ fn prove_and_verify(
 fn verdict_without_preflight(
     st: &Statement,
     witness: ProgramWitness<F, ColumnTrace>,
-) -> Result<(bool, usize, f64), String> {
+) -> (Result<(), Rejection>, usize, f64) {
     let instance = instance(st);
-
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::dev()
-    };
+    let config = test_config(true);
 
     let mut blinding_seed = [0u8; 32];
     rand::rng().fill_bytes(&mut blinding_seed);
@@ -216,7 +212,7 @@ fn verdict_without_preflight(
         blinding_seed,
         None,
     )
-    .map_err(|e| format!("prover: {e:?}"))?;
+    .expect("the prover does not refuse");
     let prove_secs = started.elapsed().as_secs_f64();
 
     let proof_bytes = hekate_sdk::serialize_proof_bytes(&proof).len();
@@ -224,33 +220,29 @@ fn verdict_without_preflight(
     let mut vt = Transcript::<H>::new(b"SHA256_E2E");
     let pinned_id = program_id(&st.program).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(
+    let outcome = HekateVerifier::<F, H>::verify(
         &pinned_id,
         &st.program,
         &instance,
         &proof,
         &mut vt,
         &config,
-    )
-    .map_err(|e| format!("verifier: {e:?}"))?;
+    );
 
-    Ok((ok, proof_bytes, prove_secs))
+    (outcome, proof_bytes, prove_secs)
 }
 
 fn assert_accepted(st: &Statement) {
-    match prove_and_verify(st, cpu_trace(st), chiplet_trace(st)) {
-        Ok((true, _, _)) => {}
-        Ok((false, _, _)) => panic!("verifier rejected an honest proof"),
-        Err(e) => panic!("{e}"),
-    }
+    let (outcome, _, _) = prove_and_verify(st, cpu_trace(st), chiplet_trace(st));
+
+    assert_eq!(outcome, Ok(()));
 }
 
 fn assert_rejected(st: &Statement, cpu: ColumnTrace, chiplet: ColumnTrace) {
     let witness = ProgramWitness::new(cpu).with_chiplets(vec![chiplet]);
+    let (outcome, _, _) = verdict_without_preflight(st, witness);
 
-    if let Ok((true, _, _)) = verdict_without_preflight(st, witness) {
-        panic!("accepted");
-    }
+    assert_eq!(outcome, Err(Rejection::Outer(OuterStage::Linear)));
 }
 
 fn set_b32(trace: &mut ColumnTrace, col: usize, row: usize, value: u32) {
@@ -321,14 +313,10 @@ fn value_pin_trace(rows: usize, substitute: Option<(usize, u32)>) -> ColumnTrace
     tb.build()
 }
 
-fn value_pin_verdict(program: &CircuitProgram<F>, trace: ColumnTrace) -> Result<bool, String> {
-    let instance = ProgramInstance::new(8, vec![]);
+fn value_pin_verdict(program: &CircuitProgram<F>, trace: ColumnTrace) -> Result<(), Rejection> {
+    let instance = ProgramInstance::new(1 << trace.num_vars, vec![]);
     let witness = ProgramWitness::new(trace);
-
-    let config = Config {
-        zero_knowledge: true,
-        ..Config::dev()
-    };
+    let config = test_config(true);
 
     let mut seed = [0u8; 32];
     rand::rng().fill_bytes(&mut seed);
@@ -342,28 +330,28 @@ fn value_pin_verdict(program: &CircuitProgram<F>, trace: ColumnTrace) -> Result<
         seed,
         None,
     )
-    .map_err(|e| format!("prover: {e:?}"))?;
+    .expect("the prover does not refuse");
 
     let mut vt = Transcript::<H>::new(b"VALUE_PIN");
     let pinned_id = program_id(program).unwrap();
 
     HekateVerifier::<F, H>::verify(&pinned_id, program, &instance, &proof, &mut vt, &config)
-        .map_err(|e| format!("verifier: {e:?}"))
 }
 
 fn two_call_verdicts(
     requested: [usize; 2],
     outputs_of: [usize; 2],
     block_order: [usize; 2],
-) -> [bool; 2] {
+) -> [Result<(), Rejection>; 2] {
     let calls = [b"abc".as_slice(), b"abd"].map(|msg| Sha256Call {
         h_in: IV,
         block: pad_message(msg)[0],
     });
 
     let sha = Sha256Chiplet::<F>::new(16, 2, 8).unwrap();
+    let cpu_rows = 2;
 
-    let mut cx = Circuit::<F>::new("Sha256TwoCalls", 2).unwrap();
+    let mut cx = Circuit::<F>::new("Sha256TwoCalls", cpu_rows).unwrap();
 
     let block = CpuSha256Block::declare(&mut cx, 0);
 
@@ -387,7 +375,7 @@ fn two_call_verdicts(
     let mut layout = CpuSha256Block::layout().to_vec();
     layout.push(ColumnType::Bit);
 
-    let mut tb = TraceBuilder::new(&layout, 1).unwrap();
+    let mut tb = TraceBuilder::new(&layout, cpu_rows.trailing_zeros() as usize).unwrap();
 
     for (row, &k) in requested.iter().enumerate() {
         let call = &calls[k];
@@ -412,15 +400,12 @@ fn two_call_verdicts(
         tb.set_bit(CpuSha256Block::COLUMNS, row, Bit::ONE).unwrap();
     }
 
-    let instance = ProgramInstance::new(2, vec![]);
+    let instance = ProgramInstance::new(cpu_rows, vec![]);
     let witness = ProgramWitness::new(tb.build())
         .with_chiplets(vec![sha.trace(&block_order.map(|k| calls[k])).unwrap()]);
 
     [false, true].map(|zero_knowledge| {
-        let config = Config {
-            zero_knowledge,
-            ..Config::dev()
-        };
+        let config = test_config(zero_knowledge);
 
         let proof = prove(
             b"SHA256_TRADE",
@@ -437,7 +422,6 @@ fn two_call_verdicts(
         let pinned_id = program_id(&program).unwrap();
 
         HekateVerifier::<F, H>::verify(&pinned_id, &program, &instance, &proof, &mut vt, &config)
-            .unwrap_or(false)
     })
 }
 
@@ -606,10 +590,10 @@ fn rounds_per_row_sweep() {
         let st = build(&msg, rounds_per_row);
         let layout = st.sha.layout();
 
-        let (ok, proof_bytes, prove_secs) =
-            prove_and_verify(&st, cpu_trace(&st), chiplet_trace(&st)).unwrap();
+        let (outcome, proof_bytes, prove_secs) =
+            prove_and_verify(&st, cpu_trace(&st), chiplet_trace(&st));
 
-        assert!(ok, "rounds_per_row = {rounds_per_row}");
+        assert_eq!(outcome, Ok(()), "rounds_per_row = {rounds_per_row}");
 
         println!(
             "rounds_per_row={rounds_per_row:>2} chiplet_rows={:>4} row_bytes={:>5} \
@@ -626,23 +610,25 @@ fn rounds_per_row_sweep() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn value_pin_accepts_the_honest_column() {
-    let program = value_pin_program(8);
+    let rows = 8;
+    let program = value_pin_program(rows);
 
     assert_eq!(
-        value_pin_verdict(&program, value_pin_trace(8, None)),
-        Ok(true)
+        value_pin_verdict(&program, value_pin_trace(rows, None)),
+        Ok(())
     );
 }
 
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn value_pin_rejects_substituted_constant() {
-    let program = value_pin_program(8);
-    let forged = value_pin_trace(8, Some((5, hekate_sha2::K[1] ^ (1 << 7))));
+    let rows = 8;
+    let program = value_pin_program(rows);
+    let forged = value_pin_trace(rows, Some((5, hekate_sha2::K[1] ^ (1 << 7))));
 
     let report = preflight(
         &program,
-        &ProgramInstance::new(8, vec![]),
+        &ProgramInstance::new(rows, vec![]),
         &ProgramWitness::new(forged.clone()),
     )
     .unwrap();
@@ -650,9 +636,10 @@ fn value_pin_rejects_substituted_constant() {
     assert!(report.constraint_violations.is_empty());
     assert_eq!(report.fixed_column_violations.len(), 1);
 
-    if let Ok(true) = value_pin_verdict(&program, forged) {
-        panic!("accepted");
-    }
+    assert_eq!(
+        value_pin_verdict(&program, forged),
+        Err(Rejection::Outer(OuterStage::Linear))
+    );
 }
 
 #[test]
@@ -660,7 +647,7 @@ fn value_pin_rejects_substituted_constant() {
 fn two_calls_verify() {
     assert_eq!(
         two_call_verdicts([0, 1], [0, 1], [0, 1]),
-        [true, true],
+        [Ok(()), Ok(())],
         "the harness itself is broken, the rejections below are unattributable"
     );
 }
@@ -671,7 +658,7 @@ fn traded_digests_rejected() {
     for block_order in [[0, 1], [1, 0]] {
         assert_eq!(
             two_call_verdicts([0, 1], [1, 0], block_order),
-            [false, false],
+            UNBALANCED,
             "block order {block_order:?}"
         );
     }
@@ -682,6 +669,6 @@ fn traded_digests_rejected() {
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
 fn identical_forged_digests_rejected() {
-    assert_eq!(two_call_verdicts([0, 0], [0, 0], [0, 0]), [true, true]);
-    assert_eq!(two_call_verdicts([0, 0], [1, 1], [0, 0]), [false, false]);
+    assert_eq!(two_call_verdicts([0, 0], [0, 0], [0, 0]), [Ok(()), Ok(())]);
+    assert_eq!(two_call_verdicts([0, 0], [1, 1], [0, 0]), UNBALANCED);
 }

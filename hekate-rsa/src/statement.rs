@@ -15,7 +15,7 @@ use hekate_core::errors::{self, Error};
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_gadgets::chiplets::bignum::modexp::LIMBS32;
 use hekate_gadgets::{CpuModexpBlock, Modexp, ModexpChiplet};
-use hekate_math::{Bit, Block128, TowerField};
+use hekate_math::{Bit, Block256, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
 use hekate_sha2::{CpuSha256Block, IV, STATE_WORDS, Sha256Call, Sha256Chiplet, pad_message};
@@ -23,7 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::pkcs1::{DIGEST_LIMBS, digest_word_of_limb, padding_limbs};
 
-type F = Block128;
+type F = Block256;
 
 const SHA_ACTIVE: usize = CpuSha256Block::COLUMNS + CpuModexpBlock::COLUMNS;
 const SHA_CHAIN: usize = SHA_ACTIVE + 1;

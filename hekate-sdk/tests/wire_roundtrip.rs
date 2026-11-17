@@ -12,7 +12,7 @@
 use hekate_core::config::{CodeRate, Config};
 use hekate_core::errors;
 use hekate_core::proofs::{
-    BrakedownProof, EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
+    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof, TreeOpening,
 };
 use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
@@ -22,7 +22,9 @@ use hekate_gadgets::{
     IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp, MemoryEvent, RamChiplet,
     RomChiplet, generate_arithmetic_trace, generate_ram_trace, generate_rom_trace,
 };
-use hekate_math::{Bit, Block32, Block128, CanonicalDeserialize, CanonicalSerialize, TowerField};
+use hekate_math::{
+    Bit, Block32, Block128, Block256, CanonicalDeserialize, CanonicalSerialize, TowerField,
+};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::Circuit;
 use hekate_program::constraint::builder::ConstraintSystem;
@@ -38,7 +40,7 @@ use hekate_sdk::{
     serialize_bundle_header, serialize_proof_bytes,
 };
 
-type F = Block128;
+type F = Block256;
 
 // =================================================================
 // Test Programs
@@ -713,7 +715,9 @@ fn assert_bundle_eq<P: Program<F>>(
 }
 
 fn wide(i: u128) -> F {
-    F::from((i << 64) | (i.wrapping_mul(0x9E37_79B9) + 1))
+    let lo = (i << 64) | (i.wrapping_mul(0x9E37_79B9) + 1);
+
+    F::new(Block128(lo), Block128(!lo))
 }
 
 // =================================================================
@@ -827,7 +831,8 @@ fn config_roundtrip() {
     let config = Config {
         code_rate: CodeRate::Quarter,
         num_queries: 200,
-        ldt_support_size: 250,
+        fold_arity_log: 3,
+        early_stop_vars: 7,
         min_security_bits: 120,
         outer_queries: 300,
         zero_knowledge: false,
@@ -838,7 +843,8 @@ fn config_roundtrip() {
 
     assert_eq!(restored.config.code_rate, CodeRate::Quarter);
     assert_eq!(restored.config.num_queries, 200);
-    assert_eq!(restored.config.ldt_support_size, 250);
+    assert_eq!(restored.config.fold_arity_log, 3);
+    assert_eq!(restored.config.early_stop_vars, 7);
     assert_eq!(restored.config.min_security_bits, 120);
     assert_eq!(restored.config.outer_queries, 300);
     assert!(!restored.config.zero_knowledge);
@@ -857,7 +863,7 @@ fn serialize_bundle_preserves_raw_config() {
     let witness = ProgramWitness::new(trace);
 
     let config = Config {
-        ldt_support_size: 199,
+        early_stop_vars: 9,
         ..Config::default()
     };
 
@@ -865,7 +871,7 @@ fn serialize_bundle_preserves_raw_config() {
     let restored: DeserializedBundle<F> = deserialize_bundle(&bytes).unwrap();
 
     assert_eq!(
-        restored.config.ldt_support_size, 199,
+        restored.config.early_stop_vars, 9,
         "serialize_bundle must preserve the caller's config verbatim"
     );
 
@@ -1301,20 +1307,23 @@ fn chiplet_boundary_constant_one_round_trips() {
 
 #[test]
 fn chiplet_boundary_constant_nontrivial_round_trips() {
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0u8; 32];
     bytes[0] = 0xDE;
     bytes[1] = 0xAD;
     bytes[2] = 0xBE;
     bytes[3] = 0xEF;
     bytes[7] = 0x01;
     bytes[15] = 0xA5;
+    bytes[16] = 0xC3;
+    bytes[23] = 0x02;
+    bytes[31] = 0x5A;
 
     let val = F::deserialize(&bytes).unwrap();
 
     let restored = chiplet_bnd_roundtrip(val);
     assert_eq!(
         restored, val,
-        "non-trivial 128-bit constant must survive byte-order"
+        "non-trivial 256-bit constant must survive byte-order"
     );
 }
 
@@ -1523,28 +1532,31 @@ fn phased_clock_spec_round_trips() {
 }
 
 // =================================================================
-// Proof wire round-trip (tensor_vec / masters)
+// Proof wire round-trip (fold eval proof)
 // =================================================================
 
 fn empty_sumcheck() -> SumcheckProof<F> {
     SumcheckProof {
+        skip: vec![],
         round_polys: vec![],
         claimed_evaluation: F::ZERO,
     }
 }
 
 fn eval_proof_with(
-    tensor_vec: Vec<F>,
     masters: Vec<F>,
-    h_ldt_proof: Option<BrakedownProof<F>>,
-) -> EvalBatchProof<F> {
-    EvalBatchProof::new(
-        empty_sumcheck(),
-        BrakedownProof::new(vec![], Multiproof::default()),
-        tensor_vec,
+    mask_masters: Vec<F>,
+    openings: Vec<TreeOpening>,
+) -> FoldEvalProof<F> {
+    FoldEvalProof {
+        sumcheck_proof: empty_sumcheck(),
         masters,
-        h_ldt_proof,
-    )
+        mask_masters,
+        fold_rounds: vec![wide(20), wide(21), wide(22), wide(23)],
+        round_roots: [[8u8; 32], [9u8; 32]].concat(),
+        final_layer: vec![wide(30), wide(31)],
+        openings,
+    }
 }
 
 fn point_evaluation() -> (Vec<F>, Vec<F>) {
@@ -1566,10 +1578,10 @@ fn arith_with_carry(num_rows: usize) -> ChipletDef<F> {
 
 #[test]
 fn proof_masters_round_trip() {
-    let eval = eval_proof_with(vec![wide(1), wide(2)], vec![wide(10), wide(11)], None);
+    let eval = eval_proof_with(vec![wide(10), wide(11)], vec![wide(12), wide(13)], vec![]);
 
     let proof = InnerProof::new(
-        [3u8; 32],
+        vec![3u8; 32],
         None,
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
@@ -1588,14 +1600,19 @@ fn proof_masters_round_trip() {
 
     let bytes_of = |v: &[F]| v.iter().map(|f| f.to_bytes()).collect::<Vec<_>>();
 
+    let eval = &restored.eval_proof;
+
+    assert_eq!(bytes_of(&eval.masters), bytes_of(&[wide(10), wide(11)]));
     assert_eq!(
-        bytes_of(&restored.eval_proof.tensor_vec),
-        bytes_of(&[wide(1), wide(2)]),
+        bytes_of(&eval.mask_masters),
+        bytes_of(&[wide(12), wide(13)])
     );
     assert_eq!(
-        bytes_of(&restored.eval_proof.masters),
-        bytes_of(&[wide(10), wide(11)]),
+        bytes_of(&eval.fold_rounds),
+        bytes_of(&[wide(20), wide(21), wide(22), wide(23)]),
     );
+    assert_eq!(eval.round_roots, [[8u8; 32], [9u8; 32]].concat());
+    assert_eq!(bytes_of(&eval.final_layer), bytes_of(&[wide(30), wide(31)]));
     assert_eq!(restored.chiplet_rows, vec![1 << 9]);
 
     let (point, values) = &restored.main_point_evaluation;
@@ -1610,26 +1627,74 @@ fn proof_masters_round_trip() {
 }
 
 #[test]
+fn proof_skip_round_round_trips() {
+    let skipped = SumcheckProof {
+        skip: vec![wide(50), wide(51), wide(52)],
+        round_polys: vec![],
+        claimed_evaluation: wide(53),
+    };
+
+    let proof = InnerProof::new(
+        vec![3u8; 32],
+        None,
+        skipped,
+        LogUpAux::new(vec![], vec![]),
+        point_evaluation(),
+        eval_proof_with(vec![], vec![], vec![]),
+        vec![1 << 9],
+        vec![empty_sumcheck()],
+        vec![LogUpAux::new(vec![], vec![])],
+        vec![(vec![wide(5)], vec![wide(6), wide(7)])],
+        None,
+        None,
+    );
+
+    let bytes = serialize_proof_bytes(&proof);
+    let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
+
+    let bytes_of = |v: &[F]| v.iter().map(|f| f.to_bytes()).collect::<Vec<_>>();
+
+    assert_eq!(
+        bytes_of(&restored.zerocheck_proof.skip),
+        bytes_of(&[wide(50), wide(51), wide(52)])
+    );
+    assert_eq!(
+        restored.zerocheck_proof.claimed_evaluation.to_bytes(),
+        wide(53).to_bytes()
+    );
+    assert!(restored.chiplet_zerocheck_proofs[0].skip.is_empty());
+}
+
+#[test]
 fn proof_logup_h_binding_round_trips() {
     let main_aux = LogUpAux {
-        h_evals: vec![("bus".to_string(), wide(42))],
-        claimed_sums: vec![("bus".to_string(), F::ZERO)],
+        h_evals: vec![wide(42), wide(43)],
+        claimed_sums: vec![F::ZERO, wide(44)],
     };
 
     let multiproof = Multiproof {
-        siblings: vec![[9u8; 32]],
-        unreached: vec![[11u8; 32], [12u8; 32]],
+        siblings: vec![9u8; 32],
+        unreached: [[11u8; 32], [12u8; 32]].concat(),
     };
 
-    let h_opening = BrakedownProof::new(vec![vec![1u8, 2, 3], vec![4, 5, 6]], multiproof.clone());
+    let openings = vec![
+        TreeOpening {
+            leaves: vec![1u8, 2, 3],
+            multiproof: multiproof.clone(),
+        },
+        TreeOpening {
+            leaves: vec![4u8, 5, 6],
+            multiproof: Multiproof::default(),
+        },
+    ];
 
     let proof = InnerProof::new(
-        [3u8; 32],
-        Some([7u8; 32]),
+        vec![3u8; 32],
+        Some(vec![7u8; 32]),
         empty_sumcheck(),
         main_aux,
         point_evaluation(),
-        eval_proof_with(vec![wide(1)], vec![wide(2)], Some(h_opening)),
+        eval_proof_with(vec![wide(2)], vec![], openings),
         vec![],
         vec![],
         vec![],
@@ -1641,28 +1706,33 @@ fn proof_logup_h_binding_round_trips() {
     let bytes = serialize_proof_bytes(&proof);
     let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
 
-    assert_eq!(restored.trace_root, [3u8; 32]);
-    assert_eq!(restored.h_root, Some([7u8; 32]));
+    assert_eq!(restored.trace_root, vec![3u8; 32]);
+    assert_eq!(restored.h_root, Some(vec![7u8; 32]));
 
-    let opening = restored
-        .eval_proof
-        .h_ldt_proof
-        .as_ref()
-        .expect("h opening must survive the wire");
+    assert_eq!(restored.main_logup_aux.h_evals, vec![wide(42), wide(43)]);
+    assert_eq!(
+        restored.main_logup_aux.claimed_sums,
+        vec![F::ZERO, wide(44)]
+    );
 
-    assert_eq!(opening.opened_columns, vec![vec![1u8, 2, 3], vec![4, 5, 6]]);
-    assert_eq!(opening.multiproof, multiproof);
+    let openings = &restored.eval_proof.openings;
+
+    assert_eq!(openings.len(), 2);
+    assert_eq!(openings[0].leaves, vec![1u8, 2, 3]);
+    assert_eq!(openings[0].multiproof, multiproof);
+    assert_eq!(openings[1].leaves, vec![4u8, 5, 6]);
+    assert_eq!(openings[1].multiproof, Multiproof::default());
 }
 
 #[test]
 fn proof_absent_h_binding_stays_none() {
     let proof = InnerProof::new(
-        [3u8; 32],
+        vec![3u8; 32],
         None,
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
         point_evaluation(),
-        eval_proof_with(vec![wide(1)], vec![wide(2)], None),
+        eval_proof_with(vec![wide(2)], vec![], vec![]),
         vec![],
         vec![],
         vec![],
@@ -1675,7 +1745,7 @@ fn proof_absent_h_binding_stays_none() {
     let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
 
     assert!(restored.h_root.is_none());
-    assert!(restored.eval_proof.h_ldt_proof.is_none());
+    assert!(restored.eval_proof.mask_masters.is_empty());
     assert!(restored.pad_root.is_none());
     assert!(restored.outer.is_none());
 }
@@ -1683,8 +1753,8 @@ fn proof_absent_h_binding_stays_none() {
 #[test]
 fn proof_outer_segment_round_trips() {
     let multiproof = Multiproof {
-        siblings: vec![[9u8; 32], [10u8; 32]],
-        unreached: vec![[13u8; 32]],
+        siblings: [[9u8; 32], [10u8; 32]].concat(),
+        unreached: vec![13u8; 32],
     };
 
     let opening = |seed: u128| OuterOpening {
@@ -1694,7 +1764,7 @@ fn proof_outer_segment_round_trips() {
     };
 
     let outer = OuterProof {
-        aux_root: [4u8; 32],
+        aux_root: vec![4u8; 32],
         interleaved: vec![wide(100), wide(101)],
         linear: vec![wide(200)],
         quadratic: vec![wide(300), wide(301), wide(302)],
@@ -1703,29 +1773,29 @@ fn proof_outer_segment_round_trips() {
     };
 
     let proof = InnerProof::new(
-        [3u8; 32],
+        vec![3u8; 32],
         None,
         empty_sumcheck(),
         LogUpAux::new(vec![], vec![]),
         point_evaluation(),
-        eval_proof_with(vec![wide(1)], vec![wide(2)], None),
+        eval_proof_with(vec![wide(2)], vec![wide(3), wide(4)], vec![]),
         vec![],
         vec![],
         vec![],
         vec![],
-        Some([5u8; 32]),
+        Some(vec![5u8; 32]),
         Some(outer),
     );
 
     let bytes = serialize_proof_bytes(&proof);
     let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
 
-    assert_eq!(restored.pad_root, Some([5u8; 32]));
+    assert_eq!(restored.pad_root, Some(vec![5u8; 32]));
 
     let outer = restored.outer.expect("outer segment must survive the wire");
     let bytes_of = |v: &[F]| v.iter().map(|f| f.to_bytes()).collect::<Vec<_>>();
 
-    assert_eq!(outer.aux_root, [4u8; 32]);
+    assert_eq!(outer.aux_root, vec![4u8; 32]);
     assert_eq!(
         bytes_of(&outer.interleaved),
         bytes_of(&[wide(100), wide(101)])
@@ -1791,6 +1861,49 @@ fn program_id_survives_the_wire() {
         program_id::<F, _>(&program).unwrap(),
         program_id::<F, _>(&rebuilt).unwrap()
     );
+}
+
+#[test]
+fn proof_roots_of_64_bytes_round_trip() {
+    let multiproof = Multiproof {
+        siblings: vec![9u8; 64],
+        unreached: [[11u8; 64], [12u8; 64]].concat(),
+    };
+
+    let openings = vec![TreeOpening {
+        leaves: vec![1u8, 2, 3],
+        multiproof: multiproof.clone(),
+    }];
+
+    let mut eval = eval_proof_with(vec![wide(2)], vec![], openings);
+    eval.round_roots = [[8u8; 64], [9u8; 64]].concat();
+
+    let proof = InnerProof::new(
+        vec![3u8; 64],
+        Some(vec![7u8; 64]),
+        empty_sumcheck(),
+        LogUpAux::new(vec![], vec![]),
+        point_evaluation(),
+        eval,
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        Some(vec![5u8; 64]),
+        None,
+    );
+
+    let bytes = serialize_proof_bytes(&proof);
+    let restored: InnerProof<F> = deserialize_proof(&bytes).unwrap();
+
+    assert_eq!(restored.trace_root, vec![3u8; 64]);
+    assert_eq!(restored.h_root, Some(vec![7u8; 64]));
+    assert_eq!(restored.pad_root, Some(vec![5u8; 64]));
+    assert_eq!(
+        restored.eval_proof.round_roots,
+        [[8u8; 64], [9u8; 64]].concat()
+    );
+    assert_eq!(restored.eval_proof.openings[0].multiproof, multiproof);
 }
 
 #[test]

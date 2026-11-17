@@ -10,7 +10,7 @@ use std::time::Instant;
 use clap::Parser;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::Block128;
+use hekate::math::Block256;
 use hekate_gadgets::chiplets::bignum::modexp::LIMBS32;
 use hekate_program::Air;
 use hekate_prover_sys::prove;
@@ -21,7 +21,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const SHA_ROWS: usize = 512;
@@ -155,7 +155,7 @@ fn main() {
     let mut verifier_transcript = Transcript::<H>::new(b"RsaPkcs1");
 
     let pinned_id = args.run.audited_id::<F, _>(program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             program,
@@ -164,8 +164,7 @@ fn main() {
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }

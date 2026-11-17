@@ -8,7 +8,7 @@ use hekate_core::errors::Result;
 use hekate_math::TowerField;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget};
 
-use super::field::{field_to_lo_hi, lo_hi_to_field};
+use super::field::{field_to_words, words_to_field};
 use crate::generated::program as fb;
 
 pub fn serialize_boundary<'a, F: TowerField, A: Allocator + 'a>(
@@ -19,14 +19,14 @@ pub fn serialize_boundary<'a, F: TowerField, A: Allocator + 'a>(
         BoundaryTarget::PublicInput(idx) => (
             fb::BoundaryTargetKind::PublicInput,
             *idx as u32,
-            fb::Block128::new(0, 0),
+            fb::Block256::new(0, 0, 0, 0),
         ),
         BoundaryTarget::Constant(v) => {
-            let (lo, hi) = field_to_lo_hi(v);
+            let [w0, w1, w2, w3] = field_to_words(v);
             (
                 fb::BoundaryTargetKind::Constant,
                 0,
-                fb::Block128::new(lo, hi),
+                fb::Block256::new(w0, w1, w2, w3),
             )
         }
     };
@@ -59,7 +59,7 @@ pub fn deserialize_boundary<F: TowerField>(
             let block = fb_bc
                 .constant_value()
                 .ok_or(super::wire_err("Constant boundary missing constant_value"))?;
-            let val: F = lo_hi_to_field(block.lo(), block.hi())?;
+            let val: F = words_to_field([block.w0(), block.w1(), block.w2(), block.w3()])?;
 
             Ok(BoundaryConstraint::with_constant(col_idx, row_idx, val))
         }

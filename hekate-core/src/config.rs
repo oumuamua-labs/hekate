@@ -5,18 +5,18 @@
 use core::fmt;
 
 use crate::errors;
-use crate::utils::support_floor_vars;
 
-/// Production soundness floor.
-pub const MIN_PRODUCTION_BITS: usize = 100;
+/// Production soundness floor, per Fiat-Shamir round: a proof
+/// is as strong as its weakest round (round-by-round soundness).
+pub const MIN_PRODUCTION_BITS: usize = 128;
 
 /// Most row variables one table may carry. The verifier
 /// rejects a proof that claims a taller table.
 pub const MAX_TABLE_VARS: usize = 32;
 
-/// Smallest grid the fractional mode keeps at every
-/// code rate; the derived query count clears it.
-const FRACTIONAL_FLOOR_GRID: usize = 1 << 11;
+/// Largest `fold_arity_log`: bounds the leaf width and the
+/// verifier's interpolation for a bundle-supplied config.
+pub const MAX_FOLD_ARITY_LOG: usize = 4;
 
 /// Outer row-code rate `1/2^OUTER_RATE_LOG2`.
 /// Below 2 the quadratic test has no soundness.
@@ -30,21 +30,19 @@ pub const OUTER_ROWS: usize = 32;
 /// `num_queries · 2⁻³²`, under one bit.
 pub(crate) const LOG2_FRAC_BITS: u32 = 32;
 
+/// The multiplicity `m` of the Guruswami-Sudan decoder
+/// behind the Johnson estimate, which runs at proximity
+/// `1 − (1 + 1/(2m))·√ρ`.
+const JOHNSON_MULTIPLICITY: u128 = 64;
+
 /// Failures of the `Config` checks and the `CodeRate` decode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    /// Estimated security fell below `min_security_bits`.
+    /// Estimated security of `round` fell below `min_security_bits`.
     SecurityTooLow {
+        round: &'static str,
         estimated_bits: usize,
         min_bits: usize,
-    },
-
-    /// `ldt_support_size <= num_queries`;
-    /// the openings use up the support and
-    /// the unopened leaves leak the witness.
-    InsufficientSupport {
-        ldt_support_size: usize,
-        num_queries: usize,
     },
 
     /// No scalar to mask;
@@ -57,13 +55,42 @@ pub enum Error {
 
     /// The outer code outgrew the largest
     /// additive-FFT domain we encode.
-    OuterDomainTooLarge {
-        code_len: usize,
-        max_log2: u32,
+    OuterDomainTooLarge { code_len: usize, max_log2: u32 },
+
+    /// `log_inv_rate` decodes to no [`CodeRate`]:
+    /// only 1 (rate 1/2) and 2 (rate 1/4) do.
+    UnsupportedCodeRate { log_inv_rate: u32 },
+
+    /// `fold_arity_log` is 0 or above [`MAX_FOLD_ARITY_LOG`].
+    FoldArity { fold_arity_log: usize },
+
+    /// `early_stop_vars + 1 < fold_arity_log`: some
+    /// heights then admit no stop with whole rounds.
+    EarlyStopBelowArity {
+        early_stop_vars: usize,
+        fold_arity_log: usize,
     },
 
-    UnsupportedCodeRate {
-        log_inv_rate: u32,
+    /// The largest polynomial has fewer variables
+    /// than one committed round binds.
+    PoolBelowArity {
+        num_vars: usize,
+        fold_arity_log: usize,
+    },
+
+    /// The codeword of `num_vars + log_inv_rate` index bits
+    /// does not fit a machine word, where shifts would wrap.
+    PoolAboveWord {
+        num_vars: usize,
+        log_inv_rate: usize,
+    },
+
+    /// The uniform blocks of polynomial `poly` cannot hold its
+    /// noise: its unopened leaves would be fixed by the witness.
+    TableBelowNoise {
+        poly: usize,
+        row_vars: usize,
+        noise_cells: usize,
     },
 }
 
@@ -71,18 +98,13 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SecurityTooLow {
+                round,
                 estimated_bits,
                 min_bits,
             } => write!(
                 f,
-                "Security too low: estimated {estimated_bits} bits, but {min_bits} required",
-            ),
-            Self::InsufficientSupport {
-                ldt_support_size,
-                num_queries,
-            } => write!(
-                f,
-                "ldt_support_size ({ldt_support_size}) must be > num_queries ({num_queries})",
+                "Security too low ({round}): estimated {estimated_bits} bits, \
+                 but {min_bits} required",
             ),
             Self::EmptyOuterStatement => {
                 write!(f, "outer statement masks no scalars")
@@ -95,51 +117,49 @@ impl fmt::Display for Error {
             Self::UnsupportedCodeRate { log_inv_rate } => {
                 write!(f, "code rate 1/2^{log_inv_rate} is not one of 1/2, 1/4")
             }
+            Self::FoldArity { fold_arity_log } => write!(
+                f,
+                "fold_arity_log ({fold_arity_log}) must lie in 1..={MAX_FOLD_ARITY_LOG}",
+            ),
+            Self::EarlyStopBelowArity {
+                early_stop_vars,
+                fold_arity_log,
+            } => write!(
+                f,
+                "early_stop_vars ({early_stop_vars}) must be at least \
+                 fold_arity_log - 1 ({fold_arity_log} - 1)",
+            ),
+            Self::PoolBelowArity {
+                num_vars,
+                fold_arity_log,
+            } => write!(
+                f,
+                "largest polynomial has {num_vars} variables, \
+                 below one fold round of {fold_arity_log}",
+            ),
+            Self::PoolAboveWord {
+                num_vars,
+                log_inv_rate,
+            } => write!(
+                f,
+                "largest polynomial has {num_vars} variables at rate 2^-{log_inv_rate}, \
+                 past the {}-bit codeword index",
+                usize::BITS,
+            ),
+            Self::TableBelowNoise {
+                poly,
+                row_vars,
+                noise_cells,
+            } => write!(
+                f,
+                "polynomial {poly}: uniform blocks of 2^{row_vars} rows \
+                 cannot hold its {noise_cells} noise cells",
+            ),
         }
     }
 }
 
-/// Security metrics snapshot for a given `Config`.
-#[derive(Clone, Copy, Debug)]
-pub struct SecurityMetrics {
-    /// Estimated relative distance δ of the linear code.
-    pub relative_distance: f64,
-
-    /// LDT spot-check count.
-    pub num_queries: usize,
-
-    /// LDT query bound: `-log₂(((1 + ρ)/2)^q)`.
-    pub ldt_bits: usize,
-
-    /// Proximity-gap term `(log2(rows) + units - 1) · n / |F|`.
-    pub proximity_bits: usize,
-
-    /// `min(ldt_bits, proximity_bits)`.
-    pub security_bits: usize,
-}
-
-/// Fold the proximity term is stated over: the committed
-/// grid, the eq-tensor's row count and the exponent count
-/// of the `eta` and `lambda` walks, from `PoolLayout`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FoldShape {
-    pub grid_cols: usize,
-    pub grid_rows: usize,
-    pub units: usize,
-}
-
-/// Row-code geometry chosen by `Config::table_geom`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TableGeom {
-    /// Random low-coord support (LDT opening mask) length.
-    pub support_size: usize,
-
-    /// Committed codeword width (power of two).
-    pub encoded_width: usize,
-}
-
-/// Brakedown row-code rate `1/inv_rate`;
-/// small grids fall back to `1/(2·inv_rate)`.
+/// RS code rate `1/inv_rate` of every fold codeword.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum CodeRate {
@@ -171,20 +191,23 @@ impl TryFrom<u32> for CodeRate {
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Row-code rate of the pool commitment;
+    /// Code rate of the fold's RS codewords;
     /// [`Config::prod_at`] derives the query count from it.
     pub code_rate: CodeRate,
 
     /// Number of LDT spot-check queries.
     pub num_queries: usize,
 
-    /// Random low-coord support that masks the LDT
-    /// column openings (data ZK). Lives inside the
-    /// message, it does not widen the codeword.
-    pub ldt_support_size: usize,
+    /// Variables one committed round of the fold binds;
+    /// its leaves hold `2^fold_arity_log` symbols.
+    pub fold_arity_log: usize,
 
-    /// `check_security` rejects configs
-    /// whose estimated bits fall below this.
+    /// Bound on the variables of the fold's final layer;
+    /// [`crate::fold::FoldLayout`] derives the stop under it.
+    pub early_stop_vars: usize,
+
+    /// Fold layouts and draws whose estimated
+    /// bits fall below this are rejected.
     pub min_security_bits: usize,
 
     /// Column openings of the outer argument.
@@ -202,32 +225,34 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Production parameters: 100-bit soundness with the
+    /// Production parameters: 128-bit soundness with the
     /// `MIN_PRODUCTION_BITS` acceptance threshold. The `Default`.
     pub fn prod() -> Self {
         Self::prod_at(CodeRate::Half)
     }
 
-    /// [`Config::prod`] at `code_rate`, with that rate's
-    /// query count and one support cell over it.
+    /// [`Config::prod`] at `code_rate`.
     pub fn prod_at(code_rate: CodeRate) -> Self {
-        let num_queries = match code_rate {
-            CodeRate::Half => const { fractional_floor_queries(CodeRate::Half) },
-            CodeRate::Quarter => const { fractional_floor_queries(CodeRate::Quarter) },
-        };
+        Self::at_bits(MIN_PRODUCTION_BITS, code_rate)
+    }
 
+    /// `bits` of soundness at `code_rate`: the fewest fold
+    /// and outer queries whose query terms clear `bits`,
+    /// which every draw, layout and hasher is then held to.
+    pub fn at_bits(bits: usize, code_rate: CodeRate) -> Self {
         Self {
             code_rate,
-            num_queries,
-            ldt_support_size: num_queries + 1,
-            min_security_bits: MIN_PRODUCTION_BITS,
-            outer_queries: 121,
+            num_queries: fold_floor_queries(bits, code_rate),
+            fold_arity_log: 4,
+            early_stop_vars: 11,
+            min_security_bits: bits,
+            outer_queries: outer_floor_queries(bits),
             zero_knowledge: true,
         }
     }
 
     /// Fast, low-soundness parameters for tests and experiments;
-    /// `min_security_bits = 0` accepts weak grids. Never deploy.
+    /// `min_security_bits = 0` accepts weak layouts. Never deploy.
     pub fn dev() -> Self {
         Self {
             num_queries: 4,
@@ -243,106 +268,22 @@ impl Config {
         usize::from(self.zero_knowledge)
     }
 
-    /// Fewest rows whose unpacked grid holds the LDT support.
-    pub fn min_table_rows(&self) -> usize {
-        1 << support_floor_vars(self.ldt_support_size)
-    }
+    /// Rejects a fold arity outside `1..=MAX_FOLD_ARITY_LOG`
+    /// and an early stop below one fold round.
+    pub fn check_fold(&self) -> errors::Result<()> {
+        let arity_log = self.fold_arity_log;
 
-    /// Committed row-code width for the chosen mode.
-    pub fn encoded_width(&self, grid_cols: usize) -> usize {
-        self.table_geom(grid_cols).encoded_width
-    }
-
-    /// Mode must derive from transcript-bound inputs and
-    /// a fixed target only, never an unabsorbed field, or
-    /// prover and verifier silently diverge on the geometry.
-    pub fn table_geom(&self, grid_cols: usize) -> TableGeom {
-        let inv_rate = self.code_rate.inv_rate();
-
-        let frac = TableGeom {
-            support_size: self.ldt_support_size,
-            encoded_width: grid_cols * inv_rate,
-        };
-
-        let frac_msg = frac.support_size + grid_cols;
-
-        if frac.support_size <= grid_cols
-            && ldt_bits(self.num_queries, frac_msg, frac.encoded_width) >= MIN_PRODUCTION_BITS
-        {
-            return frac;
-        }
-
-        TableGeom {
-            support_size: grid_cols,
-            encoded_width: grid_cols * inv_rate * 2,
-        }
-    }
-
-    /// `min(-log₂(((1 + ρ)/2)^q), proximity_gap_bits)`
-    /// where ρ = msg_len / code_width, q = num_queries.
-    ///
-    /// Brakedown (Golovnev et al. 2022), Appendix B Theorem 7.
-    pub fn estimated_security_bits(&self, field_bits: usize, shape: FoldShape) -> usize {
-        let g = self.table_geom(shape.grid_cols);
-
-        ldt_bits(
-            self.num_queries,
-            g.support_size + shape.grid_cols,
-            g.encoded_width,
-        )
-        .min(self.proximity_gap_bits(field_bits, shape))
-    }
-
-    /// `(log2(rows) + units - 1) · n / |F|`: BCIKS20's `n / |F|`,
-    /// Diamond-Gruen 2024/1351's eq-tensor factor over the rows,
-    /// BCIKS20 Thm 1.5's curve factor over the `eta` and `lambda` walks.
-    pub fn proximity_gap_bits(&self, field_bits: usize, shape: FoldShape) -> usize {
-        let width = self.table_geom(shape.grid_cols).encoded_width;
-
-        let theta = shape.grid_rows.next_power_of_two().ilog2() as usize;
-        let fold_terms = (theta + shape.units.saturating_sub(1)).max(1);
-
-        field_bits
-            .saturating_sub(width.next_power_of_two().ilog2() as usize)
-            .saturating_sub(fold_terms.next_power_of_two().ilog2() as usize)
-    }
-
-    /// Per-table terms at `shape`; the LogUp `γ` term is
-    /// charged separately by [`Config::logup_gamma_bits`].
-    pub fn security_metrics(&self, field_bits: usize, shape: FoldShape) -> SecurityMetrics {
-        let g = self.table_geom(shape.grid_cols);
-
-        SecurityMetrics {
-            relative_distance: self.estimate_relative_distance(shape.grid_cols),
-            num_queries: self.num_queries,
-            ldt_bits: ldt_bits(
-                self.num_queries,
-                g.support_size + shape.grid_cols,
-                g.encoded_width,
-            ),
-            proximity_bits: self.proximity_gap_bits(field_bits, shape),
-            security_bits: self.estimated_security_bits(field_bits, shape),
-        }
-    }
-
-    /// Rejects configs whose estimated soundness at
-    /// `grid_cols` falls below `min_security_bits`.
-    pub fn check_security(&self, field_bits: usize, shape: FoldShape) -> errors::Result<()> {
-        // dev (min_security_bits == 0) waives the ZK floor
-        let support = self.table_geom(shape.grid_cols).support_size;
-        if self.min_security_bits > 0 && support <= self.num_queries {
-            return Err(Error::InsufficientSupport {
-                ldt_support_size: support,
-                num_queries: self.num_queries,
+        if !(1..=MAX_FOLD_ARITY_LOG).contains(&arity_log) {
+            return Err(Error::FoldArity {
+                fold_arity_log: arity_log,
             }
             .into());
         }
 
-        let est_bits = self.estimated_security_bits(field_bits, shape);
-        if est_bits < self.min_security_bits {
-            return Err(Error::SecurityTooLow {
-                estimated_bits: est_bits,
-                min_bits: self.min_security_bits,
+        if self.early_stop_vars < arity_log - 1 {
+            return Err(Error::EarlyStopBelowArity {
+                early_stop_vars: self.early_stop_vars,
+                fold_arity_log: arity_log,
             }
             .into());
         }
@@ -350,17 +291,23 @@ impl Config {
         Ok(())
     }
 
-    /// Rejects a proof whose total bus height drops
-    /// the `γ` term below `min_security_bits`.
-    pub fn check_logup_security(&self, field_bits: usize, bus_rows: u64) -> errors::Result<()> {
+    /// Rejects a draw whose [`Config::draw_bits`]
+    /// fall below `min_security_bits`; 0 waives it.
+    pub fn check_draw(
+        &self,
+        round: &'static str,
+        field_bits: usize,
+        events: u128,
+    ) -> errors::Result<()> {
         if self.min_security_bits == 0 {
             return Ok(());
         }
 
-        let bits = self.logup_gamma_bits(field_bits, bus_rows);
+        let bits = self.draw_bits(field_bits, events);
 
         if bits < self.min_security_bits {
             return Err(Error::SecurityTooLow {
+                round,
                 estimated_bits: bits,
                 min_bits: self.min_security_bits,
             }
@@ -370,23 +317,32 @@ impl Config {
         Ok(())
     }
 
-    /// Exact MDS (Singleton) distance of the chosen geometry:
-    /// `δ = (encoded_width − support − grid_cols) / encoded_width`.
-    /// Holds for both modes (full-half yields exactly 0.5).
-    /// MDS: `hekate-math` `verus/fft.rs::fwd_semantics`.
-    fn estimate_relative_distance(&self, grid_cols: usize) -> f64 {
-        let g = self.table_geom(grid_cols);
+    /// One Fiat-Shamir draw from a `2^field_bits` field that at most
+    /// `events` values defeat, in bits: `field_bits − ⌈log₂ events⌉`.
+    pub fn draw_bits(&self, field_bits: usize, events: u128) -> usize {
+        let log_events = events
+            .max(1)
+            .checked_next_power_of_two()
+            .map_or(u128::BITS, u128::ilog2) as usize;
 
-        g.encoded_width.saturating_sub(g.support_size + grid_cols) as f64 / g.encoded_width as f64
+        field_bits.saturating_sub(log_events)
     }
 
-    /// Schwartz-Zippel over the global LogUp `γ`, in bits:
-    /// the bus argument collapses if `γ` roots any one of the
-    /// `γ + key[i]` denominators, over every bus row in the proof.
-    pub fn logup_gamma_bits(&self, field_bits: usize, bus_rows: u64) -> usize {
-        let rows = bus_rows.max(1).next_power_of_two().ilog2() as usize;
+    /// Rejects a `digest_bytes`-wide hash whose collision resistance,
+    /// half its bits, falls below `min_security_bits`; 0 waives it.
+    pub fn check_digest(&self, digest_bytes: usize) -> errors::Result<()> {
+        let bits = 4 * digest_bytes;
 
-        field_bits.saturating_sub(rows)
+        if self.min_security_bits != 0 && bits < self.min_security_bits {
+            return Err(Error::SecurityTooLow {
+                round: "digest",
+                estimated_bits: bits,
+                min_bits: self.min_security_bits,
+            }
+            .into());
+        }
+
+        Ok(())
     }
 }
 
@@ -423,26 +379,79 @@ pub(crate) const fn log2_ratio_fixed(n: u128, m: u128) -> u128 {
     (int_part << LOG2_FRAC_BITS) | frac
 }
 
-/// `floor(-log₂(((1 + ρ)/2)^q))` in bits, ρ = msg_len / code_width.
-/// Integer-only, prover and verifier derive identical geometry;
-/// libm `powf`/`log2` are not bit-reproducible across platforms.
-const fn ldt_bits(num_queries: usize, msg_len: usize, code_width: usize) -> usize {
-    if msg_len >= code_width {
-        return 0;
-    }
-
-    let log2_ratio = log2_ratio_fixed(2 * code_width as u128, code_width as u128 + msg_len as u128);
+/// Returns the bits `num_queries` queries prove at unique decoding:
+/// `⌊t · log₂(2/(1 + ρ))⌋` in integers, as libm `powf`/`log2` are not
+/// bit-reproducible and prover and verifier derive one geometry.
+pub(crate) const fn unique_query_bits(num_queries: usize, log_inv_rate: usize) -> usize {
+    let inv_rate = 1u128 << log_inv_rate;
+    let log2_ratio = log2_ratio_fixed(2 * inv_rate, inv_rate + 1);
 
     ((num_queries as u128 * log2_ratio) >> LOG2_FRAC_BITS) as usize
 }
 
-/// Fewest queries whose fractional mode clears `MIN_PRODUCTION_BITS`
-/// at `FRACTIONAL_FLOOR_GRID` with one support cell over the count.
-const fn fractional_floor_queries(code_rate: CodeRate) -> usize {
-    let width = FRACTIONAL_FLOOR_GRID * code_rate.inv_rate();
+/// Returns the bits `num_queries` queries prove at the
+/// Johnson radius: `⌊t · (ω/2 − log₂(1 + 1/(2m)))⌋`.
+pub(crate) const fn johnson_query_bits(num_queries: usize, log_inv_rate: usize) -> usize {
+    let m = JOHNSON_MULTIPLICITY;
+    let gap_upper = log2_ratio_fixed(2 * m + 1, 2 * m) + 1;
+    let per_query = ((log_inv_rate as u128) << (LOG2_FRAC_BITS - 1)) - gap_upper;
+
+    ((num_queries as u128 * per_query) >> LOG2_FRAC_BITS) as usize
+}
+
+/// Returns the log₂ of the factor the Johnson proximity error
+/// puts on `|D|²/|F|`, rounded up: `(m + ½)^7 / (3ρ^{3/2})`
+/// (ePrint 2024/1571 Thm 2).
+pub(crate) const fn johnson_factor_log2(log_inv_rate: usize) -> usize {
+    let two_m_plus_one = 2 * JOHNSON_MULTIPLICITY + 1;
+    let upper = log2_ratio_fixed(two_m_plus_one.pow(7), 3 << 7)
+        + 1
+        + ((3 * log_inv_rate as u128) << (LOG2_FRAC_BITS - 1));
+
+    upper.div_ceil(1 << LOG2_FRAC_BITS) as usize
+}
+
+/// Returns the most codewords within the Johnson-radius proximity
+/// of any word: `⌈(m + ½)/√ρ⌉` (ePrint 2024/1571 Prop. 1).
+pub(crate) const fn johnson_list_bound(log_inv_rate: usize) -> u128 {
+    let two_m_plus_one = 2 * JOHNSON_MULTIPLICITY + 1;
+    let target = (two_m_plus_one * two_m_plus_one) << log_inv_rate;
+
+    let mut bound = 1;
+    while 4 * bound * bound < target {
+        bound += 1;
+    }
+
+    bound
+}
+
+/// Fewest queries whose fold term clears `bits` at `code_rate`.
+const fn fold_floor_queries(bits: usize, code_rate: CodeRate) -> usize {
+    let log_inv_rate = code_rate.log_inv_rate() as usize;
+    let johnson = bits <= MIN_PRODUCTION_BITS;
 
     let mut queries = 1;
-    while ldt_bits(queries, queries + 1 + FRACTIONAL_FLOOR_GRID, width) < MIN_PRODUCTION_BITS {
+    loop {
+        let term = match johnson {
+            true => johnson_query_bits(queries, log_inv_rate),
+            false => unique_query_bits(queries, log_inv_rate),
+        };
+
+        if term >= bits {
+            return queries;
+        }
+
+        queries += 1;
+    }
+}
+
+/// Fewest outer queries clearing `bits` (Ligero journal Lemma 4.6).
+const fn outer_floor_queries(bits: usize) -> usize {
+    let inv_rate = 1u128 << OUTER_RATE_LOG2;
+    let per_query = log2_ratio_fixed(2 * inv_rate, inv_rate + 2);
+
+    let mut queries = 1;
+    while ((queries as u128 * per_query) >> LOG2_FRAC_BITS) < bits as u128 {
         queries += 1;
     }
 
@@ -453,18 +462,6 @@ const fn fractional_floor_queries(code_rate: CodeRate) -> usize {
 mod tests {
     use super::*;
 
-    const GRID_COLS: usize = 1024;
-
-    /// A single-row, single-unit fold contributes no tensor
-    /// and no curve factor, isolating the terms under test.
-    fn flat(grid_cols: usize) -> FoldShape {
-        FoldShape {
-            grid_cols,
-            grid_rows: 1,
-            units: 1,
-        }
-    }
-
     #[test]
     fn default_is_prod() {
         assert_eq!(Config::default().min_security_bits, MIN_PRODUCTION_BITS);
@@ -472,243 +469,123 @@ mod tests {
     }
 
     #[test]
-    fn prod_meets_production_floor() {
-        let prod = Config::prod();
+    fn prod_queries_are_fewest_clearing_fold_floor() {
+        for (rate, queries) in [(CodeRate::Half, 262), (CodeRate::Quarter, 130)] {
+            let t = Config::prod_at(rate).num_queries;
+            let log_inv_rate = rate.log_inv_rate() as usize;
 
-        assert!(prod.estimated_security_bits(128, flat(GRID_COLS)) >= MIN_PRODUCTION_BITS);
-        assert!(prod.check_security(128, flat(GRID_COLS)).is_ok());
-    }
-
-    #[test]
-    fn dev_is_lenient_on_weak_params() {
-        let dev = Config::dev();
-
-        assert!(dev.estimated_security_bits(128, flat(GRID_COLS)) < MIN_PRODUCTION_BITS);
-        assert!(dev.check_security(128, flat(GRID_COLS)).is_ok());
-    }
-
-    #[test]
-    fn prod_threshold_rejects_weak_queries() {
-        let weak = Config {
-            num_queries: 4,
-            ..Config::prod()
-        };
-
-        assert!(weak.check_security(128, flat(GRID_COLS)).is_err());
-    }
-
-    #[test]
-    fn full_half_fallback_admits_ml_dsa_grid() {
-        assert!(Config::prod().check_security(128, flat(512)).is_ok());
-    }
-
-    #[test]
-    fn grid_below_num_queries_rejected() {
-        assert!(Config::prod().check_security(128, flat(128)).is_err());
-    }
-
-    #[test]
-    fn ldt_bits_matches_float_within_one_bit() {
-        let cfg = Config::prod();
-
-        for log_g in 8usize..=20 {
-            let grid_cols = 1usize << log_g;
-            let g = cfg.table_geom(grid_cols);
-            let msg: usize = g.support_size + grid_cols;
-
-            if msg >= g.encoded_width {
-                continue;
-            }
-
-            let rho = msg as f64 / g.encoded_width as f64;
-            let per_query = (1.0 + rho) / 2.0;
-            let reference = (-per_query.powf(cfg.num_queries as f64).log2()).floor();
-            let integer = ldt_bits(cfg.num_queries, msg, g.encoded_width) as f64;
-
-            assert!(
-                (integer - reference).abs() <= 1.0,
-                "grid 2^{log_g}: integer {integer} vs float {reference}",
-            );
+            assert_eq!(t, queries);
+            assert!(johnson_query_bits(t, log_inv_rate) >= MIN_PRODUCTION_BITS);
+            assert!(johnson_query_bits(t - 1, log_inv_rate) < MIN_PRODUCTION_BITS);
         }
     }
 
     #[test]
-    fn table_geom_selects_integer_stable_modes() {
-        let prod = Config::prod();
+    fn at_bits_derives_fold_and_outer_queries() {
+        for (bits, half, quarter, outer) in [
+            (100, 205, 102, 121),
+            (128, 262, 130, 155),
+            (220, 531, 325, 266),
+        ] {
+            let config = Config::at_bits(bits, CodeRate::Half);
 
-        let inv_rate = prod.code_rate.inv_rate();
+            assert_eq!(config.min_security_bits, bits);
+            assert_eq!(config.num_queries, half);
+            assert_eq!(config.outer_queries, outer);
+            assert_eq!(
+                Config::at_bits(bits, CodeRate::Quarter).num_queries,
+                quarter
+            );
+        }
 
-        let big = prod.table_geom(1 << 12);
-        assert_eq!(big.support_size, prod.ldt_support_size);
-        assert_eq!(big.encoded_width, inv_rate << 12);
-
-        let small = prod.table_geom(512);
-        assert_eq!(small.support_size, 512);
-        assert_eq!(small.encoded_width, inv_rate * 512 * 2);
-    }
-
-    #[test]
-    fn prod_queries_sit_on_fractional_mode_edge() {
-        let at = |t: usize| Config {
-            num_queries: t,
-            ldt_support_size: t + 1,
-            ..Config::prod()
-        };
-
-        let binding = 1usize << 11;
-
-        assert_eq!(Config::prod().num_queries, 287);
-        assert_eq!(at(287).encoded_width(binding), binding * 2);
-        assert_eq!(at(286).encoded_width(binding), binding * 2 * 2);
-    }
-
-    #[test]
-    fn grid_1024_never_clears_floor_fractionally() {
-        let best = (200..=1200)
-            .map(|t| ldt_bits(t, t + 1024, 2048))
-            .max()
-            .unwrap();
-
-        assert!(best < MIN_PRODUCTION_BITS, "peaked at {best}");
-    }
-
-    #[test]
-    fn proximity_gap_charges_tensor_and_curve_factors() {
-        let cfg = Config::prod();
-        let grid_cols = 1usize << 14;
-
-        let width_only = cfg.proximity_gap_bits(128, flat(grid_cols));
-
-        let charged = cfg.proximity_gap_bits(
-            128,
-            FoldShape {
-                grid_cols,
-                grid_rows: 1 << 7,
-                units: 80,
-            },
-        );
-
-        assert_eq!(cfg.encoded_width(grid_cols), 1 << 15);
-        assert_eq!(width_only, 128 - 15);
         assert_eq!(
-            width_only - charged,
-            (7 + 79usize).next_power_of_two().ilog2() as usize
+            Config::prod().outer_queries,
+            outer_floor_queries(MIN_PRODUCTION_BITS)
         );
     }
 
     #[test]
-    fn logup_gamma_sits_on_production_floor_edge() {
+    fn digest_clears_half_its_bits() {
         let prod = Config::prod();
-        let edge = 1u64 << (128 - MIN_PRODUCTION_BITS);
+        let wide = Config::at_bits(220, CodeRate::Half);
 
-        assert_eq!(prod.logup_gamma_bits(128, edge), MIN_PRODUCTION_BITS);
-        assert_eq!(
-            prod.logup_gamma_bits(128, edge + 1),
-            MIN_PRODUCTION_BITS - 1
-        );
+        assert!(prod.check_digest(32).is_ok());
+        assert!(wide.check_digest(64).is_ok());
+        assert!(Config::dev().check_digest(16).is_ok());
 
-        assert!(prod.check_logup_security(128, edge).is_ok());
-        assert!(prod.check_logup_security(128, edge + 1).is_err());
+        assert!(matches!(
+            wide.check_digest(32),
+            Err(errors::Error::Config(Error::SecurityTooLow {
+                round: "digest",
+                estimated_bits: 128,
+                min_bits: 220,
+            }))
+        ));
+        assert!(prod.check_digest(16).is_err());
     }
 
     #[test]
-    fn logup_gamma_clears_for_busless_and_dev_proofs() {
+    fn unique_query_bits_matches_float_within_one_bit() {
+        for rate in [CodeRate::Half, CodeRate::Quarter] {
+            let inv_rate = rate.inv_rate();
+            let per_query = (1.0 + 1.0 / inv_rate as f64) / 2.0;
+
+            for num_queries in (50..=400).step_by(7) {
+                let reference = (-per_query.powf(num_queries as f64).log2()).floor();
+                let integer = unique_query_bits(num_queries, rate.log_inv_rate() as usize) as f64;
+
+                assert!(
+                    (integer - reference).abs() <= 1.0,
+                    "rate 1/{inv_rate}, {num_queries} queries: {integer} vs {reference}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn draw_sits_on_production_floor_edge() {
+        let prod = Config::prod();
+        let edge = 1u128 << (128 - MIN_PRODUCTION_BITS);
+
+        assert_eq!(prod.draw_bits(128, edge), MIN_PRODUCTION_BITS);
+        assert_eq!(prod.draw_bits(128, edge + 1), MIN_PRODUCTION_BITS - 1);
+
+        assert!(prod.check_draw("bus draw", 128, edge).is_ok());
+        assert!(matches!(
+            prod.check_draw("bus draw", 128, edge + 1),
+            Err(errors::Error::Config(Error::SecurityTooLow {
+                round: "bus draw",
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn draw_clears_for_one_event_and_dev_configs() {
         let prod = Config::prod();
 
-        assert_eq!(prod.logup_gamma_bits(128, 0), 128);
-        assert_eq!(prod.logup_gamma_bits(128, 1), 128);
-        assert!(prod.check_logup_security(128, 0).is_ok());
+        assert_eq!(prod.draw_bits(128, 0), 128);
+        assert_eq!(prod.draw_bits(128, 1), 128);
+        assert!(prod.check_draw("bus draw", 128, 0).is_ok());
 
         let dev = Config::dev();
 
         assert_eq!(dev.min_security_bits, 0);
-        assert!(dev.check_logup_security(128, 1 << 60).is_ok());
+        assert!(dev.check_draw("bus draw", 128, 1 << 60).is_ok());
     }
 
     #[test]
-    fn support_below_queries_rejected() {
-        let config = Config {
-            ldt_support_size: 32,
-            ..Config::prod()
-        };
-
-        assert!(matches!(
-            config.check_security(128, flat(1 << 12)),
-            Err(errors::Error::Config(Error::InsufficientSupport { .. }))
-        ));
+    fn draw_saturates_past_u128_events() {
+        assert_eq!(Config::prod().draw_bits(256, u128::MAX), 128);
     }
 
     #[test]
-    fn support_equal_to_queries_rejected() {
-        let config = Config {
-            ldt_support_size: Config::prod().num_queries,
-            ..Config::prod()
-        };
-
-        assert!(matches!(
-            config.check_security(128, flat(1 << 12)),
-            Err(errors::Error::Config(Error::InsufficientSupport { .. }))
-        ));
-    }
-
-    #[test]
-    fn support_one_above_queries_accepted() {
+    fn bus_weight_past_128_bit_floor_clears_at_256_bits() {
         let prod = Config::prod();
+        let weight = 1u128 << 30;
 
-        assert_eq!(prod.ldt_support_size, prod.num_queries + 1);
-        assert!(prod.check_security(128, flat(1 << 12)).is_ok());
-    }
-
-    #[test]
-    fn support_below_queries_waived_in_dev() {
-        let config = Config {
-            ldt_support_size: 32,
-            min_security_bits: 0,
-            ..Config::prod()
-        };
-
-        assert!(config.check_security(128, flat(1 << 12)).is_ok());
-    }
-
-    #[test]
-    fn quarter_rate_queries_sit_on_fractional_mode_edge() {
-        let at = |t: usize| Config {
-            num_queries: t,
-            ldt_support_size: t + 1,
-            ..Config::prod_at(CodeRate::Quarter)
-        };
-
-        let binding = 1usize << 11;
-
-        assert_eq!(Config::prod_at(CodeRate::Quarter).num_queries, 153);
-        assert_eq!(at(153).encoded_width(binding), binding * 4);
-        assert_eq!(at(152).encoded_width(binding), binding * 4 * 2);
-    }
-
-    #[test]
-    fn quarter_rate_keeps_half_rate_mode_map() {
-        let half = Config::prod();
-        let quarter = Config::prod_at(CodeRate::Quarter);
-
-        for log_g in 8..=20 {
-            let grid_cols = 1usize << log_g;
-            let mode = |cfg: &Config| {
-                cfg.encoded_width(grid_cols) / (grid_cols * cfg.code_rate.inv_rate())
-            };
-
-            assert_eq!(mode(&half), mode(&quarter), "grid 2^{log_g}");
-        }
-    }
-
-    #[test]
-    fn quarter_rate_meets_production_floor() {
-        let quarter = Config::prod_at(CodeRate::Quarter);
-
-        assert_eq!(quarter.ldt_support_size, quarter.num_queries + 1);
-
-        for grid_cols in [512, 1 << 11, 1 << 14] {
-            assert!(quarter.check_security(128, flat(grid_cols)).is_ok());
-        }
+        assert!(prod.check_draw("bus draw", 128, weight).is_err());
+        assert!(prod.check_draw("bus draw", 256, weight).is_ok());
     }
 
     #[test]
@@ -726,24 +603,88 @@ mod tests {
     }
 
     #[test]
-    fn quarter_rate_proximity_gap_pays_one_width_bit() {
-        let shape = FoldShape {
-            grid_cols: 1 << 14,
-            grid_rows: 1 << 7,
-            units: 80,
-        };
+    fn johnson_query_bits_matches_float_within_one_bit() {
+        let gap = (1.0 + 1.0 / (2 * JOHNSON_MULTIPLICITY) as f64).log2();
+        for rate in [CodeRate::Half, CodeRate::Quarter] {
+            let log_inv_rate = rate.log_inv_rate() as usize;
+            let per_query = log_inv_rate as f64 / 2.0 - gap;
 
-        let half = Config::prod();
-        let quarter = Config::prod_at(CodeRate::Quarter);
+            for num_queries in (50..=400).step_by(7) {
+                let reference = (num_queries as f64 * per_query).floor();
+                let integer = johnson_query_bits(num_queries, log_inv_rate) as f64;
 
-        assert_eq!(
-            quarter.encoded_width(shape.grid_cols),
-            2 * half.encoded_width(shape.grid_cols)
-        );
-        assert_eq!(
-            quarter.proximity_gap_bits(128, shape),
-            half.proximity_gap_bits(128, shape) - 1
-        );
-        assert!(quarter.check_security(128, shape).is_ok());
+                assert!(
+                    (integer - reference).abs() <= 1.0,
+                    "rate 1/{}, {num_queries} queries: {integer} vs {reference}",
+                    rate.inv_rate(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn johnson_factor_and_list_bound_round_up() {
+        let half_m = JOHNSON_MULTIPLICITY as f64 + 0.5;
+        for log_inv_rate in [1, 2] {
+            let rho = 0.5f64.powi(log_inv_rate as i32);
+            let factor = (half_m.powi(7) / (3.0 * rho.powf(1.5))).log2().ceil();
+            let list = (half_m / rho.sqrt()).ceil();
+
+            assert_eq!(johnson_factor_log2(log_inv_rate), factor as usize);
+            assert_eq!(johnson_list_bound(log_inv_rate), list as u128);
+        }
+    }
+
+    #[test]
+    fn johnson_list_bound_covers_counting_bound() {
+        let m = JOHNSON_MULTIPLICITY as f64;
+
+        for log_inv_rate in [1, 2] {
+            let rho = 0.5f64.powi(log_inv_rate as i32);
+            let alpha = (1.0 + 1.0 / (2.0 * m)) * rho.sqrt();
+            let counting = (alpha - rho) / (alpha * alpha - rho);
+
+            assert!(
+                counting < johnson_list_bound(log_inv_rate) as f64,
+                "rate 1/{}: {counting}",
+                1 << log_inv_rate
+            );
+        }
+    }
+
+    #[test]
+    fn johnson_binding_error_clears_floor_through_36_vars() {
+        let polys = 64.0f64;
+        let m = JOHNSON_MULTIPLICITY as f64;
+        let floor = 2f64.powi(-(MIN_PRODUCTION_BITS as i32));
+
+        for rate in [CodeRate::Half, CodeRate::Quarter] {
+            let log_inv_rate = rate.log_inv_rate() as usize;
+            let omega = log_inv_rate as f64;
+            let queries = Config::prod_at(rate).num_queries as f64;
+
+            let kappa = (m + 0.5).powi(7) * 2f64.powf(1.5 * omega) / 3.0;
+            let nu = johnson_list_bound(log_inv_rate) as f64;
+            let per_query = (1.0 + 1.0 / (2.0 * m)) * 2f64.powf(-omega / 2.0);
+
+            let error = |vars: f64| {
+                let domain = 2f64.powf(vars + omega);
+                let degrees = (polys + 1.0) * kappa * domain * domain
+                    + nu * (2.0 * polys - 1.0 + vars)
+                    + 2.0 * vars * nu;
+
+                degrees * 2f64.powi(-256) + per_query.powf(queries)
+            };
+
+            for vars in 1..=36 {
+                assert!(
+                    error(vars as f64) < floor,
+                    "rate 1/{}, {vars} vars",
+                    rate.inv_rate()
+                );
+            }
+
+            assert!(error(37.0) >= floor, "rate 1/{}", rate.inv_rate());
+        }
     }
 }

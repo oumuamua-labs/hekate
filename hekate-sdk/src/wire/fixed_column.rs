@@ -8,7 +8,7 @@ use hekate_core::errors::Result;
 use hekate_math::TowerField;
 use hekate_program::{CadenceSegment, FixedColumn, FixedShape};
 
-use super::field::{field_to_lo_hi, lo_hi_to_field};
+use super::field::{field_to_words, words_to_field};
 use super::wire_err;
 use crate::generated::program as fb;
 
@@ -31,7 +31,7 @@ pub fn serialize_fixed_column<'a, F: TowerField, A: Allocator + 'a>(
             args.custom_bits = Some(fbb.create_vector(&bytes));
         }
         FixedShape::Periodic { period, values } => {
-            let blocks: Vec<fb::Block128> = values.iter().map(to_block).collect();
+            let blocks: Vec<fb::Block256> = values.iter().map(to_block).collect();
 
             args.kind = fb::FixedShapeKind::Periodic;
             args.period = *period as u32;
@@ -39,14 +39,14 @@ pub fn serialize_fixed_column<'a, F: TowerField, A: Allocator + 'a>(
         }
         FixedShape::Sparse(entries) => {
             let rows: Vec<u64> = entries.iter().map(|&(r, _)| r as u64).collect();
-            let blocks: Vec<fb::Block128> = entries.iter().map(|(_, v)| to_block(v)).collect();
+            let blocks: Vec<fb::Block256> = entries.iter().map(|(_, v)| to_block(v)).collect();
 
             args.kind = fb::FixedShapeKind::Sparse;
             args.sparse_rows = Some(fbb.create_vector(&rows));
             args.sparse_values = Some(fbb.create_vector(&blocks));
         }
         FixedShape::Dense(values) => {
-            let blocks: Vec<fb::Block128> = values.iter().map(to_block).collect();
+            let blocks: Vec<fb::Block256> = values.iter().map(to_block).collect();
 
             args.kind = fb::FixedShapeKind::Dense;
             args.values = Some(fbb.create_vector(&blocks));
@@ -57,7 +57,7 @@ pub fn serialize_fixed_column<'a, F: TowerField, A: Allocator + 'a>(
             origin,
             values,
         } => {
-            let blocks: Vec<fb::Block128> = values.iter().map(to_block).collect();
+            let blocks: Vec<fb::Block256> = values.iter().map(to_block).collect();
 
             args.kind = fb::FixedShapeKind::Cadence;
             args.stride = *stride as u64;
@@ -69,7 +69,7 @@ pub fn serialize_fixed_column<'a, F: TowerField, A: Allocator + 'a>(
             let seg_offsets: Vec<_> = segments
                 .iter()
                 .map(|seg| {
-                    let blocks: Vec<fb::Block128> = seg.values.iter().map(to_block).collect();
+                    let blocks: Vec<fb::Block256> = seg.values.iter().map(to_block).collect();
                     let values = fbb.create_vector(&blocks);
 
                     fb::CadenceSegment::create(
@@ -201,20 +201,21 @@ pub fn deserialize_fixed_columns<F: TowerField>(
     Ok(out)
 }
 
-fn to_block<F: TowerField>(f: &F) -> fb::Block128 {
-    let (lo, hi) = field_to_lo_hi(f);
-    fb::Block128::new(lo, hi)
+fn to_block<F: TowerField>(f: &F) -> fb::Block256 {
+    let [w0, w1, w2, w3] = field_to_words(f);
+
+    fb::Block256::new(w0, w1, w2, w3)
 }
 
 fn read_values<F: TowerField>(
-    values: Option<flatbuffers::Vector<'_, fb::Block128>>,
+    values: Option<flatbuffers::Vector<'_, fb::Block256>>,
 ) -> Result<Vec<F>> {
     let blocks = values.ok_or(wire_err("fixed column missing field values"))?;
 
     let mut out = Vec::with_capacity(blocks.len());
     for i in 0..blocks.len() {
         let b = blocks.get(i);
-        out.push(lo_hi_to_field(b.lo(), b.hi())?);
+        out.push(words_to_field([b.w0(), b.w1(), b.w2(), b.w3()])?);
     }
 
     Ok(out)

@@ -2,16 +2,23 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use hekate_core::errors;
+use hekate_core::skip::SkipPoint;
 use hekate_math::{Flat, HardwareField, TowerField};
 
 use crate::FixedColumn;
+use crate::linearized::MAX_BYTES;
 
+mod columns;
 mod rank;
 
+pub use columns::{
+    BusColumn, BusFraction, BusGroup, bus_columns, bus_draw_events, bus_tag, flat_planes, h_planes,
+    key_schedule, lookup_weight, plane_basis,
+};
 pub use rank::{
     OMEGA, OMEGA_ORDER, RankClock, RankTable, TableHeight, rank_clocks, validate_ordered_buses,
     validate_ordered_emits,
@@ -28,11 +35,8 @@ pub const EMIT_RANK_LABEL: ChallengeLabel = b"kappa_emit_rank";
 /// bytes; a wider clock truncates silently.
 pub const MAX_ROW_INDEX_BYTES: usize = 8;
 
-/// LogUp bus semantics.
-///
-/// Cross-bus check sums `claimed_sum` over all
-/// endpoints sharing a `bus_id` and rejects if
-/// the total is non-zero in `GF(2^128)`.
+/// logUp bus semantics: Permutation claimed sums cancel
+/// in one total over every table, Lookup ones per `bus_id`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BusKind {
     #[default]
@@ -48,7 +52,7 @@ pub enum Side {
     Response,
 }
 
-/// Byte source for the LogUp
+/// Byte source for the logUp
 /// key `Σ β^j · source_j(i)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -80,7 +84,18 @@ pub enum Source {
     EmitRank(Side),
 }
 
-/// ZeroCheck weights of one bus: its consistency
+/// One slot of a bus key:
+/// a trace column or a value the verifier computes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Column(usize),
+    Const(u128),
+    RowIndexLeBytes(usize),
+    RowIndexByte(usize),
+    EmitRank,
+}
+
+/// ZeroCheck weights of one `h` column: its consistency
 /// term, and its bus-sum term with its claimed sum.
 #[derive(Clone, Copy)]
 pub struct BusWeights<F: HardwareField> {
@@ -88,12 +103,10 @@ pub struct BusWeights<F: HardwareField> {
     pub bus_sum: Flat<F>,
 }
 
-/// One endpoint of a LogUp bus.
+/// One endpoint of a logUp bus.
 ///
-/// Per row `i`:
-/// `h(i) = s(i) / (γ + Σ β^j · source_j(i))`.
-/// The endpoint contributes `claimed_sum = Σ_i h(i)` (Permutation)
-/// or `Σ_i Eq(r_bus, i) · h(i)` (Lookup) to the cross-bus check.
+/// Per row `i` it adds `s(i) / (γ + Σ β^j · source_j(i))` to
+/// its `h` column, a Permutation key closing with the bus tag.
 ///
 /// # Security
 /// `Permutation` kind cancels in char-2 by multiset parity;
@@ -173,6 +186,27 @@ impl PermutationCheckSpec {
 
     pub fn num_sources(&self) -> usize {
         self.sources.len()
+    }
+
+    /// Iterates the key slots in `β`-power order, flattening `Columns`.
+    pub fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
+        self.sources.iter().flat_map(|(source, _)| {
+            let (columns, single): (&[usize], Option<Slot>) = match source {
+                Source::Column(c) | Source::PhaseColumn(c) => (core::slice::from_ref(c), None),
+                Source::Columns(cs) => (cs.as_slice(), None),
+                Source::Const(v) => (&[], Some(Slot::Const(*v))),
+                Source::RowIndexLeBytes(n) => (&[], Some(Slot::RowIndexLeBytes(*n))),
+                Source::RowIndexByte(n) => (&[], Some(Slot::RowIndexByte(*n))),
+                Source::EmitRank(_) => (&[], Some(Slot::EmitRank)),
+            };
+
+            columns.iter().map(|&c| Slot::Column(c)).chain(single)
+        })
+    }
+
+    /// Counts the slots of the key polynomial, the Permutation tag included.
+    pub fn key_width(&self) -> usize {
+        self.slots().count() + usize::from(self.kind == BusKind::Permutation)
     }
 
     pub fn has_selector(&self) -> bool {
@@ -514,6 +548,56 @@ where
     Ok(())
 }
 
+/// Rejects a zero tag, or two `Permutation` bus ids with
+/// one tag: the tag alone keeps their keys apart in the sum.
+pub fn validate_bus_tags<'a, F: TowerField>(
+    endpoints: impl IntoIterator<Item = (&'a str, &'a PermutationCheckSpec)>,
+) -> errors::Result<()> {
+    const { assert!(F::BITS / 8 <= MAX_BYTES) };
+
+    let bus_ids: BTreeSet<&'a str> = endpoints
+        .into_iter()
+        .filter(|(_, spec)| spec.kind == BusKind::Permutation)
+        .map(|(bus_id, _)| bus_id)
+        .collect();
+
+    let mut tags = Vec::with_capacity(bus_ids.len());
+
+    for bus_id in bus_ids {
+        let tag = bus_tag::<F>(bus_id);
+
+        if tag == F::ZERO {
+            return Err(errors::Error::Protocol {
+                protocol: "logup_bus",
+                message: "Permutation bus_id derives the zero tag; \
+                          its keys would match those of a bus one slot shorter",
+            });
+        }
+
+        let mut bytes = [0u8; MAX_BYTES];
+
+        tag.serialize(&mut bytes)
+            .map_err(|()| errors::Error::Protocol {
+                protocol: "logup_bus",
+                message: "bus tag does not fit its byte width",
+            })?;
+
+        tags.push(bytes);
+    }
+
+    tags.sort_unstable();
+
+    if tags.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(errors::Error::Protocol {
+            protocol: "logup_bus",
+            message: "two Permutation bus ids derive one tag; \
+                      their keys would cancel across the two buses",
+        });
+    }
+
+    Ok(())
+}
+
 /// Folds `table_rows` into `heights` for each
 /// `Lookup`-kind spec, taking the running max.
 /// Used to derive the per-bus `N_max` absorbed
@@ -531,45 +615,45 @@ pub fn accumulate_lookup_heights(
     }
 }
 
-/// MLE of `Source::RowIndexLeBytes` at `r_final`. Linear
-/// in `r_final` because `F::from` is XOR-additive over char-2.
-pub fn eval_row_idx_le_mle<F>(num_bytes: usize, r_final: &[Flat<F>]) -> Flat<F>
+/// Evaluates the row-index clock's MLE at `point` as a sum of
+/// bit marginals, `F::from` being XOR-additive over char-2.
+pub fn eval_row_idx_le_mle<F>(num_bytes: usize, point: &SkipPoint<F>) -> Flat<F>
 where
     F: TowerField + HardwareField + From<u128>,
 {
-    let total_bits = (num_bytes.min(8) * 8).min(r_final.len());
+    let total_bits = (num_bytes.min(8) * 8).min(point.num_vars());
 
     let mut acc = Flat::from_raw(F::ZERO);
-    for (i, r) in r_final.iter().enumerate().take(total_bits) {
-        acc += F::from(1u128 << i).to_hardware() * *r;
+    for i in 0..total_bits {
+        acc += F::from(1u128 << i).to_hardware() * point.bit_marginal(i);
     }
 
     acc
 }
 
-/// MLE of `Source::RowIndexByte` at `r_final`. Same char-2
-/// shortcut as `eval_row_idx_le_mle`, restricted to one byte.
-pub fn eval_row_idx_byte_mle<F>(byte_idx: usize, r_final: &[Flat<F>]) -> Flat<F>
+/// Evaluates one row-index byte's MLE at `point`, the char-2
+/// shortcut of `eval_row_idx_le_mle` on that byte.
+pub fn eval_row_idx_byte_mle<F>(byte_idx: usize, point: &SkipPoint<F>) -> Flat<F>
 where
     F: TowerField + HardwareField + From<u128>,
 {
     let bit_start = byte_idx.saturating_mul(8);
-    if bit_start >= r_final.len() {
+    if bit_start >= point.num_vars() {
         return Flat::from_raw(F::ZERO);
     }
 
-    let end = (bit_start + 8).min(r_final.len());
+    let end = (bit_start + 8).min(point.num_vars());
 
     let mut acc = Flat::from_raw(F::ZERO);
     for (j, i) in (bit_start..end).enumerate() {
-        acc += F::from(1u128 << j).to_hardware() * r_final[i];
+        acc += F::from(1u128 << j).to_hardware() * point.bit_marginal(i);
     }
 
     acc
 }
 
-/// Bus `k` from `start = α^o`: consistency at `α^(o+2k)`, bus-sum at
-/// `α^(o+2k+1)`. One shared power pins only the sum of the two terms,
+/// Bus column `c` from `start = α^o`: consistency at `α^(o+2c)`, bus-sum
+/// at `α^(o+2c+1)`. One shared power pins only the sum of the two terms,
 /// and a constant consistency residual then moves the claimed sum.
 pub fn bus_alpha_weights<F: HardwareField>(
     start: Flat<F>,
@@ -587,7 +671,9 @@ pub fn bus_alpha_weights<F: HardwareField>(
 mod tests {
     use super::*;
     use crate::FixedShape;
-    use hekate_math::Block128;
+    use alloc::format;
+    use alloc::vec;
+    use hekate_math::{Block8, Block128, Block256};
 
     fn test_service() -> Service {
         Service {
@@ -599,6 +685,17 @@ mod tests {
                 ServiceSlot::EmitRank,
                 ServiceSlot::Value(b"k_dir"),
             ],
+        }
+    }
+
+    fn tag_spec() -> PermutationCheckSpec {
+        PermutationCheckSpec::new(vec![(Source::Column(0), b"k" as ChallengeLabel)], Some(1))
+    }
+
+    fn rejection(result: errors::Result<()>) -> &'static str {
+        match result {
+            Err(errors::Error::Protocol { message, .. }) => message,
+            other => panic!("expected a protocol rejection, got {other:?}"),
         }
     }
 
@@ -870,5 +967,67 @@ mod tests {
             assert_eq!(w.bus_sum, expected);
             expected *= alpha;
         }
+    }
+
+    #[test]
+    fn two_bus_ids_with_one_tag_rejected() {
+        let spec = tag_spec();
+        let mut seen: Vec<(Block8, String)> = Vec::new();
+
+        let (first, second) = (0..4096)
+            .map(|i| format!("bus_{i}"))
+            .find_map(|id| {
+                let tag = bus_tag::<Block8>(&id);
+
+                if tag == Block8::ZERO {
+                    return None;
+                }
+
+                let twin = seen.iter().find(|(seen_tag, _)| *seen_tag == tag);
+                let pair = twin.map(|(_, other)| (other.clone(), id.clone()));
+
+                seen.push((tag, id));
+
+                pair
+            })
+            .unwrap();
+
+        let endpoints = [(first.as_str(), &spec), (second.as_str(), &spec)];
+
+        assert!(
+            rejection(validate_bus_tags::<Block8>(endpoints))
+                .starts_with("two Permutation bus ids derive one tag")
+        );
+
+        validate_bus_tags::<Block256>(endpoints).unwrap();
+    }
+
+    #[test]
+    fn zero_tag_rejected() {
+        let spec = tag_spec();
+
+        let zero = (0..65536)
+            .map(|i| format!("bus_{i}"))
+            .find(|id| bus_tag::<Block8>(id) == Block8::ZERO)
+            .unwrap();
+
+        let endpoints = [(zero.as_str(), &spec)];
+
+        assert!(
+            rejection(validate_bus_tags::<Block8>(endpoints))
+                .starts_with("Permutation bus_id derives the zero tag")
+        );
+
+        validate_bus_tags::<Block256>(endpoints).unwrap();
+    }
+
+    #[test]
+    fn endpoints_of_one_bus_pass_tag_check() {
+        let svc = test_service();
+
+        let req = svc.request(&[10, 11], 12).unwrap();
+        let resp = svc.respond(&[20, 21], 23).unwrap();
+
+        validate_bus_tags::<Block128>([("svc", &req), ("svc", &resp)]).unwrap();
     }
 }

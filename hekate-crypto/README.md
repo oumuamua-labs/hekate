@@ -28,7 +28,8 @@ cargo add hekate-crypto hekate-math
 ```rust
 use hekate_crypto::{DefaultHasher, Hasher};
 
-fn row_digest(parts: &[&[u8]]) -> [u8; 32] {
+fn row_digest(parts: &[&[u8]]) -> <DefaultHasher as Hasher>::Digest {
+    // The hash the features pick, BLAKE3 by default
     let mut hasher = DefaultHasher::new();
     for part in parts {
         hasher.update(part);
@@ -45,51 +46,57 @@ use hekate_crypto::merkle::{self, MerkleTree, Multiproof};
 use hekate_crypto::{DefaultHasher, Hasher};
 use hekate_math::Block128;
 
-fn commit_and_open(rows: &[&[u8]], index: usize) -> merkle::Result<([u8; 32], Multiproof)> {
-    let leaves: Vec<[u8; 32]> = rows.iter().map(|row| DefaultHasher::digest(row)).collect();
+type Digest = <DefaultHasher as Hasher>::Digest;
+
+fn commit_and_open(rows: &[&[u8]], index: usize) -> merkle::Result<(Digest, Multiproof)> {
+    // One leaf per row, the digest of its bytes
+    let leaves: Vec<Digest> = rows.iter().map(|row| DefaultHasher::digest(row)).collect();
     let tree = MerkleTree::<Block128>::new(&leaves);
 
+    // The root, and the opening of leaf index for one query draw
     Ok((tree.root(), tree.prove_batch(&[index], 1)?))
 }
 
-fn opens(root: &[u8; 32], num_rows: usize, row: &[u8], index: usize, proof: &Multiproof) -> bool {
+fn opens(root: &Digest, num_rows: usize, row: &[u8], index: usize, proof: &Multiproof) -> bool {
     let leaf = (index, DefaultHasher::digest(row));
 
+    // The same padded leaf count and draw count as the prover
     MerkleTree::<Block128>::verify_batch(root, num_rows.next_power_of_two(), 1, &[leaf], proof)
 }
 ```
 
-A leaf count that is not a power of two pads with zero leaves. Both sides pass the same draw count, and several
-leaves open under one multiproof.
+A leaf count that is not a power of two pads with zero leaves, and several leaves open under one multiproof.
 
 A transcript turns what both sides have absorbed into the same challenge, here drawn after the root:
 
 ```rust
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::{self, Transcript};
-use hekate_math::Block128;
+use hekate_math::Block256;
 
-fn challenge(root: &[u8; 32]) -> transcript::Result<Block128> {
+fn challenge(root: &[u8]) -> transcript::Result<Block256> {
+    // The label keeps this application's transcripts apart; the verifier uses it too
     let mut transcript = Transcript::<DefaultHasher>::new(b"my-app");
 
+    // Absorb the commitment before any challenge
     transcript.append_message(b"root", root);
+
+    // The verifier draws the same value from the same bytes
     transcript.challenge_field(b"alpha")
 }
 ```
 
-The label keeps your application's transcripts apart from every other one, and the verifier opens its transcript with
-the same bytes.
-
 ## Choosing the hash
 
-| Feature  | Default | `DefaultHasher` |
-|:---------|:--------|:----------------|
-| `blake3` | yes     | BLAKE3          |
-| `sha2`   | no      | SHA-256         |
-| `sha3`   | no      | SHA3-256        |
+| Feature    | Default | `DefaultHasher`      |
+|:-----------|:--------|:---------------------|
+| `blake3`   | yes     | BLAKE3               |
+| `sha2`     | no      | SHA-256              |
+| `sha3`     | no      | SHA3-256             |
+| `shake256` | no      | SHAKE256 at 512 bits |
 
-Cargo enables a feature for the whole build as soon as one crate asks for it, and SHA3-256 then wins over SHA-256,
-which wins over BLAKE3. The prover binary and the verifier must use the same hash, or no proof verifies.
+Cargo enables a feature for the whole build as soon as one crate asks for it, and the enabled hash lowest in the table
+then wins. The prover binary and the verifier must use the same hash, or no proof verifies.
 
 `parallel` (default) builds Merkle trees on a Rayon pool, and `transcript-trace` records every transcript operation
 to locate a prover/verifier divergence.

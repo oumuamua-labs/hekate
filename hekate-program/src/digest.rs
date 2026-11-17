@@ -18,6 +18,10 @@ use hekate_math::TowerField;
 /// the byte stream, hence the digest, is independent of it.
 const FLUSH_BYTES: usize = 64 * 1024;
 
+/// A program's structural id, as wide as the build's policy hash.
+pub type ProgramId = <DefaultHasher as Hasher>::Digest;
+
+/// Hashes with the build's policy hash, as the transcript does.
 struct Absorb {
     hasher: DefaultHasher,
     buf: Vec<u8>,
@@ -33,23 +37,37 @@ impl Absorb {
 
     fn update(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
+        self.flush_if_full();
+    }
 
+    fn update_field<F: TowerField>(&mut self, v: &F) {
+        let start = self.buf.len();
+
+        self.buf.resize(start + v.serialized_size(), 0);
+
+        v.serialize(&mut self.buf[start..])
+            .expect("tail is serialized_size bytes long");
+
+        self.flush_if_full();
+    }
+
+    fn flush_if_full(&mut self) {
         if self.buf.len() >= FLUSH_BYTES {
             self.hasher.update(&self.buf);
             self.buf.clear();
         }
     }
 
-    fn finalize(mut self) -> [u8; 32] {
+    fn finalize(mut self) -> ProgramId {
         self.hasher.update(&self.buf);
 
         self.hasher.finalize()
     }
 }
 
-/// Deterministic 32-byte structural ID. Witness-independent,
+/// Deterministic structural ID. Witness-independent,
 /// num_rows-independent. Same program shape -> same ID.
-pub fn program_id<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<[u8; 32]> {
+pub fn program_id<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<ProgramId> {
     Ok(program_id_of(
         program,
         &program.chiplet_defs()?,
@@ -57,14 +75,15 @@ pub fn program_id<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<[
     ))
 }
 
-/// Hex-encoded `program_id` (64 lowercase chars, no prefix).
+/// Hex-encoded `program_id` (two lowercase chars per byte, no prefix).
 pub fn program_id_hex<F: TowerField, P: Program<F>>(program: &P) -> errors::Result<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
-    let bytes = program_id::<F, P>(program)?;
+    let id = program_id::<F, P>(program)?;
+    let bytes = id.as_ref();
 
-    let mut s = String::with_capacity(64);
-    for &b in bytes.iter() {
+    let mut s = String::with_capacity(2 * bytes.len());
+    for &b in bytes {
         s.push(HEX[(b >> 4) as usize] as char);
         s.push(HEX[(b & 0xf) as usize] as char);
     }
@@ -76,18 +95,34 @@ pub fn program_id_of<F: TowerField, P: Program<F>>(
     program: &P,
     chiplet_defs: &[ChipletDef<F>],
     inline_chiplets: &[ChipletDef<F>],
-) -> [u8; 32] {
+) -> ProgramId {
+    program_id_from_parts(
+        &ChipletDef::from_main_table(program),
+        program.num_public_inputs(),
+        chiplet_defs,
+        inline_chiplets,
+        &program.inline_chiplet_kernels(),
+    )
+}
+
+pub fn program_id_from_parts<F: TowerField>(
+    main: &ChipletDef<F>,
+    num_public_inputs: usize,
+    chiplet_defs: &[ChipletDef<F>],
+    inline_chiplets: &[ChipletDef<F>],
+    inline_kernels: &[InlineKernelHint],
+) -> ProgramId {
     let mut h = Absorb::new();
     h.update(b"hekate-program-id-v2");
 
-    let main_name = program.name();
+    let main_name = main.name();
     h.update(&(main_name.len() as u64).to_le_bytes());
     h.update(main_name.as_bytes());
 
-    absorb_layout(&mut h, program.column_layout());
-    absorb_ast::<F>(&mut h, &program.constraint_ast());
-    absorb_boundaries(&mut h, &program.boundary_constraints());
-    absorb_permutation_checks(&mut h, &program.permutation_checks());
+    absorb_layout(&mut h, main.column_layout());
+    absorb_ast::<F>(&mut h, main.ast());
+    absorb_boundaries(&mut h, main.boundaries());
+    absorb_permutation_checks(&mut h, &main.permutation_checks);
 
     h.update(&(chiplet_defs.len() as u64).to_le_bytes());
 
@@ -95,7 +130,7 @@ pub fn program_id_of<F: TowerField, P: Program<F>>(
         absorb_chiplet_def::<F>(&mut h, cd);
     }
 
-    if let Some(exp) = program.virtual_expander() {
+    if let Some(exp) = main.virtual_expander() {
         h.update(&[1]);
 
         absorb_expander(&mut h, exp);
@@ -103,12 +138,12 @@ pub fn program_id_of<F: TowerField, P: Program<F>>(
         h.update(&[0]);
     }
 
-    absorb_fixed_columns(&mut h, &program.fixed_columns());
+    absorb_fixed_columns(&mut h, main.pins());
 
-    h.update(&(program.num_columns() as u64).to_le_bytes());
-    h.update(&(program.num_public_inputs() as u64).to_le_bytes());
+    h.update(&(main.num_columns() as u64).to_le_bytes());
+    h.update(&(num_public_inputs as u64).to_le_bytes());
 
-    absorb_inline_chiplets::<F>(&mut h, inline_chiplets, &program.inline_chiplet_kernels());
+    absorb_inline_chiplets::<F>(&mut h, inline_chiplets, inline_kernels);
 
     h.finalize()
 }
@@ -120,13 +155,10 @@ fn absorb_chiplet_def<F: TowerField>(h: &mut Absorb, cd: &ChipletDef<F>) {
     h.update(name.as_bytes());
 
     absorb_layout(h, cd.column_layout());
-
-    let cd_ast = cd.constraint_ast();
-    absorb_ast::<F>(h, &cd_ast);
-
-    absorb_boundaries(h, &cd.boundary_constraints());
-    absorb_permutation_checks(h, &cd.permutation_checks());
-    absorb_fixed_columns(h, &Air::<F>::fixed_columns(cd));
+    absorb_ast::<F>(h, cd.ast());
+    absorb_boundaries(h, cd.boundaries());
+    absorb_permutation_checks(h, &cd.permutation_checks);
+    absorb_fixed_columns(h, cd.pins());
 
     if let Some(exp) = cd.virtual_expander() {
         h.update(&[1]);
@@ -188,7 +220,7 @@ fn absorb_expr<F: TowerField>(h: &mut Absorb, expr: &ConstraintExpr<F>) {
         }
         ConstraintExpr::Const(val) => {
             h.update(&[1]);
-            h.update(&val.to_bytes());
+            h.update_field(val);
         }
         ConstraintExpr::Add(l, r) => {
             h.update(&[2]);
@@ -202,7 +234,7 @@ fn absorb_expr<F: TowerField>(h: &mut Absorb, expr: &ConstraintExpr<F>) {
         }
         ConstraintExpr::Scale(scalar, child) => {
             h.update(&[4]);
-            h.update(&scalar.to_bytes());
+            h.update_field(scalar);
             h.update(&child.0.to_le_bytes());
         }
         ConstraintExpr::Sum(children) => {
@@ -233,7 +265,7 @@ fn absorb_boundaries<F: TowerField>(
             }
             BoundaryTarget::Constant(v) => {
                 h.update(&[1]);
-                h.update(&v.to_bytes());
+                h.update_field(v);
             }
         }
     }
@@ -262,7 +294,7 @@ fn absorb_fixed_columns<F: TowerField>(h: &mut Absorb, fixed: &[FixedColumn<F>])
                 h.update(&(values.len() as u64).to_le_bytes());
 
                 for v in values {
-                    h.update(&v.to_bytes());
+                    h.update_field(v);
                 }
             }
             FixedShape::Sparse(entries) => {
@@ -271,7 +303,7 @@ fn absorb_fixed_columns<F: TowerField>(h: &mut Absorb, fixed: &[FixedColumn<F>])
 
                 for (row, v) in entries {
                     h.update(&(*row as u64).to_le_bytes());
-                    h.update(&v.to_bytes());
+                    h.update_field(v);
                 }
             }
             FixedShape::Dense(values) => {
@@ -279,7 +311,7 @@ fn absorb_fixed_columns<F: TowerField>(h: &mut Absorb, fixed: &[FixedColumn<F>])
                 h.update(&(values.len() as u64).to_le_bytes());
 
                 for v in values {
-                    h.update(&v.to_bytes());
+                    h.update_field(v);
                 }
             }
             FixedShape::Cadence {
@@ -295,7 +327,7 @@ fn absorb_fixed_columns<F: TowerField>(h: &mut Absorb, fixed: &[FixedColumn<F>])
                 h.update(&(values.len() as u64).to_le_bytes());
 
                 for v in values {
-                    h.update(&v.to_bytes());
+                    h.update_field(v);
                 }
             }
             FixedShape::Segments(segments) => {
@@ -309,7 +341,7 @@ fn absorb_fixed_columns<F: TowerField>(h: &mut Absorb, fixed: &[FixedColumn<F>])
                     h.update(&(seg.values.len() as u64).to_le_bytes());
 
                     for v in &seg.values {
-                        h.update(&v.to_bytes());
+                        h.update_field(v);
                     }
                 }
             }

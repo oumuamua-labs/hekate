@@ -8,7 +8,7 @@ mod common;
 use clap::Parser;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block128, TowerField};
+use hekate::math::{Bit, Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_program::circuit::{Circuit, CircuitProgram};
@@ -22,7 +22,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const CPU_ACTIVE: usize = CpuSha256Block::COLUMNS;
@@ -252,7 +252,7 @@ fn main() {
     let mut verifier_transcript = Transcript::<H>::new(b"Sha256_E2E");
 
     let pinned_id = args.run.audited_id(&st.program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &st.program,
@@ -261,8 +261,7 @@ fn main() {
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }

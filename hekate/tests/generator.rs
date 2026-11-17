@@ -15,7 +15,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block256, TowerField};
 use hekate_core::errors::Error;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
@@ -27,9 +27,11 @@ use hekate_program::{
     Air, CadenceSegment, FixedColumn, FixedShape, ProgramInstance, ProgramWitness, fix,
 };
 use hekate_prover_sys::prove;
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{OuterStage, Rejection, Table, ZerocheckStage};
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const DOMAIN: &[u8] = b"generator_corpus";
@@ -81,6 +83,13 @@ impl Air<F> for GenChiplet {
         LAYOUT.get_or_init(|| vec![ColumnType::B32, ColumnType::Bit])
     }
 
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![(
+            GEN_BUS_ID.into(),
+            gen_service().respond(&[CHIP_X], CHIP_SEL).unwrap(),
+        )]
+    }
+
     fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
         vec![fix(
             CHIP_SEL,
@@ -90,13 +99,6 @@ impl Air<F> for GenChiplet {
                 origin: 0,
                 values: vec![F::ONE],
             },
-        )]
-    }
-
-    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
-        vec![(
-            GEN_BUS_ID.into(),
-            gen_service().respond(&[CHIP_X], CHIP_SEL).unwrap(),
         )]
     }
 
@@ -266,8 +268,10 @@ fn run_seed(seed: u64) {
 
     let config = if s.zk {
         Config {
-            num_queries: 4,
+            num_queries: 2,
             min_security_bits: 0,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge: true,
             ..Config::default()
         }
@@ -275,7 +279,9 @@ fn run_seed(seed: u64) {
         Config {
             num_queries: 8,
             min_security_bits: 0,
-            ldt_support_size: 4,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
+            zero_knowledge: false,
             ..Config::default()
         }
     };
@@ -291,21 +297,27 @@ fn run_seed(seed: u64) {
     let pinned = program_id(&air).unwrap();
 
     let mut t = Transcript::<H>::new(DOMAIN);
-    let honest = HekateVerifier::<F, H>::verify(&pinned, &air, &instance, &proof, &mut t, &config)
-        .unwrap_or_else(|e| panic!("seed {seed}: honest verify errored: {e:?}"));
+    let honest = HekateVerifier::<F, H>::verify(&pinned, &air, &instance, &proof, &mut t, &config);
 
-    assert!(honest, "seed {seed}: honest proof rejected");
+    assert_eq!(honest, Ok(()), "seed {seed}: honest proof rejected");
 
     let delta = F::from(((rng.next() as u32) | 1) as u128);
     let forged = ProgramInstance::new(num_rows, vec![public_value + delta]);
 
-    let mut t = Transcript::<H>::new(DOMAIN);
-    let outcome = HekateVerifier::<F, H>::verify(&pinned, &air, &forged, &proof, &mut t, &config);
+    let forged_proof = prove(DOMAIN, &air, &forged, &witness, &config, seed_bytes, None)
+        .unwrap_or_else(|e| panic!("seed {seed}: forged prove failed: {e:?}"));
 
-    assert!(
-        !matches!(outcome, Ok(true)),
-        "seed {seed}: forged public input accepted",
-    );
+    let outcome = verify(&air, &forged, &config, &forged_proof, DOMAIN);
+
+    let expected = match s.zk {
+        true => Rejection::Outer(OuterStage::Linear),
+        false => Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Sumcheck,
+        },
+    };
+
+    assert_eq!(outcome, Err(expected), "seed {seed}");
 
     let mut drifted = pinned;
     drifted[0] ^= 1;
@@ -315,7 +327,10 @@ fn run_seed(seed: u64) {
         HekateVerifier::<F, H>::verify(&drifted, &air, &instance, &proof, &mut t, &config);
 
     assert!(
-        matches!(outcome, Err(Error::ProgramIdMismatch { .. })),
+        matches!(
+            outcome,
+            Err(Rejection::Program(Error::ProgramIdMismatch { .. }))
+        ),
         "seed {seed}: drifted program id not rejected",
     );
 }

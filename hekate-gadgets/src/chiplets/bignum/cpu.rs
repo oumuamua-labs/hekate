@@ -5,12 +5,12 @@
 use alloc::vec::Vec;
 use hekate_core::errors;
 use hekate_core::trace::{ColumnType, TraceBuilder};
-use hekate_math::{Block32, Block128};
+use hekate_math::{Block32, Block256};
 use hekate_program::circuit::{Circuit, Col, ColRange};
 
 use crate::chiplets::bignum::modexp::{self, LIMBS32, Modexp};
 
-type F = Block128;
+type F = Block256;
 
 /// One modexp request on the host table:
 /// the modulus, the base and the result,

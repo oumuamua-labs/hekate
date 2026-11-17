@@ -7,7 +7,7 @@ use hekate_math::{Block128, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
-use hekate_program::digest::program_id;
+use hekate_program::digest::{ProgramId, program_id};
 use hekate_program::expander::VirtualExpander;
 use hekate_program::permutation::{BusKind, ChallengeLabel, PermutationCheckSpec, Source};
 use hekate_program::{Air, FixedColumn, FixedShape, InlineKernelHint, Program};
@@ -201,7 +201,7 @@ fn paired_perm_spec(
     }
 }
 
-fn id(p: &TestProgram) -> [u8; 32] {
+fn id(p: &TestProgram) -> ProgramId {
     program_id::<F, _>(p).expect("program_id")
 }
 

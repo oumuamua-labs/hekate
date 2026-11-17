@@ -3,9 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::poly::univariate::UnivariatePoly;
-use alloc::string::String;
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 use hekate_crypto::merkle::Multiproof;
 use hekate_math::TowerField;
 use serde::{Deserialize, Serialize};
@@ -19,11 +17,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InnerProof<F: TowerField> {
     /// Root over every table's trace codewords.
-    pub trace_root: [u8; 32],
+    pub trace_root: Vec<u8>,
 
-    /// Root over every bus-carrying table's
-    /// `h` codewords, absorbed before any `α`.
-    pub h_root: Option<[u8; 32]>,
+    /// Root of the helper tree: every table's `h` and, with
+    /// zero knowledge, the two masks; absorbed before any `α`.
+    pub h_root: Option<Vec<u8>>,
 
     /// Sumcheck proving
     /// `Σ_x ( Σ α_i · C_i(x) ) · eq(r, x) = 0`
@@ -38,7 +36,7 @@ pub struct InnerProof<F: TowerField> {
     pub main_point_evaluation: (Vec<F>, Vec<F>),
 
     /// Pins every table's trace evaluations to the two roots.
-    pub eval_proof: EvalBatchProof<F>,
+    pub eval_proof: FoldEvalProof<F>,
 
     pub chiplet_rows: Vec<usize>,
     pub chiplet_zerocheck_proofs: Vec<SumcheckProof<F>>,
@@ -46,7 +44,7 @@ pub struct InnerProof<F: TowerField> {
     pub chiplet_point_evaluations: Vec<(Vec<F>, Vec<F>)>,
 
     /// Absorbed before the first challenge.
-    pub pad_root: Option<[u8; 32]>,
+    pub pad_root: Option<Vec<u8>>,
 
     /// Present iff `pad_root` is.
     pub outer: Option<OuterProof<F>>,
@@ -55,17 +53,17 @@ pub struct InnerProof<F: TowerField> {
 impl<F: TowerField> InnerProof<F> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        trace_root: [u8; 32],
-        h_root: Option<[u8; 32]>,
+        trace_root: Vec<u8>,
+        h_root: Option<Vec<u8>>,
         zerocheck_proof: SumcheckProof<F>,
         main_logup_aux: LogUpAux<F>,
         main_point_evaluation: (Vec<F>, Vec<F>),
-        eval_proof: EvalBatchProof<F>,
+        eval_proof: FoldEvalProof<F>,
         chiplet_rows: Vec<usize>,
         chiplet_zerocheck_proofs: Vec<SumcheckProof<F>>,
         chiplet_logup_aux: Vec<LogUpAux<F>>,
         chiplet_point_evaluations: Vec<(Vec<F>, Vec<F>)>,
-        pad_root: Option<[u8; 32]>,
+        pad_root: Option<Vec<u8>>,
         outer: Option<OuterProof<F>>,
     ) -> Self {
         Self {
@@ -104,42 +102,12 @@ pub struct OuterOpening<F: TowerField> {
 /// oracles opened at the same query columns.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OuterProof<F: TowerField> {
-    pub aux_root: [u8; 32],
+    pub aux_root: Vec<u8>,
     pub interleaved: Vec<F>,
     pub linear: Vec<F>,
     pub quadratic: Vec<F>,
     pub pad_opening: OuterOpening<F>,
     pub aux_opening: OuterOpening<F>,
-}
-
-// ===================================
-// BRAKEDOWN PROOF
-// ===================================
-
-/// LDT opening payload for one Brakedown commitment:
-/// the opened encoded columns and one multiproof
-/// that a verifier replays against the commitment root.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BrakedownProof<F: TowerField> {
-    /// Raw bytes of the opened 2D columns, one per
-    /// distinct queried index in ascending order.
-    /// Only encoded code bytes, data stays private.
-    pub opened_columns: Vec<Vec<u8>>,
-
-    /// Opens every queried column against the root.
-    pub multiproof: Multiproof,
-
-    _marker: PhantomData<F>,
-}
-
-impl<F: TowerField> BrakedownProof<F> {
-    pub fn new(opened_columns: Vec<Vec<u8>>, multiproof: Multiproof) -> Self {
-        Self {
-            opened_columns,
-            multiproof,
-            _marker: PhantomData,
-        }
-    }
 }
 
 // ===================================
@@ -150,6 +118,10 @@ impl<F: TowerField> BrakedownProof<F> {
 /// terminal evaluation at the random challenge point `r`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SumcheckProof<F: TowerField> {
+    /// The skip round's univariate on its domain
+    /// less the first point; empty without a skip.
+    pub skip: Vec<F>,
+
     /// Per-round univariate `g_j(X)`.
     pub round_polys: Vec<UnivariatePoly<F>>,
 
@@ -161,63 +133,63 @@ pub struct SumcheckProof<F: TowerField> {
 // EVALUATION BATCH PROOF
 // ===================================
 
-/// Evaluation argument binding every table's trace-column
-/// evaluations to the pool's two Brakedown commitments.
+/// One fold tree opened at the queries: its distinct
+/// leaves in ascending index, then their paths.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EvalBatchProof<F: TowerField> {
-    /// Sumcheck reducing the batched claim
-    /// to a single-point evaluation.
-    pub sumcheck_proof: SumcheckProof<F>,
+pub struct TreeOpening {
+    /// Untagged leaf preimages back to back: each symbol as flat LE
+    /// bytes of its code field, a fold-field one as `lo` then `hi`.
+    pub leaves: Vec<u8>,
 
-    /// The trace tree opened at the query columns.
-    pub ldt_proof: BrakedownProof<F>,
-
-    /// `Σ_k λ^k · q_k` over the masters' folds.
-    /// Length `grid_cols + support_size`.
-    pub tensor_vec: Vec<F>,
-
-    /// Every table's master evaluations at `r`, pool order,
-    /// ring before whole, fixed before `λ` binds them.
-    pub masters: Vec<F>,
-
-    /// The `h` tree opened at the same query columns;
-    /// present iff some table carries a bus.
-    pub h_ldt_proof: Option<BrakedownProof<F>>,
+    /// Opens every leaf against the tree's root.
+    pub multiproof: Multiproof,
 }
 
-impl<F: TowerField> EvalBatchProof<F> {
-    pub fn new(
-        sumcheck_proof: SumcheckProof<F>,
-        ldt_proof: BrakedownProof<F>,
-        tensor_vec: Vec<F>,
-        masters: Vec<F>,
-        h_ldt_proof: Option<BrakedownProof<F>>,
-    ) -> Self {
-        Self {
-            sumcheck_proof,
-            ldt_proof,
-            tensor_vec,
-            masters,
-            h_ldt_proof,
-        }
-    }
+/// The fold's evaluation argument: batching sumcheck,
+/// masters, fold rounds, final layer and openings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FoldEvalProof<F: TowerField> {
+    /// Reduces every claim to the masters at one point `r`.
+    pub sumcheck_proof: SumcheckProof<F>,
+
+    /// `M_k`, polynomial `k` at the suffix of `r`, derived order.
+    pub masters: Vec<F>,
+
+    /// The masks' masters at the suffix `r[a..]`:
+    /// two in zero-knowledge mode, none otherwise.
+    pub mask_masters: Vec<F>,
+
+    /// Each fold round's `g(1)` and `X²` coefficient over the
+    /// fold field, as `F` limbs; `g(0)` comes from the claim.
+    pub fold_rounds: Vec<F>,
+
+    /// Roots of the round codewords `H_1 .. H_{R−1}`, back to back.
+    pub round_roots: Vec<u8>,
+
+    /// `H_R`'s message, `2^s` fold-field symbols as `F` limbs.
+    pub final_layer: Vec<F>,
+
+    /// One per tree of the fold layout, in its order.
+    pub openings: Vec<TreeOpening>,
 }
 
 // ===================================
 // LOGUP AUXILIARY
 // ===================================
 
-/// Per-table LogUp auxiliary payload keyed by `bus_id`.
-/// `claimed_sums[i]` is absorbed pre-`α`/`r_zerocheck`;
-/// `h_evals[i]` post-sumcheck.
+/// Per-table LogUp auxiliary payload
+/// in the table's limb-column order.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogUpAux<F: TowerField> {
-    pub h_evals: Vec<(String, F)>,
-    pub claimed_sums: Vec<(String, F)>,
+    /// Absorbed after the ZeroCheck sumcheck.
+    pub h_evals: Vec<F>,
+
+    /// Absorbed before `α` and `r_zerocheck`.
+    pub claimed_sums: Vec<F>,
 }
 
 impl<F: TowerField> LogUpAux<F> {
-    pub fn new(h_evals: Vec<(String, F)>, claimed_sums: Vec<(String, F)>) -> Self {
+    pub fn new(h_evals: Vec<F>, claimed_sums: Vec<F>) -> Self {
         Self {
             h_evals,
             claimed_sums,

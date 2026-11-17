@@ -8,7 +8,7 @@
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
 The circuit DSL of [Hekate](https://oumuamua.dev/hekate), the Rust zero-knowledge proof engine: columns,
-constraints, fixed columns, public inputs, chiplets, LogUp buses and program ids. A program is a table whose columns
+constraints, fixed columns, public inputs, chiplets, logUp buses and program ids. A program is a table whose columns
 you declare and whose rows your constraints relate, and a proof shows that a private trace satisfies all of them.
 
 ## Usage
@@ -20,13 +20,12 @@ cargo add hekate-program hekate-core hekate-math
 A circuit that proves some private 32-bit words have a public XOR checksum:
 
 ```rust
-use hekate_core::config::Config;
 use hekate_core::errors;
-use hekate_math::{Block128, TowerField};
+use hekate_math::{Block256, TowerField};
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::{FixedShape, define_columns};
 
-type F = Block128;
+type F = Block256;
 
 define_columns! {
     Checksum {
@@ -36,8 +35,9 @@ define_columns! {
     }
 }
 
-fn table_rows(config: &Config, words: usize) -> usize {
-    (words + 1).next_power_of_two().max(config.min_table_rows())
+// One row per word and one for the result, padded to a power of two
+fn table_rows(words: usize) -> usize {
+    (words + 1).next_power_of_two()
 }
 
 fn build_program(rows: usize, words: usize) -> errors::Result<CircuitProgram<F>> {
@@ -49,11 +49,15 @@ fn build_program(rows: usize, words: usize) -> errors::Result<CircuitProgram<F>>
     let active = cols.at(Checksum::ACTIVE);
 
     let cs = cx.cs();
+
+    // Cell readers on this row and on the next one
     let col = |c: Col| cs.col(c.index());
     let next = |c: Col| cs.next(c.index());
 
+    // On active rows the next ACC is ACC + WORD, and + is XOR in a binary field
     cs.constrain_named("xor_step", col(active) * (next(acc) + col(acc) + col(word)));
 
+    // ACTIVE is fixed by the program: 1 on the first words rows
     cx.fix(
         active,
         FixedShape::Cadence {
@@ -64,17 +68,17 @@ fn build_program(rows: usize, words: usize) -> errors::Result<CircuitProgram<F>>
         },
     );
 
+    // The accumulator starts at zero
     cx.boundary(acc, 0, F::ZERO);
+
+    // The checksum, ACC on the row after the last word, is public
     cx.publish(acc, words);
 
     cx.compile()
 }
 ```
 
-Where `ACTIVE` is 1, `xor_step` makes the next accumulator this one XOR this word: addition in a binary field is XOR.
-The fixed column sets `ACTIVE` on the first `words` rows, the boundary starts the accumulator at 0, and `publish` pins
-the row after the last word to the public checksum. The words stay free: a real program binds them to something
-public. The `hekate-core` README fills this table.
+The words stay free: a real program binds them to something public. The `hekate-core` README fills this table.
 
 `digest::program_id` hashes the compiled program. A verifier compiles the id in as a constant and rejects every proof
 made for another circuit. The id covers the pinned rows and the fixed column's count, which gives this circuit one id
@@ -86,7 +90,7 @@ per value of `words`.
   proved and verified end to end
 - [AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints): this circuit line by line, constraint
   helpers, degree and the program id
-- [LogUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses): how tables exchange values, and the traps
+- [logUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses): how tables exchange values, and the traps
 - [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets): calling ready-made tables
   for hashes, ciphers and signatures
 - [API reference](https://docs.rs/hekate-program)

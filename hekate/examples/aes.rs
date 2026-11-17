@@ -8,7 +8,7 @@ mod common;
 use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block8, Block128, TowerField};
+use hekate::math::{Bit, Block8, Block256, TowerField};
 use hekate_aes::{
     Aes128Chiplet, Aes256Chiplet, AesRound128Air, AesRound256Air, CpuAes128Columns,
     CpuAes256Columns, PhysAes128Columns, PhysAes256Columns, host_key_selector_shape,
@@ -24,7 +24,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // =================================================================
@@ -191,13 +191,12 @@ fn prove_and_verify<P: Program<F>>(
     // Phase 4:
     // Verify
     let pinned_id = run.audited_id(air);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         let mut vt = Transcript::<H>::new(transcript_label);
         HekateVerifier::<F, H>::verify(&pinned_id, air, &instance, &proof, &mut vt, &config)
-            .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }
 
 fn print_layout(key_hex: &str, rows_per_block: usize, sbox_rounds_per_block: usize) {
@@ -444,8 +443,8 @@ fn build_cpu256_trace(
                 .unwrap();
         }
 
-        for j in 0..32 {
-            tb.set_b8(CpuAes256Columns::KEY + j, row, Block8(call.key[j]))
+        for (j, &byte) in call.key.iter().enumerate() {
+            tb.set_b8(CpuAes256Columns::KEY + j, row, Block8(byte))
                 .unwrap();
         }
 

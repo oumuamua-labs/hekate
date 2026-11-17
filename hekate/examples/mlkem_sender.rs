@@ -15,7 +15,7 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block8, Block16, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block8, Block16, Block32, Block256, TowerField};
 use hekate_aes::trace::{Aes256Call, aes256_encrypt_block, expand_key_256};
 use hekate_aes::{Aes256Chiplet, AesRound256Air, host_key_selector_shape, host_selector_shape};
 use hekate_core::errors;
@@ -34,7 +34,7 @@ use ml_kem::{Ciphertext, Decapsulate, Generate, Kem, KeyExport, MlKem512, MlKem7
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const SEED_WORDS: usize = 8;
@@ -449,12 +449,11 @@ where
     );
 
     let config = args.config();
-    let floor = config.min_table_rows();
 
     let pipeline = MlKemChiplet::<F>::new(params, &[MlKemCall::Encaps]).expect("pipeline build");
     let aes = Aes256Chiplet::new(
-        (blocks * AES_ROWS).next_power_of_two().max(floor),
-        (blocks * SBOX_ROUNDS).next_power_of_two().max(floor),
+        (blocks * AES_ROWS).next_power_of_two(),
+        (blocks * SBOX_ROUNDS).next_power_of_two(),
         blocks,
     )
     .expect("aes build");
@@ -581,7 +580,7 @@ where
     let mut verifier_transcript = Transcript::<H>::new(b"MlKemSender_E2E");
 
     let pinned_id = args.audited_id(&program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &program,
@@ -590,10 +589,9 @@ where
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }
 
 fn main() {

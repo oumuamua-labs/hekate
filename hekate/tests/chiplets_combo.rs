@@ -6,7 +6,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, Trace, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::trace::IntoTraceColumn;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, RomColumns, generate_rom_trace};
 use hekate_math::{Bit, Block32};
@@ -16,7 +16,7 @@ use hekate_program::{Air, FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // --- 1. Define Combined AIR using Library Specs ---
@@ -189,14 +189,10 @@ fn chiplets_integration() {
         &config,
     );
 
-    assert!(result.unwrap(), "Verification failed");
+    assert_eq!(result, Ok(()));
 
     // 3. Bus Consistency
-    // Both spec endpoints share a single bus_id
-    // on the main trace; `verify()` rejects if
-    // their LogUp sums do not cancel.
+    // Both spec endpoints share a single bus_id on the main trace.
     assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2);
     assert!(proof.chiplet_logup_aux.is_empty());
-
-    println!("BUS SECURE: Chiplets are cryptographically linked.");
 }

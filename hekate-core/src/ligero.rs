@@ -597,7 +597,7 @@ pub fn verify_quadratic<F: BinaryFieldExtras + HardwareField + TowerField>(
 /// leaves are hashed from the wire's
 /// tower bytes, as [`column_leaf`] does.
 pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
-    root: &[u8; 32],
+    root: &H::Digest,
     geom: &OuterGeometry,
     rows: usize,
     opening: &OuterOpening<F>,
@@ -606,7 +606,7 @@ pub fn verify_opening<F: TowerField + HardwareField, H: Hasher>(
         return false;
     }
 
-    let leaves: Vec<(usize, [u8; 32])> = opening
+    let leaves: Vec<(usize, H::Digest)> = opening
         .columns
         .iter()
         .zip(opening.values.chunks_exact(rows))
@@ -663,7 +663,7 @@ pub fn weights_at_columns<F: BinaryFieldExtras + HardwareField + TowerField>(
 }
 
 /// Leaf of one column, its rows top to bottom.
-pub fn column_leaf<F: TowerField, H: Hasher>(column: impl Iterator<Item = F>) -> [u8; 32] {
+pub fn column_leaf<F: TowerField, H: Hasher>(column: impl Iterator<Item = F>) -> H::Digest {
     let mut hasher = H::new();
     hasher.update_fields(column);
     hasher.update(&[Tag::OuterLeaf as u8]);
@@ -677,14 +677,14 @@ mod tests {
     use crate::config::Config;
     use alloc::vec;
     use alloc::vec::Vec;
-    use hekate_math::{Block128, CanonicalSerialize, TowerField};
+    use hekate_math::{Block128, Block256, CanonicalSerialize, TowerField};
 
     const OPENED: [usize; 4] = [1, 9, 40, 77];
 
-    type F = Block128;
+    type F = Block256;
 
     fn geometry() -> OuterGeometry {
-        Config::prod().outer_geom(4_075, 2_384, 128).unwrap()
+        Config::prod().outer_geom(4_075, 2_384, 256).unwrap()
     }
 
     fn geometries() -> Vec<OuterGeometry> {
@@ -692,16 +692,16 @@ mod tests {
 
         [(1, 0), (4_075, 2_384), (41_025, 34_648)]
             .iter()
-            .map(|&(scalars, wires)| config.outer_geom(scalars, wires, 128).unwrap())
+            .map(|&(scalars, wires)| config.outer_geom(scalars, wires, 256).unwrap())
             .collect()
     }
 
     fn mix(seed: u128) -> Flat<F> {
-        F::from(
-            seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                .wrapping_add(0x51ed_2701),
-        )
-        .to_hardware()
+        let lo = seed
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(0x51ed_2701);
+
+        F::new(Block128(lo), Block128(!lo)).to_hardware()
     }
 
     fn message(geom: &OuterGeometry, salt: u128) -> Vec<Flat<F>> {
@@ -852,7 +852,11 @@ mod tests {
 
     fn check_outer_leaf_tag<H: Hasher>() {
         let column: Vec<F> = (1..=5u128)
-            .map(|i| Block128(i.wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835)))
+            .map(|i| {
+                let lo = i.wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835);
+
+                F::new(Block128(lo), Block128(!lo))
+            })
             .collect();
 
         let mut preimage: Vec<u8> = column.iter().flat_map(|v| v.to_bytes()).collect();

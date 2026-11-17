@@ -25,31 +25,31 @@ cargo add hekate-sha2 hekate-core hekate-math hekate-program
 SHA-256 of one message, one compression per host row, with the chiplet attached as its own table:
 
 ```rust
-use hekate_core::config::Config;
 use hekate_core::errors;
 use hekate_core::trace::ColumnType;
-use hekate_math::{Block128, TowerField};
+use hekate_math::{Block256, TowerField};
 use hekate_program::FixedShape;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_sha2::{CpuSha256Block, IV, ROUNDS, STATE_WORDS, Sha256Chiplet, pad_message};
 
-type F = Block128;
+type F = Block256;
 
 fn sha256(message: &[u8]) -> errors::Result<(CircuitProgram<F>, CpuSha256Block, Sha256Chiplet<F>)> {
     let blocks = pad_message(message).len();
+
+    // 64 rounds at 4 per row: 16 chiplet rows per block
     let rounds_per_row = 4;
-    let floor = Config::default().min_table_rows();
 
     let sha = Sha256Chiplet::<F>::new(
-        (blocks * ROUNDS / rounds_per_row)
-            .next_power_of_two()
-            .max(floor),
+        (blocks * ROUNDS / rounds_per_row).next_power_of_two(),
         blocks,
         rounds_per_row,
     )?;
 
-    let mut cx = Circuit::<F>::new("Host", blocks.next_power_of_two().max(floor))?;
+    // One host row per block, padded to a power of two of at least 2
+    let mut cx = Circuit::<F>::new("Host", blocks.next_power_of_two().max(2))?;
 
+    // The host columns of one compression, from h_in to h_out, from column 0
     let block = CpuSha256Block::declare(&mut cx, 0);
 
     let active = cx.column(ColumnType::Bit);
@@ -62,11 +62,14 @@ fn sha256(message: &[u8]) -> errors::Result<(CircuitProgram<F>, CpuSha256Block, 
         values: vec![F::ONE],
     };
 
+    // active on every block's row, chain on all but the last
     cx.fix(active, prefix(blocks));
     cx.fix(chain, prefix(blocks - 1));
 
+    // Active rows request the rounds from the chiplet; h_out = h_in + state_out
     block.connect(&mut cx, active)?;
 
+    // The first block starts from the SHA-256 IV
     for (i, &iv) in IV.iter().enumerate() {
         cx.boundary(block.h_in_words.at(i), 0, F::from(u128::from(iv)));
     }
@@ -85,14 +88,15 @@ fn sha256(message: &[u8]) -> errors::Result<(CircuitProgram<F>, CpuSha256Block, 
         cx.publish(block.h_out_words.at(i), blocks - 1);
     }
 
+    // The chiplet as its own table
     cx.attach(sha.def()?);
 
     Ok((cx.compile()?, block, sha))
 }
 ```
 
-Host row `b` holds `block.write(&mut tb, b, &calls[b])`, and the two bits after the block's columns, `active` and
-`chain`, are one on rows `0..blocks` and `0..blocks - 1`. `calls[b]` pairs block `b` of `pad_message(message)` with
+Host row `b` holds `block.write(&mut tb, b, &calls[b])`, and the two bits after the block's columns hold `active` and
+`chain`. `calls[b]` pairs block `b` of `pad_message(message)` with
 `h_in` from `calls[b - 1].h_out()`, `IV` for the first, and `sha.trace(&calls)` is the chiplet trace.
 
 [`sha256.rs`](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/sha256.rs) is a complete program that

@@ -59,7 +59,7 @@ pub fn serialize_source<'a, A: Allocator + 'a>(
         Source::Const(val) => {
             let lo = *val as u64;
             let hi = (*val >> 64) as u64;
-            let block = fb::Block128::new(lo, hi);
+            let block = fb::Block256::new(lo, hi, 0, 0);
 
             fb::Source::create(
                 fbb,
@@ -275,7 +275,14 @@ fn deserialize_source(entry: &fb::SourceEntry<'_>) -> Result<Source> {
                 message: "Constant source missing value",
             })?;
 
-            let val = block.lo() as u128 | ((block.hi() as u128) << 64);
+            if block.w2() != 0 || block.w3() != 0 {
+                return Err(Error::Protocol {
+                    protocol: "wire",
+                    message: "Constant source wider than u128",
+                });
+            }
+
+            let val = block.w0() as u128 | ((block.w1() as u128) << 64);
 
             Ok(Source::Const(val))
         }

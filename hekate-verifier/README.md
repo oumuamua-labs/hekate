@@ -24,14 +24,14 @@ Only proof bytes cross from the prover's side. Your build fixes four inputs befo
 
 - **The program**, built from the same audited source the prover used.
 - **The program id**, printed once with `hekate_program::digest::program_id_hex` and compiled in as a constant. The
-  verifier recomputes it from the program and returns `Err(ProgramIdMismatch)` on a difference.
+  verifier recomputes it from the program and rejects with `Rejection::Program(ProgramIdMismatch)` on a difference.
 - **The `Config` and the transcript label**, equal to the prover's. `Config::prod()` is the default; `Config::dev()`
   accepts weak geometries and exists for tests.
 - **The instance**: the trace height and the public inputs the statement is about.
 
-`Ok(true)` accepts. `Ok(false)` means the main table's ZeroCheck, an evaluation check or the outer argument failed.
-`Err` means any other check failed, the proof or input is malformed, the program id differs, or the configuration is
-below its security floor. A forged proof can produce either: treat everything except `Ok(true)` as a rejection.
+`Ok(())` accepts. A `Rejection` names the first check that failed. `Program`: your own inputs disagree (the program,
+the `Config`, the pinned id or the hasher width), and every proof fails alike. `Malformed`: the instance or the proof
+does not have the shape the program requires. Every other variant names the protocol check that caught the proof.
 
 ## Usage
 
@@ -41,26 +41,29 @@ cargo add hekate-verifier hekate-core hekate-crypto hekate-math hekate-program h
 
 ```rust
 use hekate_core::config::Config;
-use hekate_core::errors;
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::Block128;
+use hekate_math::Block256;
+use hekate_program::digest::ProgramId;
 use hekate_program::{Program, ProgramInstance};
 use hekate_sdk::deserialize_proof;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::Rejection;
 
-type F = Block128;
+type F = Block256;
 
 /// `audited_id` is a constant of this build, printed
 /// once with `digest::program_id_hex` at audit time.
 fn verify_one<P: Program<F> + Sync>(
-    audited_id: &[u8; 32],
+    audited_id: &ProgramId,
     program: &P,
     instance: &ProgramInstance<F>,
     proof_bytes: &[u8],
-) -> errors::Result<bool> {
+) -> Result<(), Rejection> {
+    // Bytes that do not parse return Rejection::Malformed
     let proof = deserialize_proof::<F>(proof_bytes)?;
 
+    // The prover's label and Config; the id is recomputed from program and compared
     HekateVerifier::<F, DefaultHasher>::verify(
         audited_id,
         program,
@@ -88,7 +91,8 @@ fn verify_one<P: Program<F> + Sync>(
 | `std`              | yes     | Standard library. Without it the crate is `no_std` with `alloc`.                   |
 | `blake3`           | yes     | BLAKE3 transcript and Merkle hashing.                                              |
 | `sha2`, `sha3`     | no      | SHA-256 or SHA3-256 hashing. The prover must use the same hash.                    |
-| `parallel`         | yes     | Rayon pool for leaf hashing, proximity checks, the outer tests and `verify_batch`. |
+| `shake256`         | no      | SHAKE256 hashing at 512 bits. The prover must use the same hash.                   |
+| `parallel`         | yes     | Rayon pool for leaf hashing, the outer tests and `verify_batch`.                   |
 | `table-math`       | no      | Variable-time basis conversion, faster.                                            |
 | `transcript-trace` | no      | Records every transcript operation, to locate a prover/verifier divergence.        |
 

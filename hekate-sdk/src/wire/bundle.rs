@@ -21,11 +21,11 @@ use hekate_program::{
 };
 use zeroize::Zeroizing;
 
-use super::{Interner, wire_err};
+use super::{Interner, verifier_opts, wire_err};
 use crate::generated::program as fb;
 use crate::wire::{ast, boundary, chiplet, config, expander, fixed_column, permutation, trace};
 
-const WIRE_FORMAT_VERSION: u32 = 8;
+const WIRE_FORMAT_VERSION: u32 = 9;
 
 pub struct DeserializedBundle<F: TowerField> {
     pub name: String,
@@ -159,9 +159,12 @@ where
 pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBundle<F>> {
     let mut interner = Interner::new();
 
-    let bundle = flatbuffers::root::<fb::ProgramBundle>(bytes).map_err(|_| Error::Protocol {
-        protocol: "wire",
-        message: "invalid FlatBuffer",
+    let opts = verifier_opts(bytes.len());
+    let bundle = flatbuffers::root_with_opts::<fb::ProgramBundle>(&opts, bytes).map_err(|_| {
+        Error::Protocol {
+            protocol: "wire",
+            message: "invalid FlatBuffer",
+        }
     })?;
 
     if bundle.version() != WIRE_FORMAT_VERSION {
@@ -240,7 +243,12 @@ pub fn deserialize_bundle<F: TowerField>(bytes: &[u8]) -> Result<DeserializedBun
             let mut inputs = Vec::with_capacity(pis.len());
             for i in 0..pis.len() {
                 let block = pis.get(i);
-                inputs.push(super::field::lo_hi_to_field(block.lo(), block.hi())?);
+                inputs.push(super::field::words_to_field([
+                    block.w0(),
+                    block.w1(),
+                    block.w2(),
+                    block.w3(),
+                ])?);
             }
 
             inputs
@@ -347,12 +355,13 @@ where
     let inline_chiplet_kernels =
         chiplet::serialize_kernel_hints(&mut fbb, &<P as Air<F>>::inline_chiplet_kernels(program));
 
-    let public_inputs_blocks: Vec<fb::Block128> = instance
+    let public_inputs_blocks: Vec<fb::Block256> = instance
         .public_inputs()
         .iter()
         .map(|f| {
-            let (lo, hi) = super::field::field_to_lo_hi(f);
-            fb::Block128::new(lo, hi)
+            let [w0, w1, w2, w3] = super::field::field_to_words(f);
+
+            fb::Block256::new(w0, w1, w2, w3)
         })
         .collect();
     let public_inputs = fbb.create_vector(&public_inputs_blocks);
@@ -397,7 +406,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{MAX_LABEL_LEN, MAX_TOTAL_LEAKED};
+    use crate::wire::{APPARENT_SIZE_FACTOR, MAX_LABEL_LEN, MAX_TOTAL_LEAKED};
     use hekate_core::trace::TraceBuilder;
     use hekate_math::Block128;
     use hekate_program::constraint::builder::ConstraintSystem;
@@ -549,5 +558,50 @@ mod tests {
         default.finish(root, None);
 
         assert_eq!(wiping.finished_data(), default.finished_data());
+    }
+
+    #[test]
+    fn aliased_trace_columns_rejected_under_size_cap() {
+        let mut fbb = FlatBufferBuilder::new();
+
+        let data = fbb.create_vector(&vec![0u8; 128 * 1024]);
+        let column = fb::TraceColumn::create(
+            &mut fbb,
+            &fb::TraceColumnArgs {
+                data: Some(data),
+                ..Default::default()
+            },
+        );
+
+        let columns = fbb.create_vector(&vec![column; 4 * APPARENT_SIZE_FACTOR]);
+        let main_trace = fb::ColumnTrace::create(
+            &mut fbb,
+            &fb::ColumnTraceArgs {
+                columns: Some(columns),
+                ..Default::default()
+            },
+        );
+
+        let bundle = fb::ProgramBundle::create(
+            &mut fbb,
+            &fb::ProgramBundleArgs {
+                version: WIRE_FORMAT_VERSION,
+                main_trace: Some(main_trace),
+                ..Default::default()
+            },
+        );
+
+        fbb.finish(bundle, None);
+
+        let bytes = fbb.finished_data();
+
+        assert!(bytes.len() < 256 * 1024);
+        assert_eq!(
+            deserialize_bundle::<Block128>(bytes).err(),
+            Some(Error::Protocol {
+                protocol: "wire",
+                message: "invalid FlatBuffer",
+            })
+        );
     }
 }

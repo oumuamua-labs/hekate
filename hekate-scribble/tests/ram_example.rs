@@ -2,23 +2,20 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Layer-1 + Layer-2 scribble coverage for the
-//! RAM chiplet from `hekate-gadgets`. Random
-//! shallow tampers plus hand-crafted exploits
-//! that target the chiplet's load-bearing
-//! invariants: address-sorted ordering, value
-//! consistency at the same address, padding-row
-//! shadow columns, and the committed Q_LAST
-//! row-position selector.
+//! Layer-1 + Layer-2 scribble coverage for the RAM chiplet from `hekate-gadgets`.
+//! Random shallow tampers plus hand-crafted exploits that target the chiplet's
+//! load-bearing invariants: address-sorted ordering, value consistency at the
+//! same address, padding-row shadow columns, and the committed Q_LAST row-position selector.
 
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_gadgets::{CpuMemColumns, MemoryEvent, RamChiplet, generate_ram_trace};
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_scribble::{
-    Mutation, MutationKind, ScribbleConfig, Target, assert_all_caught, check_single_mutation,
+    Mutation, MutationKind, ScribbleConfig, Target, Verdict, assert_all_caught,
+    check_single_mutation,
 };
 
 // AUX_INV:
@@ -26,7 +23,7 @@ use hekate_scribble::{
 // (d=0 zeroes the gate).
 const PHY_AUX_INV: usize = 15;
 
-type F = Block128;
+type F = Block256;
 
 fn ram_test_program(num_rows: usize, num_events: usize) -> CircuitProgram<F> {
     let mut cx = Circuit::<F>::new("RamScribble", num_rows).unwrap();
@@ -242,7 +239,10 @@ fn ram_value_consistency_tamper_caught() {
     };
 
     let result = check_single_mutation(&air, &instance, &witness, &mutation);
-    assert!(result.is_ok(), "value-consistency tamper escaped preflight");
+    assert!(
+        matches!(result, Verdict::Caught(_)),
+        "value-consistency tamper escaped preflight"
+    );
 }
 
 /// Documents the Q_LAST sum-to-one gap.
@@ -262,7 +262,7 @@ fn ram_q_last_uniform_zero_caught() {
 
     let result = check_single_mutation(&air, &instance, &witness, &mutation);
     assert!(
-        result.is_ok(),
+        matches!(result, Verdict::Caught(_)),
         "Q_LAST uniform-zero attack escaped preflight"
     );
 }
@@ -299,7 +299,7 @@ fn ram_q_chain_uniform_collapse_caught() {
 
     let result = check_single_mutation(&air, &instance, &witness, &mutation);
     assert!(
-        result.is_ok(),
+        matches!(result, Verdict::Caught(_)),
         "q_last/q_step/q_first uniform-collapse escaped preflight"
     );
 }
@@ -320,5 +320,8 @@ fn ram_address_tamper_on_chiplet_caught() {
     };
 
     let result = check_single_mutation(&air, &instance, &witness, &mutation);
-    assert!(result.is_ok(), "address tamper escaped preflight");
+    assert!(
+        matches!(result, Verdict::Caught(_)),
+        "address tamper escaped preflight"
+    );
 }

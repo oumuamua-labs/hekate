@@ -2175,3 +2175,111 @@ fn lookup_mismatch_past_first_bus_chunk() {
     assert!(d.bus_imbalance);
     assert_eq!(d.mismatching_rows, [4100]);
 }
+
+// =================================================================
+// KEY WIDTH ACROSS ONE BUS
+// (a trailing zero Const lifts the responder's tag one β power:
+//  the endpoints' keys differ and the bus cannot balance)
+// =================================================================
+
+const WIDTH_VARS: usize = 3;
+
+#[derive(Clone)]
+struct WidthRequester {
+    trailing_const: bool,
+}
+
+impl Air<F> for WidthRequester {
+    fn num_columns(&self) -> usize {
+        BusCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(BusCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![("width_bus".to_string(), width_spec(false))]
+    }
+
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        vec![FixedColumn::prefix(BusCols::SEL, ACTIVE_BUS_ROWS)]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+impl Program<F> for WidthRequester {
+    fn chiplet_defs(&self) -> errors::Result<Vec<ChipletDef<F>>> {
+        Ok(vec![ChipletDef::from_air(&WidthResponder {
+            trailing_const: self.trailing_const,
+        })?])
+    }
+}
+
+#[derive(Clone)]
+struct WidthResponder {
+    trailing_const: bool,
+}
+
+impl Air<F> for WidthResponder {
+    fn num_columns(&self) -> usize {
+        BusCols::NUM_COLUMNS
+    }
+
+    fn column_layout(&self) -> &[ColumnType] {
+        static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
+        LAYOUT.get_or_init(BusCols::build_layout)
+    }
+
+    fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
+        vec![("width_bus".to_string(), width_spec(self.trailing_const))]
+    }
+
+    fn fixed_columns(&self) -> Vec<FixedColumn<F>> {
+        vec![FixedColumn::prefix(BusCols::SEL, ACTIVE_BUS_ROWS)]
+    }
+
+    fn constraint_ast(&self) -> ConstraintAst<F> {
+        ConstraintSystem::<F>::new().build()
+    }
+}
+
+#[test]
+fn detects_unequal_key_widths_on_one_bus() {
+    assert!(width_report(false).is_clean());
+
+    let report = width_report(true);
+    eprintln!("{}", report);
+
+    assert_eq!(report.bus_diagnostics.len(), 1);
+    assert!(report.bus_diagnostics[0].bus_imbalance);
+}
+
+fn width_spec(trailing_const: bool) -> PermutationCheckSpec {
+    let mut spec = PermutationCheckSpec::new(
+        vec![
+            (Source::Column(BusCols::ADDR), b"k0"),
+            (Source::RowIndexLeBytes(4), b"k_clk"),
+        ],
+        Some(BusCols::SEL),
+    );
+
+    if trailing_const {
+        spec.sources.push((Source::Const(0), b"k_pad"));
+    }
+
+    spec
+}
+
+fn width_report(trailing_const: bool) -> preflight::PreflightReport<F> {
+    let (requester, responder) = matching_bus_traces(WIDTH_VARS, ACTIVE_BUS_ROWS);
+
+    let instance = ProgramInstance::new(1 << WIDTH_VARS, vec![]);
+    let witness = ProgramWitness::<F>::new(requester).with_chiplets(vec![responder]);
+
+    preflight(&WidthRequester { trailing_const }, &instance, &witness).unwrap()
+}

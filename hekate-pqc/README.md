@@ -18,8 +18,9 @@ This crate has not been independently audited and may contain bugs and security 
 
 USE AT YOUR OWN RISK!
 
-The proof binds at **100 bits** regardless of parameter set, which is below every level here, and the proof is the
-weaker link rather than the lattice scheme. The proven operations still run the full FIPS 203 / 204 parameter sets.
+The proof binds at 128 bits regardless of parameter set, the level of ML-KEM-512 and ML-DSA-44, and for the
+higher sets the proof is the weaker link rather than the lattice scheme. The proven operations still run the full
+FIPS 203 / 204 parameter sets.
 
 ## Usage
 
@@ -31,7 +32,7 @@ ML-DSA-65 verification of one signature over M′:
 
 ```rust
 use hekate_core::errors;
-use hekate_math::{Block128, TowerField};
+use hekate_math::{Block256, TowerField};
 use hekate_pqc::mldsa::{
     self, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaParams, MlDsaWitness,
 };
@@ -39,7 +40,7 @@ use hekate_program::FixedShape;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::define_columns;
 
-type F = Block128;
+type F = Block256;
 
 define_columns! {
     HostColumns {
@@ -53,13 +54,17 @@ fn verify(
     m_prime: &[u8],
     signature: &[u8],
 ) -> errors::Result<(CircuitProgram<F>, MlDsaWitness)> {
+    // One ML-DSA-65 verification of an M′ this long
     let pipeline = MlDsaChiplet::<F>::new(MlDsaParams::ML_DSA_65, &[m_prime.len()])?;
+
+    // The words the host trades with the pipeline, and every table's trace
     let witness = pipeline.trace(&[MlDsaInput {
         pk,
         message: m_prime,
         signature,
     }])?;
 
+    // One host row per word, padded to a power of two
     let rows = witness.words.len().next_power_of_two();
 
     let mut cx = Circuit::<F>::new("Host", rows)?;
@@ -69,6 +74,7 @@ fn verify(
     let word = host.at(HostColumns::WORD);
     let sel = host.at(HostColumns::SEL);
 
+    // SEL is 1 on the word rows
     cx.fix(
         sel,
         FixedShape::Cadence {
@@ -79,6 +85,7 @@ fn verify(
         },
     );
 
+    // Each word row trades one 32-bit word with the pipeline
     cx.call(&mldsa::service(), &[word], sel)?;
 
     let cs = cx.cs();
@@ -94,6 +101,7 @@ fn verify(
         cx.publish(word, row);
     }
 
+    // The pipeline's tables; only the data bus meets the host
     cx.attach_namespaced("mldsa", pipeline.defs()?, &[MLDSA_DATA_BUS_ID])?;
 
     Ok((cx.compile()?, witness))
@@ -104,7 +112,7 @@ ML-KEM-768 encapsulation to `ek`:
 
 ```rust
 use hekate_core::errors;
-use hekate_math::{Block128, TowerField};
+use hekate_math::{Block256, TowerField};
 use hekate_pqc::mlkem::{
     self, MLKEM_DATA_BUS_ID, MlKemCall, MlKemChiplet, MlKemInput, MlKemParams, MlKemWitness,
 };
@@ -112,7 +120,7 @@ use hekate_program::FixedShape;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::define_columns;
 
-type F = Block128;
+type F = Block256;
 
 define_columns! {
     HostColumns {
@@ -122,9 +130,13 @@ define_columns! {
 }
 
 fn encaps(ek: &[u8], m: &[u8; 32]) -> errors::Result<(CircuitProgram<F>, MlKemWitness)> {
+    // One ML-KEM-768 encapsulation
     let pipeline = MlKemChiplet::<F>::new(MlKemParams::ML_KEM_768, &[MlKemCall::Encaps])?;
+
+    // The words the host trades with the pipeline, and every table's trace
     let witness = pipeline.trace(&[MlKemInput::Encaps { ek, m }])?;
 
+    // One host row per word, padded to a power of two
     let rows = witness.words.len().next_power_of_two();
 
     let mut cx = Circuit::<F>::new("Host", rows)?;
@@ -134,6 +146,7 @@ fn encaps(ek: &[u8], m: &[u8; 32]) -> errors::Result<(CircuitProgram<F>, MlKemWi
     let word = host.at(HostColumns::WORD);
     let sel = host.at(HostColumns::SEL);
 
+    // SEL is 1 on the word rows
     cx.fix(
         sel,
         FixedShape::Cadence {
@@ -144,6 +157,7 @@ fn encaps(ek: &[u8], m: &[u8; 32]) -> errors::Result<(CircuitProgram<F>, MlKemWi
         },
     );
 
+    // Each word row trades one 32-bit word with the pipeline
     cx.call(&mlkem::service(), &[word], sel)?;
 
     let cs = cx.cs();
@@ -158,14 +172,15 @@ fn encaps(ek: &[u8], m: &[u8; 32]) -> errors::Result<(CircuitProgram<F>, MlKemWi
         cx.publish(word, row);
     }
 
+    // The pipeline's tables; only the data bus meets the host
     cx.attach_namespaced("mlkem", pipeline.defs()?, &[MLKEM_DATA_BUS_ID])?;
 
     Ok((cx.compile()?, witness))
 }
 ```
 
-In both, the host trace fills `word` with `witness.words` and `sel` with ones, `witness.traces` are the chiplet
-traces, and `cx.publish` exposes the rows the statement needs.
+In both, the host trace fills `word` with `witness.words` and `sel` with ones, and `witness.traces` are the chiplet
+traces.
 
 Complete programs:
 

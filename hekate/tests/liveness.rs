@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use hekate::math::Block128;
+use hekate::math::Block256;
 use hekate_aes::{Aes128Chiplet, Aes256Chiplet};
 use hekate_core::config::Config;
 use hekate_core::errors;
@@ -11,7 +11,8 @@ use hekate_keccak::KeccakChiplet;
 use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::chiplet::ChipletDef;
-use hekate_program::expander::{PoolLayout, RingSwitchPlan};
+use hekate_program::expander::RingSwitchPlan;
+use hekate_program::fold_pool::FoldPool;
 use hekate_program::outer::{OuterStatement, TableShape, table_plan};
 use hekate_program::{Air, FixedColumn};
 use hekate_sha2::Sha256Chiplet;
@@ -19,7 +20,7 @@ use hekate_sha2::Sha256Chiplet;
 const NUM_ROWS: usize = 256;
 const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
 
-type F = Block128;
+type F = Block256;
 type Snapshot = (&'static str, errors::Result<Vec<ChipletDef<F>>>);
 
 fn witness_selectors<A: Air<F>>(air: &A) -> Vec<String> {
@@ -133,25 +134,27 @@ fn shipped_tables_fit_outer_statement() {
         }
     }
 
+    let shapes: Vec<TableShape> = defs
+        .iter()
+        .map(|def| TableShape::from_air(def, &def.statics()).unwrap())
+        .collect();
+
     let plans: Vec<RingSwitchPlan> = defs
         .iter()
-        .map(|def| table_plan(def, def.permutation_checks.len(), &config).unwrap())
+        .zip(&shapes)
+        .map(|(def, shape)| table_plan(def, &def.statics(), shape, &config).unwrap())
         .collect();
 
     let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
-    let pool = PoolLayout::new(&heights, field_bits, &config);
+    let pool = FoldPool::new(&heights, &config).unwrap();
 
-    let shapes: Vec<TableShape> = defs
-        .iter()
-        .zip(&pool.tables)
-        .map(|(def, layout)| {
-            TableShape::from_air(def, &def.statics())
-                .unwrap()
-                .at(layout)
-        })
+    let shapes: Vec<TableShape> = shapes
+        .into_iter()
+        .zip(pool.tables())
+        .map(|(shape, layout)| shape.at(layout))
         .collect();
 
-    let statement = OuterStatement::new(&shapes, pool.num_vars());
+    let statement = OuterStatement::new::<F>(&shapes, pool.layout().num_vars());
 
     let per_table: Vec<String> = labels
         .iter()

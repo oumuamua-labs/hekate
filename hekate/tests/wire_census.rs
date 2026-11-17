@@ -9,27 +9,29 @@
 use hekate::core::config::Config;
 use hekate::core::poly::univariate::UnivariatePoly;
 use hekate::core::proofs::{
-    EvalBatchProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof,
+    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof, TreeOpening,
 };
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block64, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block64, Block256, TowerField};
 use hekate_core::trace::{IntoTraceColumn, TraceBuilder};
 use hekate_gadgets::{CpuMemColumns, MemoryEvent, RamChiplet, generate_ram_trace};
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakWitness, generate_keccak_trace};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
-use hekate_program::outer::OuterStatement;
+use hekate_program::expander::RingSwitchPlan;
+use hekate_program::fold_pool::FoldPool;
+use hekate_program::outer::{OuterStatement, TableParts, TableShape, table_plan};
 use hekate_program::{FixedShape, Program, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
-const NUM_VARS: usize = 4;
+const NUM_VARS: usize = 5;
 
 #[derive(Default)]
 struct Census {
@@ -37,6 +39,7 @@ struct Census {
     running_claim: usize,
     fold: usize,
     master_evals: usize,
+    mask_masters: usize,
     outer: usize,
     challenge_point: usize,
     opened_bytes: usize,
@@ -107,16 +110,20 @@ fn config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
 
 fn sumcheck(proof: &SumcheckProof<F>, census: &mut Census) -> usize {
     let SumcheckProof {
+        skip,
         round_polys,
         claimed_evaluation: _,
     } = proof;
+
+    census.padded += skip.len();
 
     for UnivariatePoly { evals } in round_polys {
         census.padded += evals.len();
@@ -137,23 +144,30 @@ fn opening(opening: &OuterOpening<F>) -> usize {
     values.len()
 }
 
-fn eval_batch(proof: &EvalBatchProof<F>, census: &mut Census) {
-    let EvalBatchProof {
+fn eval_batch(proof: &FoldEvalProof<F>, census: &mut Census) {
+    let FoldEvalProof {
         sumcheck_proof,
-        ldt_proof,
-        tensor_vec,
         masters,
-        h_ldt_proof,
+        mask_masters,
+        fold_rounds,
+        round_roots: _,
+        final_layer,
+        openings,
     } = proof;
 
     sumcheck(sumcheck_proof, census);
 
-    for opening in core::iter::once(ldt_proof).chain(h_ldt_proof.iter()) {
-        census.opened_bytes += opening.opened_columns.iter().map(Vec::len).sum::<usize>();
+    for TreeOpening {
+        leaves,
+        multiproof: _,
+    } in openings
+    {
+        census.opened_bytes += leaves.len();
     }
 
-    census.fold += tensor_vec.len();
+    census.fold += fold_rounds.len() + final_layer.len();
     census.master_evals += masters.len();
+    census.mask_masters += mask_masters.len();
 }
 
 fn point_evaluation(
@@ -190,10 +204,8 @@ fn outer(proof: &OuterProof<F>, census: &mut Census) {
     census.outer += opening(pad_opening) + opening(aux_opening);
 }
 
-/// No `..` in any wire pattern: a new field element
-/// on the wire must stop this compiling until it is
-/// classified. `BrakedownProof` is exempt, a private
-/// marker blocks the pattern outside `hekate-core`.
+/// No `..` in any wire pattern: a new field element on the
+/// wire must stop this compiling until it is classified.
 fn census(proof: &InnerProof<F>) -> Census {
     let InnerProof {
         trace_root: _,
@@ -245,6 +257,37 @@ fn pad_budget<P: Program<F> + Sync>(program: &P, chiplet_num_vars: &[usize]) -> 
     statement.masked_scalars
 }
 
+fn pool_polys<P: Program<F>>(program: &P, chiplet_num_vars: &[usize]) -> usize {
+    let config = config();
+    let defs = program.chiplet_defs().unwrap();
+
+    let mut plans = Vec::with_capacity(defs.len() + 1);
+    for def in &defs {
+        let statics = def.statics();
+        let shape = TableShape::from_air(def, &statics).unwrap();
+
+        plans.push(table_plan(def, &statics, &shape, &config).unwrap());
+    }
+
+    let parts = TableParts::of(program);
+    let statics = parts.statics();
+    let shape = TableShape::from_air(program, &statics).unwrap();
+
+    plans.push(table_plan(program, &statics, &shape, &config).unwrap());
+
+    let heights: Vec<(&RingSwitchPlan, usize)> = plans
+        .iter()
+        .zip(chiplet_num_vars.iter().chain([&NUM_VARS]))
+        .map(|(plan, &num_vars)| (plan, num_vars))
+        .collect();
+
+    FoldPool::new(&heights, &config)
+        .unwrap()
+        .layout()
+        .polys()
+        .len()
+}
+
 #[test]
 fn every_scalar_of_bus_free_proof_is_accounted() {
     let num_rows = 1 << NUM_VARS;
@@ -274,7 +317,7 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
     .unwrap();
 
     let mut vt = Transcript::<H>::new(b"Census_Step");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -282,15 +325,19 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
             &proof,
             &mut vt,
             &config()
-        )
-        .unwrap()
+        ),
+        Ok(())
     );
 
     let counted = census(&proof);
 
     assert_eq!(counted.padded, pad_budget(&air, &[]));
     assert_eq!(counted.running_claim, 2);
-    assert_eq!(counted.master_evals, 1);
+    assert_eq!(
+        counted.master_evals + counted.mask_masters,
+        pool_polys(&air, &[])
+    );
+    assert_eq!(counted.mask_masters, 2);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
     assert!(counted.outer > 0);
@@ -346,7 +393,7 @@ fn every_scalar_of_bus_proof_is_accounted() {
     .unwrap();
 
     let mut vt = Transcript::<H>::new(b"Census_Ram");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -354,8 +401,8 @@ fn every_scalar_of_bus_proof_is_accounted() {
             &proof,
             &mut vt,
             &config()
-        )
-        .unwrap()
+        ),
+        Ok(())
     );
 
     let counted = census(&proof);
@@ -365,22 +412,20 @@ fn every_scalar_of_bus_proof_is_accounted() {
     assert_eq!(counted.running_claim, 3);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
-    assert_eq!(counted.master_evals, 3);
+    assert_eq!(
+        counted.master_evals + counted.mask_masters,
+        pool_polys(&air, &[NUM_VARS])
+    );
+    assert_eq!(counted.mask_masters, 2);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
     assert!(counted.opened_bytes > 0);
 
     let mut ghost_sum = proof.clone();
-    ghost_sum
-        .main_logup_aux
-        .claimed_sums
-        .push(("ghost".into(), F::ONE));
+    ghost_sum.main_logup_aux.claimed_sums.push(F::ONE);
 
     let mut ghost_eval = proof.clone();
-    ghost_eval
-        .main_logup_aux
-        .h_evals
-        .push(("ghost".into(), F::ONE));
+    ghost_eval.main_logup_aux.h_evals.push(F::ONE);
 
     assert_ne!(census(&ghost_sum).padded, budget);
     assert_ne!(census(&ghost_eval).padded, budget);
@@ -430,7 +475,7 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
     .unwrap();
 
     let mut vt = Transcript::<H>::new(b"Census_Keccak");
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &program_id(&air).unwrap(),
             &air,
@@ -438,8 +483,8 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
             &proof,
             &mut vt,
             &config()
-        )
-        .unwrap()
+        ),
+        Ok(())
     );
 
     let counted = census(&proof);
@@ -448,7 +493,11 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
     assert_eq!(counted.running_claim, 3);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
-    assert_eq!(counted.master_evals, 3);
+    assert_eq!(
+        counted.master_evals + counted.mask_masters,
+        pool_polys(&air, &[CHIPLET_VARS])
+    );
+    assert_eq!(counted.mask_masters, 2);
     assert!(counted.outer > 0);
     assert!(counted.challenge_point > 0);
     assert!(counted.opened_bytes > 0);

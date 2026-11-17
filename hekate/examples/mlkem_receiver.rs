@@ -14,7 +14,7 @@ mod common;
 use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block16, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block16, Block32, Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_pqc::mlkem::{
@@ -30,7 +30,7 @@ use ml_kem::{Encapsulate, Kem, MlKem512, MlKem768, MlKem1024, TryKeyInit};
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const SEED_WORDS: usize = 8;
@@ -338,7 +338,7 @@ fn run<K: Kem>(args: &common::RunArgs, label: &str, params: MlKemParams) {
     let mut verifier_transcript = Transcript::<H>::new(b"MlKemReceiver_E2E");
 
     let pinned_id = args.audited_id(&program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &program,
@@ -347,10 +347,9 @@ fn run<K: Kem>(args: &common::RunArgs, label: &str, params: MlKemParams) {
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }
 
 fn main() {

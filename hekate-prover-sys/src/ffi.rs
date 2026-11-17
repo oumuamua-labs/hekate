@@ -30,7 +30,7 @@ pub struct HekateChipletWitness {
 
 unsafe extern "C" {
     #[allow(clippy::too_many_arguments)]
-    pub fn hekate_prove_b128_default(
+    pub fn hekate_prove(
         bundle_bytes: *const u8,
         bundle_len: usize,
         main_witness: *const HekateColumnView,

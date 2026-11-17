@@ -2,37 +2,40 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use hekate_core::skip::SkipPoint;
 use hekate_core::trace::ColumnType;
 use hekate_math::{Block128, Flat, HardwareField, TowerField};
 use hekate_program::{CadenceSegment, FixedShape, ShapeEvaluator, fix, validate_fixed_columns};
 
 type F = Block128;
 
-fn challenges(num_vars: usize) -> Vec<Flat<F>> {
-    (0..num_vars)
-        .map(|k| F::from(((k as u128) + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_hardware())
-        .collect()
+fn element(seed: u128) -> Flat<F> {
+    F::from(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_hardware()
 }
 
-fn eq(r: &[Flat<F>], index: usize) -> Flat<F> {
-    let one = Flat::from_raw(F::ONE);
-
-    let mut prod = one;
-    for (k, &r_k) in r.iter().enumerate() {
-        prod *= if (index >> k) & 1 == 1 {
-            r_k
-        } else {
-            one - r_k
-        };
-    }
-
-    prod
+fn challenges(num_vars: usize) -> SkipPoint<F> {
+    SkipPoint::multilinear((0..num_vars).map(|k| element(k as u128 + 1)).collect())
 }
 
-fn brute_force(values: &[F], r: &[Flat<F>]) -> Flat<F> {
+fn skip_point(num_vars: usize, skip_vars: usize) -> SkipPoint<F> {
+    let low = (0..1usize << skip_vars)
+        .map(|x| element(x as u128 + 40))
+        .collect();
+    let tail = (0..num_vars - skip_vars)
+        .map(|k| element(k as u128 + 90))
+        .collect();
+
+    SkipPoint::new(low, tail).unwrap()
+}
+
+fn eq(point: &SkipPoint<F>, index: usize) -> Flat<F> {
+    point.weight(index)
+}
+
+fn brute_force(values: &[F], point: &SkipPoint<F>) -> Flat<F> {
     let mut acc = Flat::from_raw(F::ZERO);
     for (i, &v) in values.iter().enumerate() {
-        acc += v.to_hardware() * eq(r, i);
+        acc += v.to_hardware() * point.weight(i);
     }
 
     acc
@@ -309,16 +312,18 @@ fn value_at_row_matches_evaluate_at_vertices() {
     let num_vars = 5;
     let n = 1 << num_vars;
 
-    let vertex = |row: usize| -> Vec<Flat<F>> {
-        (0..num_vars)
-            .map(|k| {
-                if (row >> k) & 1 == 1 {
-                    Flat::from_raw(F::ONE)
-                } else {
-                    Flat::from_raw(F::ZERO)
-                }
-            })
-            .collect()
+    let vertex = |row: usize| -> SkipPoint<F> {
+        SkipPoint::multilinear(
+            (0..num_vars)
+                .map(|k| {
+                    if (row >> k) & 1 == 1 {
+                        Flat::from_raw(F::ONE)
+                    } else {
+                        Flat::from_raw(F::ZERO)
+                    }
+                })
+                .collect(),
+        )
     };
 
     let custom_bits: Vec<bool> = (0..num_vars)
@@ -572,6 +577,45 @@ fn shape_evaluator_matches_evaluate() {
                     "num_vars {num_vars} shape {i}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn shapes_at_skip_point_match_brute_force() {
+    for (num_vars, skip_vars) in [(4usize, 2usize), (6, 3), (12, 6)] {
+        let point = skip_point(num_vars, skip_vars);
+        let shapes: Vec<FixedShape<F>> = shapes_at(num_vars)
+            .into_iter()
+            .filter(|shape| {
+                validate_fixed_columns(
+                    &[fix(0, shape.clone())],
+                    &[ColumnType::B128],
+                    Some(num_vars),
+                )
+                .is_ok()
+            })
+            .collect();
+
+        assert!(shapes.len() > 8);
+
+        let mut evaluator = ShapeEvaluator::new(&point);
+        for (i, shape) in shapes.iter().enumerate() {
+            let expanded: Vec<F> = (0..1usize << num_vars)
+                .map(|row| shape.value_at_row(row, num_vars).to_tower())
+                .collect();
+            let expected = brute_force(&expanded, &point);
+
+            assert_eq!(
+                shape.evaluate(&point),
+                expected,
+                "num_vars {num_vars} shape {i}"
+            );
+            assert_eq!(
+                evaluator.evaluate(shape),
+                expected,
+                "evaluator num_vars {num_vars} shape {i}"
+            );
         }
     }
 }

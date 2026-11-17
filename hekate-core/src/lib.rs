@@ -22,11 +22,13 @@ extern crate alloc;
 
 pub mod config;
 pub mod errors;
+pub mod fold;
 pub mod ligero;
 pub mod outer;
 pub mod poly;
 pub mod proofs;
 pub mod protocol;
+pub mod skip;
 pub mod tensor;
 pub mod trace;
 pub mod utils;

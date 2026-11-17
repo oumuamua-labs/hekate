@@ -291,8 +291,8 @@ fn write_128_row<const K: usize>(
         tb.set_b8_array(P128::P_K0_SUB, i, &row.k0_sub.map(Block8))?;
         tb.set_b8_array(P128::P_K0_INV, i, &row.k0_inv.map(Block8))?;
 
-        for j in 0..4 {
-            tb.set_bit(P128::P_K0_Z + j, i, Bit::from(row.k0_z[j] as u8))?;
+        for (j, &z) in row.k0_z.iter().enumerate() {
+            tb.set_bit(P128::P_K0_Z + j, i, Bit::from(z as u8))?;
         }
     }
 
@@ -300,8 +300,8 @@ fn write_128_row<const K: usize>(
         tb.set_b8_array(P128::P_KS_SUB, i, &row.ks_sub.map(Block8))?;
         tb.set_b8_array(P128::P_KS_INV, i, &row.ks_inv.map(Block8))?;
 
-        for j in 0..4 {
-            tb.set_bit(P128::P_KS_Z + j, i, Bit::from(row.ks_z[j] as u8))?;
+        for (j, &z) in row.ks_z.iter().enumerate() {
+            tb.set_bit(P128::P_KS_Z + j, i, Bit::from(z as u8))?;
         }
     }
 
@@ -352,8 +352,8 @@ fn write_256_row<const K: usize>(
         tb.set_b8_array(P256::P_KS_SUB, i, &row.ks_sub.map(Block8))?;
         tb.set_b8_array(P256::P_KS_INV, i, &row.ks_inv.map(Block8))?;
 
-        for j in 0..4 {
-            tb.set_bit(P256::P_KS_Z + j, i, Bit::from(row.ks_z[j] as u8))?;
+        for (j, &z) in row.ks_z.iter().enumerate() {
+            tb.set_bit(P256::P_KS_Z + j, i, Bit::from(z as u8))?;
         }
     }
 

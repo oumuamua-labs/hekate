@@ -122,6 +122,7 @@ pub fn chiplet_offsets(column_counts: &[usize]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     define_columns! {
         pub TestScalar {

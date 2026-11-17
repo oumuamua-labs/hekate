@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! ML-DSA verification (FIPS 204) with the public key and
-//! the signature in the witness: the statement publishes M'
-//! and tr = H(pk). Usage: mldsa [--level 44|65|87]
+//! the signature in the witness: the statement publishes
+//! M' and tr = H(pk). Usage: mldsa [--level 44|65|87]
 
 #[path = "common/mod.rs"]
 mod common;
@@ -12,7 +12,7 @@ mod common;
 use clap::{Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, TraceBuilder};
 use hekate_pqc::mldsa::{self, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaParams};
@@ -25,7 +25,7 @@ use ml_dsa::{B32, MlDsa44, MlDsa65, MlDsa87, SigningKey};
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const DIGEST_WORDS: usize = 16;
@@ -210,7 +210,7 @@ fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, m_prime: &[u8],
     let mut verifier_transcript = Transcript::<H>::new(b"MlDsa_E2E");
 
     let pinned_id = args.audited_id(&program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &program,
@@ -219,10 +219,9 @@ fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, m_prime: &[u8],
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }
 
 fn main() {

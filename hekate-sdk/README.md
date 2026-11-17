@@ -19,29 +19,30 @@ cargo add hekate-sdk hekate-core hekate-math hekate-program
 
 ```rust
 use hekate_core::errors;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::{Program, ProgramInstance, ProgramWitness};
 use hekate_sdk::preflight;
 
-type F = Block128;
+type F = Block256;
 
 fn assert_preflight_clean<P: Program<F>>(
     program: &P,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F>,
 ) -> errors::Result<()> {
+    // Every check on the concrete trace, without proving
     let report = preflight(program, instance, witness)?;
 
+    // A failing report names each failing check: table, label and row, or bus
     assert!(report.is_clean(), "{report}");
 
     Ok(())
 }
 ```
 
-Call it from a test with your generator's trace. A failing report names each failing check and where it failed: the
-table, the constraint label and the row, or the bus and its endpoints. `constraint_violations`, `boundary_violations`,
-`fixed_column_violations` and `bus_diagnostics` hold them for assertions. A clean report says the trace meets the
-constraints you wrote; a constraint you left out never fails.
+Call it from a test with your generator's trace. `constraint_violations`, `boundary_violations`,
+`fixed_column_violations` and `bus_diagnostics` hold the failures for assertions. A clean report says the trace meets
+the constraints you wrote; a constraint you left out never fails.
 
 | Function                                     | Does                                                                     |
 |:---------------------------------------------|:-------------------------------------------------------------------------|

@@ -5,42 +5,59 @@
 use core::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hekate_crypto::merkle::{MerkleTree, Tag};
-use hekate_crypto::{DefaultHasher, Hasher, default_hasher_name};
+#[cfg(feature = "parallel")]
+use hekate_crypto::merkle::{hash_symbol_leaf, hash_symbol_leaves};
+use hekate_crypto::{DefaultHasher, Digest, Hasher, default_hasher_name};
 use hekate_math::Block128;
 use rand::{Rng, SeedableRng, rngs::StdRng};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::time::Duration;
 
+#[cfg(feature = "parallel")]
+const BATCH_VARS: usize = 22;
+
+#[cfg(feature = "parallel")]
+const BATCH: usize = 64;
+
+#[cfg(feature = "parallel")]
+const LEAF_RUN: usize = 128;
+
+#[cfg(feature = "parallel")]
+const NODE_BYTES: usize = 2 * D::BYTES + 1;
+
 type H = DefaultHasher;
+type D = <H as Hasher>::Digest;
 type F = Block128;
 
 #[inline(always)]
-fn hash_leaf(payload: &[u8]) -> [u8; 32] {
+fn hash_leaf(payload: &[u8]) -> D {
     let mut h = H::new();
     h.update(payload);
-    h.update(&[Tag::Part as u8]);
+    h.update(&[Tag::PoolLeaf as u8]);
 
     h.finalize()
 }
 
 #[inline(always)]
-fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+fn hash_node(left: &D, right: &D) -> D {
     let mut h = H::new();
-    h.update(left);
-    h.update(right);
+    h.update(left.as_ref());
+    h.update(right.as_ref());
     h.update(&[Tag::Node as u8]);
 
     h.finalize()
 }
 
-fn build_leaves(num_leaves: usize) -> Vec<[u8; 32]> {
+fn build_leaves(num_leaves: usize) -> Vec<D> {
     let mut rng = StdRng::seed_from_u64(42);
 
     // We intentionally keep the per-leaf
     // payload small here. The Merkle tree
-    // itself only sees 32-byte leaf hashes.
+    // itself only sees leaf hashes.
     let mut payload = [0u8; 32];
-
     let mut leaves = Vec::with_capacity(num_leaves);
+
     for _ in 0..num_leaves {
         rng.fill_bytes(&mut payload);
         leaves.push(hash_leaf(&payload));
@@ -68,7 +85,7 @@ fn bench_merkle_hashing(c: &mut Criterion) {
         );
     }
 
-    group.throughput(Throughput::Bytes((32 + 32 + 1) as u64));
+    group.throughput(Throughput::Bytes((2 * D::BYTES + 1) as u64));
     group.bench_function("node_hash", |b| {
         let left = hash_leaf(b"left");
         let right = hash_leaf(b"right");
@@ -103,13 +120,13 @@ fn bench_merkle_build(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let (mut tree, leaf_offset) = MerkleTree::<F, H>::allocate_tree(num_leaves);
-                    let leaf_layer = tree.leaves_mut(leaf_offset);
+                    let leaf_layer = tree.leaves_mut(leaf_offset).unwrap();
 
                     for (i, slot) in leaf_layer.iter_mut().enumerate() {
                         slot.write(leaves[i]);
                     }
 
-                    tree.build_layers(leaf_offset);
+                    tree.build_layers(leaf_offset).unwrap();
 
                     black_box(tree.root())
                 })
@@ -160,6 +177,106 @@ fn bench_merkle_prove_verify(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "parallel")]
+fn bench_batched_leaves(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("Merkle/{} leaves", default_hasher_name()));
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+
+    let count = 1usize << BATCH_VARS;
+    group.throughput(Throughput::Elements(count as u64));
+
+    let mut symbols = vec![0u8; count * LEAF_RUN];
+    StdRng::seed_from_u64(42).fill_bytes(&mut symbols);
+
+    let mut leaves = vec![D::ZERO; count];
+
+    group.bench_with_input(
+        BenchmarkId::new("per_leaf", BATCH_VARS),
+        &BATCH_VARS,
+        |b, _| {
+            b.iter(|| {
+                leaves.par_iter_mut().enumerate().for_each(|(j, slot)| {
+                    let run = &symbols[j * LEAF_RUN..(j + 1) * LEAF_RUN];
+                    *slot = hash_symbol_leaf::<H>([run], Tag::PoolLeaf);
+                });
+
+                black_box(&leaves);
+            })
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("hash_symbol_leaves", BATCH_VARS),
+        &BATCH_VARS,
+        |b, _| {
+            b.iter(|| {
+                leaves
+                    .par_chunks_mut(BATCH)
+                    .zip(symbols.par_chunks(BATCH * LEAF_RUN))
+                    .for_each_init(Vec::new, |preimages, (out, bytes)| {
+                        hash_symbol_leaves::<H>(&[(bytes, LEAF_RUN)], Tag::PoolLeaf, out, preimages)
+                    });
+
+                black_box(&leaves);
+            })
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(feature = "parallel")]
+fn bench_batched_nodes(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("Merkle/{} nodes", default_hasher_name()));
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+
+    let count = 1usize << BATCH_VARS;
+    group.throughput(Throughput::Elements(count as u64));
+
+    let mut preimages = vec![0u8; count * NODE_BYTES];
+    StdRng::seed_from_u64(42).fill_bytes(&mut preimages);
+
+    let mut digests = vec![D::ZERO; count];
+
+    group.bench_with_input(
+        BenchmarkId::new("digest", BATCH_VARS),
+        &BATCH_VARS,
+        |b, _| {
+            b.iter(|| {
+                digests
+                    .par_chunks_mut(BATCH)
+                    .zip(preimages.par_chunks(BATCH * NODE_BYTES))
+                    .for_each(|(out, msgs)| {
+                        for (slot, msg) in out.iter_mut().zip(msgs.as_chunks::<NODE_BYTES>().0) {
+                            *slot = H::digest(msg);
+                        }
+                    });
+
+                black_box(&digests);
+            })
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("digest_many", BATCH_VARS),
+        &BATCH_VARS,
+        |b, _| {
+            b.iter(|| {
+                digests
+                    .par_chunks_mut(BATCH)
+                    .zip(preimages.par_chunks(BATCH * NODE_BYTES))
+                    .for_each(|(out, msgs)| H::digest_many(msgs, NODE_BYTES, out));
+
+                black_box(&digests);
+            })
+        },
+    );
+
+    group.finish();
+}
+
 fn merkle_benches(c: &mut Criterion) {
     #[cfg(feature = "parallel")]
     {
@@ -169,6 +286,12 @@ fn merkle_benches(c: &mut Criterion) {
     bench_merkle_hashing(c);
     bench_merkle_build(c);
     bench_merkle_prove_verify(c);
+
+    #[cfg(feature = "parallel")]
+    {
+        bench_batched_leaves(c);
+        bench_batched_nodes(c);
+    }
 }
 
 criterion_group!(benches, merkle_benches);

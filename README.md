@@ -1,20 +1,29 @@
 # Hekate ZK Engine
 
-[![CI](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml/badge.svg)](https://github.com/oumuamua-labs/hekate/actions/workflows/ci.yml)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](./LICENSE)
+[![Quick Start](https://img.shields.io/badge/tutorial-quick%20start-informational)](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program)
+[![Hekate overview](https://img.shields.io/badge/overview-hekate-informational)](https://oumuamua.dev/hekate)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
+[![project chat](https://img.shields.io/badge/telegram-join_chat-brightgreen.svg)](https://t.me/hekatezk)
 
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
-Zero-knowledge proof system over binary tower fields. Streaming architecture. Bounded memory. Edge-native.
-Hekate proves computations in GF(2^128) using Sumcheck + Brakedown PCS with O(N) prover time and O(N) memory.
-100 proven bits of soundness.
+Hekate is a general-purpose zero-knowledge proof system for proving where the data lives: on the user's own device or at
+the edge. You write your ZK program in Rust as tables and AIR constraints, and Hekate takes care of the field, the
+commitment and zero knowledge. The default configuration gives 128 bits of security.
 
-Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
+The engine is built from binary tower field arithmetic machine-checked in Verus, BaseFold commitments, Sumcheck and
+logUp buses between tables and chiplets. It is not a VM, so you pay only for what you prove. Every challenge is drawn
+from GF(2^256), which lets the fold queries work at the Johnson radius for the default 128 bits; for a target the
+Johnson bound cannot reach, such as 220 bits, the engine switches to the unique decoding radius.
+
+Learn more: [oumuamua.dev/hekate](https://oumuamua.dev/hekate)
 
 > [!IMPORTANT]  
-> Hekate's open code is AGPL-3.0-only; its signed prover ships as free binaries for macOS (Apple Silicon),
+> Hekate's open code is AGPL-3.0; its signed prover ships as free binaries for macOS (Apple Silicon),
 > Linux (ARM64, glibc), iOS (ARM64, device and simulator), and Android (ARM64).
-> A product shipped under other terms, open source or closed, needs a commercial license.
+> Experiments, research, personal projects and products released under the AGPL are free.
+> A commercial license lets you ship closed-source products, or open-source products under a license of your
+> choice, such as MIT or Apache-2.0.
 
 > [!NOTE]  
 > [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile) compiles a Rust prover into a signed
@@ -24,7 +33,15 @@ Documentation: [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs)
 
 > [!WARNING]  
 > This workspace is under aggressive development. APIs, ABIs, and cryptographic signatures will break
-> without notice. Do not deploy to mainnet.
+> without notice.
+
+### Hardware Support
+
+| Architecture | Status     | Instructions                          |
+|:-------------|:-----------|:--------------------------------------|
+| aarch64      | Production | PMULL, NEON                           |
+| x86_64       | Fallback   | Software fallback (PCLMULQDQ roadmap) |
+| WASM         | Planned    | Software multiply                     |
 
 ---
 
@@ -44,61 +61,64 @@ USE AT YOUR OWN RISK!
 
 ---
 
-## The Hekate Ecosystem
+## Getting Started
 
-Hekate is not one crate. The prover is the engine; the math core, hardware chiplets, mobile toolchain,
-and fuzzer ship as independent crates you compose as needed.
+The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in reading order:
+
+- [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), the crates, the signed prover binary,
+  supported targets
+- [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), a private payment
+  proved end-to-end
+- [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture), binary tower fields, Sumcheck,
+  the fold commitment, what the verifier trusts
+- [Prover Engine](https://oumuamua.dev/hekate/docs/basics/prover-engine), commit every table, prove the constraints
+  with Sumcheck, open the commitments
+- [AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints), constraints over two rows, boundaries,
+  gadgets, degree
+- [Execution Trace](https://oumuamua.dev/hekate/docs/basics/execution-trace), column types, padding rows, wiping
+  secrets
+- [Verifier Logic](https://oumuamua.dev/hekate/docs/basics/verifier-logic), pinning the program id, one proof, a
+  prepared program, a batch
+- [logUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses), a multiset check as a sum of fractions, a bus of
+  your own
+- [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), the chiplet set, calling a
+  chiplet, a chiplet of your own
+- [PIOP Protocol](https://oumuamua.dev/hekate/docs/advanced/piop-protocol), multilinear columns, Sumcheck down to one
+  point, the commitment
+- [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge), how a proof hides the witness, and the
+  [ring-switching paper](https://eprint.iacr.org/2026/2754) behind packed bit columns
+- [Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial
+  test suite, Fiat-Shamir binding
+
+---
+
+## Crates
+
+Hekate is not one crate. The prover is the engine; the math and protocol core, chiplets, mobile toolchain,
+the fuzzer and the test oracles ship as independent crates you compose as
+needed. [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture#the-crates)
+draws all of them as one stack, and each chiplet has a page at
+[oumuamua.dev/primitives](https://oumuamua.dev/primitives) stating what it proves, which values a program can
+publish and what stays outside the proof.
 
 | Crate                                                                                      | Role                                                                                                        |
 |:-------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------------------|
 | [`hekate-math`](https://github.com/oumuamua-labs/hekate-math)                              | Binary tower field arithmetic, constant-time, PMULL on aarch64. The mathematical core.                      |
+| [`hekate-crypto`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-crypto)         | Hash functions (BLAKE3, SHA-256, SHA3-256, SHAKE256), Merkle trees and the Fiat-Shamir transcript.          |
+| [`hekate-core`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-core)             | `Config` and its security estimate, execution traces and proof types.                                       |
+| [`hekate-program`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-program)       | Circuit DSL: columns, constraints, fixed columns, public inputs, chiplets, logUp buses and program ids.     |
+| [`hekate-verifier`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-verifier)     | Verifier in pure Rust. Runs no prover code and names the first failing check in a typed `Rejection`.        |
+| [`hekate-sdk`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-sdk)               | Preflight diagnostics, the proof wire format and the bundle the prover binary reads.                        |
 | [`hekate-prover-sys`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-prover-sys) | Open FFI shim. Links the signed prover cdylib over a stable C ABI; the only crate that can call the prover. |
 | [`hekate-gadgets`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-gadgets)       | Base AIR chiplets: 32- and 64-bit integer arithmetic, RAM, ROM and modular exponentiation.                  |
-| [`hekate-keccak`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-keccak)         | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~16x memory savings.                            |
+| [`hekate-keccak`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-keccak)         | Keccak-f[1600] chiplet plus SHA-3 / SHAKE. Virtual packing, ~8x memory savings.                             |
 | [`hekate-aes`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-aes)               | AES-128 / AES-256 round-function chiplet (FIPS 197) with an S-box ROM.                                      |
 | [`hekate-sha2`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-sha2)             | SHA-256 compression chiplet (FIPS 180-4). Bit-expanded B32 columns, degree 2, 1-16 rounds per row.          |
 | [`hekate-rsa`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-rsa)               | RSA-2048 PKCS#1 v1.5 signature statements (RFC 8017) over the modexp and SHA-256 chiplets.                  |
 | [`hekate-pqc`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-pqc)               | ML-KEM KeyGen, Encaps and Decaps and ML-DSA verification (FIPS 203 / 204) over NTT, Sampler, Codec tables.  |
 | [`hekate-mobile`](https://github.com/oumuamua-labs/hekate-mobile)                          | Wraps a Rust prover into a signed iOS `.xcframework` / Android `.aar` with a typed Swift / Kotlin API.      |
 | [`hekate-scribble`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-scribble)     | Trace-mutation fuzzer. Tampers a valid trace, panics if your constraints miss the tamper.                   |
-
-The workspace also holds `hekate-core`, `hekate-crypto`, `hekate-program`, `hekate-verifier` and
-`hekate-sdk`. [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture#the-crates)
-draws all of them as one stack, and each chiplet has a page at
-[oumuamua.dev/primitives](https://oumuamua.dev/primitives) stating what it proves, which values a program can
-publish and what stays outside the proof.
-
----
-
-## What It Does
-
-**Binary tower field arithmetic**, GF(2^8) through GF(2^128), recursive tower extension, hardware-accelerated via
-PMULL on aarch64. Constant-time by default.
-
-**Chiplet architecture**, Independent AIR tables (Keccak, AES, RAM, NTT, ML-KEM, ML-DSA) with own traces. No column
-waste, no forced padding. Tables linked by LogUp bus.
-
-**Virtual packing**, Keccak stores 1600 bits in 25 physical B64 columns instead of 1600 bit columns. Bits expand JIT in
-registers. 16x memory savings.
-
-**Linear-code commitments**, Brakedown PCS: O(N) prover, O(N) memory. MDS Reed-Solomon row code via additive
-binary-field FFT, exact distance δ = 1 − rate. Merkle tree over encoded columns only.
-
-**Zero knowledge**, on by default. A one-time pad covers every round, claim and bus sum a proof sends, the commitment's
-opened columns and leaves look random, and a zk-Ligero argument proves the checks the verifier cannot run on padded
-values. [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge) specifies all three.
-
-**Post-quantum crypto suite**, ML-DSA (Dilithium) signature verification, ML-KEM (Kyber) key generation,
-encapsulation and decapsulation, AES-128/256. AES and Keccak are native to binary fields; lattice arithmetic
-mod q runs on bit-decomposed carry chains.
-
-### Hardware Support
-
-| Architecture | Status     | Instructions                          |
-|:-------------|:-----------|:--------------------------------------|
-| aarch64      | Production | PMULL, NEON                           |
-| x86_64       | Fallback   | Software fallback (PCLMULQDQ roadmap) |
-| WASM         | Planned    | Software multiply                     |
+| [`hekate-testkit`](https://github.com/oumuamua-labs/hekate/tree/main/hekate-testkit)       | Test oracles. Honest statements must verify, and forged traces must fail with the `Rejection` you predict.  |
 
 ---
 
@@ -134,37 +154,6 @@ binary you can run with `cargo run --release --example <name>`.
   matched against a ROM table via `RomChiplet`)
 - [Three chiplets on one CPU](https://github.com/oumuamua-labs/hekate/blob/main/hekate/examples/many_chiplets.rs)
   (ROM, integer arithmetic and RAM, each on its own bus)
-
----
-
-## Getting Started
-
-The guides at [oumuamua.dev/hekate/docs](https://oumuamua.dev/hekate/docs), in reading order:
-
-- [Installation](https://oumuamua.dev/hekate/docs/getting-started/installation), the crates, the signed prover binary,
-  supported targets
-- [Your First ZK Program](https://oumuamua.dev/hekate/docs/getting-started/your-first-zk-program), a private payment
-  proved end-to-end
-- [System Architecture](https://oumuamua.dev/hekate/docs/basics/system-architecture), binary tower fields, Sumcheck,
-  Brakedown, what the verifier trusts
-- [Prover Engine](https://oumuamua.dev/hekate/docs/basics/prover-engine), commit every table, prove the constraints
-  with Sumcheck, open the commitments
-- [AIR Constraints](https://oumuamua.dev/hekate/docs/basics/air-constraints), constraints over two rows, boundaries,
-  gadgets, degree
-- [Execution Trace](https://oumuamua.dev/hekate/docs/basics/execution-trace), column types, padding rows, wiping
-  secrets
-- [Verifier Logic](https://oumuamua.dev/hekate/docs/basics/verifier-logic), pinning the program id, one proof, a
-  prepared program, a batch
-- [LogUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses), a multiset check as a sum of fractions, a bus of
-  your own
-- [Cryptographic Chiplets](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets), the chiplet set, calling a
-  chiplet, a chiplet of your own
-- [PIOP Protocol](https://oumuamua.dev/hekate/docs/advanced/piop-protocol), multilinear columns, Sumcheck down to one
-  point, the commitment
-- [Zero Knowledge](https://oumuamua.dev/hekate/docs/advanced/zero-knowledge), how a proof hides the witness, and the
-  [ring-switching paper](https://oumuamua.dev/blog/zk-ring-switching) behind packed bit columns
-- [Soundness and Security](https://oumuamua.dev/hekate/docs/advanced/soundness-and-security), threat model, adversarial
-  test suite, Fiat-Shamir binding
 
 ---
 

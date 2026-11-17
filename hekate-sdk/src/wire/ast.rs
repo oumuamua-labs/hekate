@@ -120,8 +120,7 @@ fn serialize_expr<'a, F: TowerField, A: Allocator + 'a>(
             },
         ),
         ConstraintExpr::Const(val) => {
-            let bytes = val.to_bytes();
-            let block = block128_from_bytes(&bytes);
+            let block = block_from_field(val);
 
             fb::AstNode::create(
                 fbb,
@@ -151,8 +150,7 @@ fn serialize_expr<'a, F: TowerField, A: Allocator + 'a>(
             },
         ),
         ConstraintExpr::Scale(scalar, child) => {
-            let bytes = scalar.to_bytes();
-            let block = block128_from_bytes(&bytes);
+            let block = block_from_field(scalar);
 
             fb::AstNode::create(
                 fbb,
@@ -192,7 +190,7 @@ fn deserialize_expr<F: TowerField>(node: &fb::AstNode<'_>) -> Result<ConstraintE
                 message: "Const node missing value",
             })?;
 
-            Ok(ConstraintExpr::Const(field_from_block128::<F>(block)?))
+            Ok(ConstraintExpr::Const(field_from_block::<F>(block)?))
         }
         fb::NodeTag::Add => Ok(ConstraintExpr::Add(
             ExprId(node.left()),
@@ -209,7 +207,7 @@ fn deserialize_expr<F: TowerField>(node: &fb::AstNode<'_>) -> Result<ConstraintE
             })?;
 
             Ok(ConstraintExpr::Scale(
-                field_from_block128::<F>(block)?,
+                field_from_block::<F>(block)?,
                 ExprId(node.left()),
             ))
         }
@@ -232,13 +230,14 @@ fn deserialize_expr<F: TowerField>(node: &fb::AstNode<'_>) -> Result<ConstraintE
     }
 }
 
-fn block128_from_bytes(bytes: &[u8]) -> fb::Block128 {
-    let (lo, hi) = super::field::bytes_to_lo_hi(bytes);
-    fb::Block128::new(lo, hi)
+fn block_from_field<F: TowerField>(f: &F) -> fb::Block256 {
+    let [w0, w1, w2, w3] = super::field::field_to_words(f);
+
+    fb::Block256::new(w0, w1, w2, w3)
 }
 
-fn field_from_block128<F: TowerField>(block: &fb::Block128) -> Result<F> {
-    super::field::lo_hi_to_field(block.lo(), block.hi())
+fn field_from_block<F: TowerField>(block: &fb::Block256) -> Result<F> {
+    super::field::words_to_field([block.w0(), block.w1(), block.w2(), block.w3()])
 }
 
 #[cfg(test)]

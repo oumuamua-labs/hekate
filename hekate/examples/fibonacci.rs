@@ -9,7 +9,7 @@ use clap::Parser;
 use hekate::core::trace::{ColumnTrace, TraceColumn};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block32, Block128, HardwareField, TowerField};
+use hekate::math::{Block32, Block256, HardwareField, TowerField};
 use hekate_core::errors;
 use hekate_gadgets::{
     ArithmeticOpcode, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
@@ -23,7 +23,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // =================================================================
@@ -171,7 +171,7 @@ fn main() {
     let mut verifier_transcript = Transcript::<H>::new(b"FibonacciIntChiplet");
 
     let pinned_id = args.audited_id::<F, _>(&program);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &program,
@@ -180,8 +180,7 @@ fn main() {
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }

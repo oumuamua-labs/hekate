@@ -8,46 +8,48 @@ pub mod hekate {
     #[allow(unused_imports, dead_code)]
     pub mod wire {
 
-        // struct Block128, aligned to 8
+        // struct Block256, aligned to 8
         #[repr(transparent)]
         #[derive(Clone, Copy, PartialEq)]
-        pub struct Block128(pub [u8; 16]);
-        impl Default for Block128 {
+        pub struct Block256(pub [u8; 32]);
+        impl Default for Block256 {
             fn default() -> Self {
-                Self([0; 16])
+                Self([0; 32])
             }
         }
-        impl ::core::fmt::Debug for Block128 {
+        impl ::core::fmt::Debug for Block256 {
             fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-                f.debug_struct("Block128")
-                    .field("lo", &self.lo())
-                    .field("hi", &self.hi())
+                f.debug_struct("Block256")
+                    .field("w0", &self.w0())
+                    .field("w1", &self.w1())
+                    .field("w2", &self.w2())
+                    .field("w3", &self.w3())
                     .finish()
             }
         }
 
-        impl ::flatbuffers::SimpleToVerifyInSlice for Block128 {}
-        impl<'a> ::flatbuffers::Follow<'a> for Block128 {
-            type Inner = &'a Block128;
+        impl ::flatbuffers::SimpleToVerifyInSlice for Block256 {}
+        impl<'a> ::flatbuffers::Follow<'a> for Block256 {
+            type Inner = &'a Block256;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                unsafe { <&'a Block128>::follow(buf, loc) }
+                unsafe { <&'a Block256>::follow(buf, loc) }
             }
         }
-        impl<'a> ::flatbuffers::Follow<'a> for &'a Block128 {
-            type Inner = &'a Block128;
+        impl<'a> ::flatbuffers::Follow<'a> for &'a Block256 {
+            type Inner = &'a Block256;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                unsafe { ::flatbuffers::follow_cast_ref::<Block128>(buf, loc) }
+                unsafe { ::flatbuffers::follow_cast_ref::<Block256>(buf, loc) }
             }
         }
-        impl<'b> ::flatbuffers::Push for Block128 {
-            type Output = Block128;
+        impl<'b> ::flatbuffers::Push for Block256 {
+            type Output = Block256;
             #[inline]
             unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
                 let src = unsafe {
                     ::core::slice::from_raw_parts(
-                        self as *const Block128 as *const u8,
+                        self as *const Block256 as *const u8,
                         <Self as ::flatbuffers::Push>::size(),
                     )
                 };
@@ -59,7 +61,7 @@ pub mod hekate {
             }
         }
 
-        impl<'a> ::flatbuffers::Verifiable for Block128 {
+        impl<'a> ::flatbuffers::Verifiable for Block256 {
             #[inline]
             fn run_verifier(
                 v: &mut ::flatbuffers::Verifier,
@@ -69,16 +71,18 @@ pub mod hekate {
             }
         }
 
-        impl<'a> Block128 {
+        impl<'a> Block256 {
             #[allow(clippy::too_many_arguments)]
-            pub fn new(lo: u64, hi: u64) -> Self {
-                let mut s = Self([0; 16]);
-                s.set_lo(lo);
-                s.set_hi(hi);
+            pub fn new(w0: u64, w1: u64, w2: u64, w3: u64) -> Self {
+                let mut s = Self([0; 32]);
+                s.set_w0(w0);
+                s.set_w1(w1);
+                s.set_w2(w2);
+                s.set_w3(w3);
                 s
             }
 
-            pub fn lo(&self) -> u64 {
+            pub fn w0(&self) -> u64 {
                 let mut mem = ::core::mem::MaybeUninit::<
                     <u64 as ::flatbuffers::EndianScalar>::Scalar,
                 >::uninit();
@@ -95,7 +99,7 @@ pub mod hekate {
                 })
             }
 
-            pub fn set_lo(&mut self, x: u64) {
+            pub fn set_w0(&mut self, x: u64) {
                 let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
                 // Safety:
                 // Created from a valid Table for this object
@@ -109,7 +113,7 @@ pub mod hekate {
                 }
             }
 
-            pub fn hi(&self) -> u64 {
+            pub fn w1(&self) -> u64 {
                 let mut mem = ::core::mem::MaybeUninit::<
                     <u64 as ::flatbuffers::EndianScalar>::Scalar,
                 >::uninit();
@@ -126,7 +130,7 @@ pub mod hekate {
                 })
             }
 
-            pub fn set_hi(&mut self, x: u64) {
+            pub fn set_w1(&mut self, x: u64) {
                 let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
                 // Safety:
                 // Created from a valid Table for this object
@@ -135,6 +139,68 @@ pub mod hekate {
                     ::core::ptr::copy_nonoverlapping(
                         &x_le as *const _ as *const u8,
                         self.0[8..].as_mut_ptr(),
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                }
+            }
+
+            pub fn w2(&self) -> u64 {
+                let mut mem = ::core::mem::MaybeUninit::<
+                    <u64 as ::flatbuffers::EndianScalar>::Scalar,
+                >::uninit();
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        self.0[16..].as_ptr(),
+                        mem.as_mut_ptr() as *mut u8,
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                    mem.assume_init()
+                })
+            }
+
+            pub fn set_w2(&mut self, x: u64) {
+                let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        &x_le as *const _ as *const u8,
+                        self.0[16..].as_mut_ptr(),
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                }
+            }
+
+            pub fn w3(&self) -> u64 {
+                let mut mem = ::core::mem::MaybeUninit::<
+                    <u64 as ::flatbuffers::EndianScalar>::Scalar,
+                >::uninit();
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        self.0[24..].as_ptr(),
+                        mem.as_mut_ptr() as *mut u8,
+                        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+                    );
+                    mem.assume_init()
+                })
+            }
+
+            pub fn set_w3(&mut self, x: u64) {
+                let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid value in this slot
+                unsafe {
+                    ::core::ptr::copy_nonoverlapping(
+                        &x_le as *const _ as *const u8,
+                        self.0[24..].as_mut_ptr(),
                         ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
                     );
                 }
@@ -183,13 +249,13 @@ pub mod hekate {
             }
 
             #[inline]
-            pub fn coefficients(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn coefficients(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             UnivariatePoly::VT_COEFFICIENTS,
                             None,
                         )
@@ -204,13 +270,13 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("coefficients", Self::VT_COEFFICIENTS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("coefficients", Self::VT_COEFFICIENTS, false)?
      .finish();
                 Ok(())
             }
         }
         pub struct UnivariatePolyArgs<'a> {
-            pub coefficients: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub coefficients: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
         }
         impl<'a> Default for UnivariatePolyArgs<'a> {
             #[inline]
@@ -227,7 +293,7 @@ pub mod hekate {
             #[inline]
             pub fn add_coefficients(
                 &mut self,
-                coefficients: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                coefficients: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     UnivariatePoly::VT_COEFFICIENTS,
@@ -278,6 +344,7 @@ pub mod hekate {
         impl<'a> SumcheckProof<'a> {
             pub const VT_ROUND_POLYS: ::flatbuffers::VOffsetT = 4;
             pub const VT_CLAIMED_EVALUATION: ::flatbuffers::VOffsetT = 6;
+            pub const VT_SKIP: ::flatbuffers::VOffsetT = 8;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -294,6 +361,9 @@ pub mod hekate {
                 args: &'args SumcheckProofArgs<'args>,
             ) -> ::flatbuffers::WIPOffset<SumcheckProof<'bldr>> {
                 let mut builder = SumcheckProofBuilder::new(_fbb);
+                if let Some(x) = args.skip {
+                    builder.add_skip(x);
+                }
                 if let Some(x) = args.claimed_evaluation {
                     builder.add_claimed_evaluation(x);
                 }
@@ -318,13 +388,26 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn claimed_evaluation(&self) -> Option<&'a Block128> {
+            pub fn claimed_evaluation(&self) -> Option<&'a Block256> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<Block128>(SumcheckProof::VT_CLAIMED_EVALUATION, None)
+                        .get::<Block256>(SumcheckProof::VT_CLAIMED_EVALUATION, None)
+                }
+            }
+            #[inline]
+            pub fn skip(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            SumcheckProof::VT_SKIP,
+                            None,
+                        )
                 }
             }
         }
@@ -336,15 +419,10 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<UnivariatePoly>>,
-                    >>("round_polys", Self::VT_ROUND_POLYS, false)?
-                    .visit_field::<Block128>(
-                        "claimed_evaluation",
-                        Self::VT_CLAIMED_EVALUATION,
-                        false,
-                    )?
-                    .finish();
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<UnivariatePoly>>>>("round_polys", Self::VT_ROUND_POLYS, false)?
+     .visit_field::<Block256>("claimed_evaluation", Self::VT_CLAIMED_EVALUATION, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("skip", Self::VT_SKIP, false)?
+     .finish();
                 Ok(())
             }
         }
@@ -354,7 +432,8 @@ pub mod hekate {
                     ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<UnivariatePoly<'a>>>,
                 >,
             >,
-            pub claimed_evaluation: Option<&'a Block128>,
+            pub claimed_evaluation: Option<&'a Block256>,
+            pub skip: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
         }
         impl<'a> Default for SumcheckProofArgs<'a> {
             #[inline]
@@ -362,6 +441,7 @@ pub mod hekate {
                 SumcheckProofArgs {
                     round_polys: None,
                     claimed_evaluation: None,
+                    skip: None,
                 }
             }
         }
@@ -384,11 +464,19 @@ pub mod hekate {
                 );
             }
             #[inline]
-            pub fn add_claimed_evaluation(&mut self, claimed_evaluation: &Block128) {
-                self.fbb_.push_slot_always::<&Block128>(
+            pub fn add_claimed_evaluation(&mut self, claimed_evaluation: &Block256) {
+                self.fbb_.push_slot_always::<&Block256>(
                     SumcheckProof::VT_CLAIMED_EVALUATION,
                     claimed_evaluation,
                 );
+            }
+            #[inline]
+            pub fn add_skip(
+                &mut self,
+                skip: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
+            ) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<_>>(SumcheckProof::VT_SKIP, skip);
             }
             #[inline]
             pub fn new(
@@ -412,6 +500,7 @@ pub mod hekate {
                 let mut ds = f.debug_struct("SumcheckProof");
                 ds.field("round_polys", &self.round_polys());
                 ds.field("claimed_evaluation", &self.claimed_evaluation());
+                ds.field("skip", &self.skip());
                 ds.finish()
             }
         }
@@ -573,15 +662,15 @@ pub mod hekate {
                 ds.finish()
             }
         }
-        pub enum BrakedownProofOffset {}
+        pub enum TreeOpeningOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
-        pub struct BrakedownProof<'a> {
+        pub struct TreeOpening<'a> {
             pub _tab: ::flatbuffers::Table<'a>,
         }
 
-        impl<'a> ::flatbuffers::Follow<'a> for BrakedownProof<'a> {
-            type Inner = BrakedownProof<'a>;
+        impl<'a> ::flatbuffers::Follow<'a> for TreeOpening<'a> {
+            type Inner = TreeOpening<'a>;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
                 Self {
@@ -590,13 +679,13 @@ pub mod hekate {
             }
         }
 
-        impl<'a> BrakedownProof<'a> {
-            pub const VT_OPENED_COLUMNS: ::flatbuffers::VOffsetT = 4;
+        impl<'a> TreeOpening<'a> {
+            pub const VT_LEAVES: ::flatbuffers::VOffsetT = 4;
             pub const VT_MULTIPROOF: ::flatbuffers::VOffsetT = 6;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                BrakedownProof { _tab: table }
+                TreeOpening { _tab: table }
             }
             #[allow(unused_mut)]
             pub fn create<
@@ -606,27 +695,27 @@ pub mod hekate {
                 A: ::flatbuffers::Allocator + 'bldr,
             >(
                 _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args BrakedownProofArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<BrakedownProof<'bldr>> {
-                let mut builder = BrakedownProofBuilder::new(_fbb);
+                args: &'args TreeOpeningArgs<'args>,
+            ) -> ::flatbuffers::WIPOffset<TreeOpening<'bldr>> {
+                let mut builder = TreeOpeningBuilder::new(_fbb);
                 if let Some(x) = args.multiproof {
                     builder.add_multiproof(x);
                 }
-                if let Some(x) = args.opened_columns {
-                    builder.add_opened_columns(x);
+                if let Some(x) = args.leaves {
+                    builder.add_leaves(x);
                 }
                 builder.finish()
             }
 
             #[inline]
-            pub fn opened_columns(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+            pub fn leaves(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
                         .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
-                            BrakedownProof::VT_OPENED_COLUMNS,
+                            TreeOpening::VT_LEAVES,
                             None,
                         )
                 }
@@ -638,14 +727,14 @@ pub mod hekate {
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab.get::<::flatbuffers::ForwardsUOffset<Multiproof>>(
-                        BrakedownProof::VT_MULTIPROOF,
+                        TreeOpening::VT_MULTIPROOF,
                         None,
                     )
                 }
             }
         }
 
-        impl ::flatbuffers::Verifiable for BrakedownProof<'_> {
+        impl ::flatbuffers::Verifiable for TreeOpening<'_> {
             #[inline]
             fn run_verifier(
                 v: &mut ::flatbuffers::Verifier,
@@ -653,8 +742,8 @@ pub mod hekate {
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
                     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
-                        "opened_columns",
-                        Self::VT_OPENED_COLUMNS,
+                        "leaves",
+                        Self::VT_LEAVES,
                         false,
                     )?
                     .visit_field::<::flatbuffers::ForwardsUOffset<Multiproof>>(
@@ -666,64 +755,64 @@ pub mod hekate {
                 Ok(())
             }
         }
-        pub struct BrakedownProofArgs<'a> {
-            pub opened_columns: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+        pub struct TreeOpeningArgs<'a> {
+            pub leaves: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
             pub multiproof: Option<::flatbuffers::WIPOffset<Multiproof<'a>>>,
         }
-        impl<'a> Default for BrakedownProofArgs<'a> {
+        impl<'a> Default for TreeOpeningArgs<'a> {
             #[inline]
             fn default() -> Self {
-                BrakedownProofArgs {
-                    opened_columns: None,
+                TreeOpeningArgs {
+                    leaves: None,
                     multiproof: None,
                 }
             }
         }
 
-        pub struct BrakedownProofBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+        pub struct TreeOpeningBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
             fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
         }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BrakedownProofBuilder<'a, 'b, A> {
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> TreeOpeningBuilder<'a, 'b, A> {
             #[inline]
-            pub fn add_opened_columns(
+            pub fn add_leaves(
                 &mut self,
-                opened_columns: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+                leaves: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    BrakedownProof::VT_OPENED_COLUMNS,
-                    opened_columns,
+                    TreeOpening::VT_LEAVES,
+                    leaves,
                 );
             }
             #[inline]
             pub fn add_multiproof(&mut self, multiproof: ::flatbuffers::WIPOffset<Multiproof<'b>>) {
                 self.fbb_
                     .push_slot_always::<::flatbuffers::WIPOffset<Multiproof>>(
-                        BrakedownProof::VT_MULTIPROOF,
+                        TreeOpening::VT_MULTIPROOF,
                         multiproof,
                     );
             }
             #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> BrakedownProofBuilder<'a, 'b, A> {
+            ) -> TreeOpeningBuilder<'a, 'b, A> {
                 let start = _fbb.start_table();
-                BrakedownProofBuilder {
+                TreeOpeningBuilder {
                     fbb_: _fbb,
                     start_: start,
                 }
             }
             #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<BrakedownProof<'a>> {
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<TreeOpening<'a>> {
                 let o = self.fbb_.end_table(self.start_);
                 ::flatbuffers::WIPOffset::new(o.value())
             }
         }
 
-        impl ::core::fmt::Debug for BrakedownProof<'_> {
+        impl ::core::fmt::Debug for TreeOpening<'_> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("BrakedownProof");
-                ds.field("opened_columns", &self.opened_columns());
+                let mut ds = f.debug_struct("TreeOpening");
+                ds.field("leaves", &self.leaves());
                 ds.field("multiproof", &self.multiproof());
                 ds.finish()
             }
@@ -774,26 +863,26 @@ pub mod hekate {
             }
 
             #[inline]
-            pub fn point(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn point(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             PointEvaluation::VT_POINT,
                             None,
                         )
                 }
             }
             #[inline]
-            pub fn column_values(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn column_values(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             PointEvaluation::VT_COLUMN_VALUES,
                             None,
                         )
@@ -808,16 +897,16 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("point", Self::VT_POINT, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("column_values", Self::VT_COLUMN_VALUES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("point", Self::VT_POINT, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("column_values", Self::VT_COLUMN_VALUES, false)?
      .finish();
                 Ok(())
             }
         }
         pub struct PointEvaluationArgs<'a> {
-            pub point: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub point: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub column_values:
-                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+                Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
         }
         impl<'a> Default for PointEvaluationArgs<'a> {
             #[inline]
@@ -837,7 +926,7 @@ pub mod hekate {
             #[inline]
             pub fn add_point(
                 &mut self,
-                point: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                point: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     PointEvaluation::VT_POINT,
@@ -847,7 +936,7 @@ pub mod hekate {
             #[inline]
             pub fn add_column_values(
                 &mut self,
-                column_values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                column_values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     PointEvaluation::VT_COLUMN_VALUES,
@@ -879,15 +968,15 @@ pub mod hekate {
                 ds.finish()
             }
         }
-        pub enum EvalBatchProofOffset {}
+        pub enum FoldEvalProofOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
-        pub struct EvalBatchProof<'a> {
+        pub struct FoldEvalProof<'a> {
             pub _tab: ::flatbuffers::Table<'a>,
         }
 
-        impl<'a> ::flatbuffers::Follow<'a> for EvalBatchProof<'a> {
-            type Inner = EvalBatchProof<'a>;
+        impl<'a> ::flatbuffers::Follow<'a> for FoldEvalProof<'a> {
+            type Inner = FoldEvalProof<'a>;
             #[inline]
             unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
                 Self {
@@ -896,16 +985,18 @@ pub mod hekate {
             }
         }
 
-        impl<'a> EvalBatchProof<'a> {
+        impl<'a> FoldEvalProof<'a> {
             pub const VT_SUMCHECK_PROOF: ::flatbuffers::VOffsetT = 4;
-            pub const VT_LDT_PROOF: ::flatbuffers::VOffsetT = 6;
-            pub const VT_TENSOR_VEC: ::flatbuffers::VOffsetT = 8;
-            pub const VT_MASTERS: ::flatbuffers::VOffsetT = 10;
-            pub const VT_H_LDT_PROOF: ::flatbuffers::VOffsetT = 12;
+            pub const VT_MASTERS: ::flatbuffers::VOffsetT = 6;
+            pub const VT_MASK_MASTERS: ::flatbuffers::VOffsetT = 8;
+            pub const VT_FOLD_ROUNDS: ::flatbuffers::VOffsetT = 10;
+            pub const VT_ROUND_ROOTS: ::flatbuffers::VOffsetT = 12;
+            pub const VT_FINAL_LAYER: ::flatbuffers::VOffsetT = 14;
+            pub const VT_OPENINGS: ::flatbuffers::VOffsetT = 16;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                EvalBatchProof { _tab: table }
+                FoldEvalProof { _tab: table }
             }
             #[allow(unused_mut)]
             pub fn create<
@@ -915,20 +1006,26 @@ pub mod hekate {
                 A: ::flatbuffers::Allocator + 'bldr,
             >(
                 _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args EvalBatchProofArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<EvalBatchProof<'bldr>> {
-                let mut builder = EvalBatchProofBuilder::new(_fbb);
-                if let Some(x) = args.h_ldt_proof {
-                    builder.add_h_ldt_proof(x);
+                args: &'args FoldEvalProofArgs<'args>,
+            ) -> ::flatbuffers::WIPOffset<FoldEvalProof<'bldr>> {
+                let mut builder = FoldEvalProofBuilder::new(_fbb);
+                if let Some(x) = args.openings {
+                    builder.add_openings(x);
+                }
+                if let Some(x) = args.final_layer {
+                    builder.add_final_layer(x);
+                }
+                if let Some(x) = args.round_roots {
+                    builder.add_round_roots(x);
+                }
+                if let Some(x) = args.fold_rounds {
+                    builder.add_fold_rounds(x);
+                }
+                if let Some(x) = args.mask_masters {
+                    builder.add_mask_masters(x);
                 }
                 if let Some(x) = args.masters {
                     builder.add_masters(x);
-                }
-                if let Some(x) = args.tensor_vec {
-                    builder.add_tensor_vec(x);
-                }
-                if let Some(x) = args.ldt_proof {
-                    builder.add_ldt_proof(x);
                 }
                 if let Some(x) = args.sumcheck_proof {
                     builder.add_sumcheck_proof(x);
@@ -944,66 +1041,93 @@ pub mod hekate {
                 unsafe {
                     self._tab
                         .get::<::flatbuffers::ForwardsUOffset<SumcheckProof>>(
-                            EvalBatchProof::VT_SUMCHECK_PROOF,
+                            FoldEvalProof::VT_SUMCHECK_PROOF,
                             None,
                         )
                 }
             }
             #[inline]
-            pub fn ldt_proof(&self) -> Option<BrakedownProof<'a>> {
+            pub fn masters(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<BrakedownProof>>(
-                            EvalBatchProof::VT_LDT_PROOF,
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            FoldEvalProof::VT_MASTERS,
                             None,
                         )
                 }
             }
             #[inline]
-            pub fn tensor_vec(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn mask_masters(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
-                            EvalBatchProof::VT_TENSOR_VEC,
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            FoldEvalProof::VT_MASK_MASTERS,
                             None,
                         )
                 }
             }
             #[inline]
-            pub fn masters(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn fold_rounds(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
-                            EvalBatchProof::VT_MASTERS,
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            FoldEvalProof::VT_FOLD_ROUNDS,
                             None,
                         )
                 }
             }
             #[inline]
-            pub fn h_ldt_proof(&self) -> Option<BrakedownProof<'a>> {
+            pub fn round_roots(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<BrakedownProof>>(
-                            EvalBatchProof::VT_H_LDT_PROOF,
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                            FoldEvalProof::VT_ROUND_ROOTS,
                             None,
                         )
+                }
+            }
+            #[inline]
+            pub fn final_layer(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            FoldEvalProof::VT_FINAL_LAYER,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn openings(
+                &self,
+            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<TreeOpening<'a>>>>
+            {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab.get::<::flatbuffers::ForwardsUOffset<
+                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<TreeOpening>>,
+                    >>(FoldEvalProof::VT_OPENINGS, None)
                 }
             }
         }
 
-        impl ::flatbuffers::Verifiable for EvalBatchProof<'_> {
+        impl ::flatbuffers::Verifiable for FoldEvalProof<'_> {
             #[inline]
             fn run_verifier(
                 v: &mut ::flatbuffers::Verifier,
@@ -1011,39 +1135,49 @@ pub mod hekate {
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<SumcheckProof>>("sumcheck_proof", Self::VT_SUMCHECK_PROOF, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownProof>>("ldt_proof", Self::VT_LDT_PROOF, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("tensor_vec", Self::VT_TENSOR_VEC, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("masters", Self::VT_MASTERS, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<BrakedownProof>>("h_ldt_proof", Self::VT_H_LDT_PROOF, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("masters", Self::VT_MASTERS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("mask_masters", Self::VT_MASK_MASTERS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("fold_rounds", Self::VT_FOLD_ROUNDS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("round_roots", Self::VT_ROUND_ROOTS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("final_layer", Self::VT_FINAL_LAYER, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<TreeOpening>>>>("openings", Self::VT_OPENINGS, false)?
      .finish();
                 Ok(())
             }
         }
-        pub struct EvalBatchProofArgs<'a> {
+        pub struct FoldEvalProofArgs<'a> {
             pub sumcheck_proof: Option<::flatbuffers::WIPOffset<SumcheckProof<'a>>>,
-            pub ldt_proof: Option<::flatbuffers::WIPOffset<BrakedownProof<'a>>>,
-            pub tensor_vec: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
-            pub masters: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
-            pub h_ldt_proof: Option<::flatbuffers::WIPOffset<BrakedownProof<'a>>>,
+            pub masters: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub mask_masters: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub fold_rounds: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub round_roots: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub final_layer: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub openings: Option<
+                ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<TreeOpening<'a>>>,
+                >,
+            >,
         }
-        impl<'a> Default for EvalBatchProofArgs<'a> {
+        impl<'a> Default for FoldEvalProofArgs<'a> {
             #[inline]
             fn default() -> Self {
-                EvalBatchProofArgs {
+                FoldEvalProofArgs {
                     sumcheck_proof: None,
-                    ldt_proof: None,
-                    tensor_vec: None,
                     masters: None,
-                    h_ldt_proof: None,
+                    mask_masters: None,
+                    fold_rounds: None,
+                    round_roots: None,
+                    final_layer: None,
+                    openings: None,
                 }
             }
         }
 
-        pub struct EvalBatchProofBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+        pub struct FoldEvalProofBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
             fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
             start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
         }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EvalBatchProofBuilder<'a, 'b, A> {
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FoldEvalProofBuilder<'a, 'b, A> {
             #[inline]
             pub fn add_sumcheck_proof(
                 &mut self,
@@ -1051,212 +1185,99 @@ pub mod hekate {
             ) {
                 self.fbb_
                     .push_slot_always::<::flatbuffers::WIPOffset<SumcheckProof>>(
-                        EvalBatchProof::VT_SUMCHECK_PROOF,
+                        FoldEvalProof::VT_SUMCHECK_PROOF,
                         sumcheck_proof,
                     );
             }
             #[inline]
-            pub fn add_ldt_proof(
-                &mut self,
-                ldt_proof: ::flatbuffers::WIPOffset<BrakedownProof<'b>>,
-            ) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<BrakedownProof>>(
-                        EvalBatchProof::VT_LDT_PROOF,
-                        ldt_proof,
-                    );
-            }
-            #[inline]
-            pub fn add_tensor_vec(
-                &mut self,
-                tensor_vec: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
-            ) {
-                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    EvalBatchProof::VT_TENSOR_VEC,
-                    tensor_vec,
-                );
-            }
-            #[inline]
             pub fn add_masters(
                 &mut self,
-                masters: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                masters: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
-                    EvalBatchProof::VT_MASTERS,
+                    FoldEvalProof::VT_MASTERS,
                     masters,
                 );
             }
             #[inline]
-            pub fn add_h_ldt_proof(
+            pub fn add_mask_masters(
                 &mut self,
-                h_ldt_proof: ::flatbuffers::WIPOffset<BrakedownProof<'b>>,
+                mask_masters: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<BrakedownProof>>(
-                        EvalBatchProof::VT_H_LDT_PROOF,
-                        h_ldt_proof,
-                    );
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FoldEvalProof::VT_MASK_MASTERS,
+                    mask_masters,
+                );
+            }
+            #[inline]
+            pub fn add_fold_rounds(
+                &mut self,
+                fold_rounds: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FoldEvalProof::VT_FOLD_ROUNDS,
+                    fold_rounds,
+                );
+            }
+            #[inline]
+            pub fn add_round_roots(
+                &mut self,
+                round_roots: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FoldEvalProof::VT_ROUND_ROOTS,
+                    round_roots,
+                );
+            }
+            #[inline]
+            pub fn add_final_layer(
+                &mut self,
+                final_layer: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FoldEvalProof::VT_FINAL_LAYER,
+                    final_layer,
+                );
+            }
+            #[inline]
+            pub fn add_openings(
+                &mut self,
+                openings: ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<TreeOpening<'b>>>,
+                >,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    FoldEvalProof::VT_OPENINGS,
+                    openings,
+                );
             }
             #[inline]
             pub fn new(
                 _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> EvalBatchProofBuilder<'a, 'b, A> {
+            ) -> FoldEvalProofBuilder<'a, 'b, A> {
                 let start = _fbb.start_table();
-                EvalBatchProofBuilder {
+                FoldEvalProofBuilder {
                     fbb_: _fbb,
                     start_: start,
                 }
             }
             #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<EvalBatchProof<'a>> {
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<FoldEvalProof<'a>> {
                 let o = self.fbb_.end_table(self.start_);
                 ::flatbuffers::WIPOffset::new(o.value())
             }
         }
 
-        impl ::core::fmt::Debug for EvalBatchProof<'_> {
+        impl ::core::fmt::Debug for FoldEvalProof<'_> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("EvalBatchProof");
+                let mut ds = f.debug_struct("FoldEvalProof");
                 ds.field("sumcheck_proof", &self.sumcheck_proof());
-                ds.field("ldt_proof", &self.ldt_proof());
-                ds.field("tensor_vec", &self.tensor_vec());
                 ds.field("masters", &self.masters());
-                ds.field("h_ldt_proof", &self.h_ldt_proof());
-                ds.finish()
-            }
-        }
-        pub enum LogUpEntryOffset {}
-        #[derive(Copy, Clone, PartialEq)]
-
-        pub struct LogUpEntry<'a> {
-            pub _tab: ::flatbuffers::Table<'a>,
-        }
-
-        impl<'a> ::flatbuffers::Follow<'a> for LogUpEntry<'a> {
-            type Inner = LogUpEntry<'a>;
-            #[inline]
-            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-                Self {
-                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
-                }
-            }
-        }
-
-        impl<'a> LogUpEntry<'a> {
-            pub const VT_BUS_ID: ::flatbuffers::VOffsetT = 4;
-            pub const VT_VALUE: ::flatbuffers::VOffsetT = 6;
-
-            #[inline]
-            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-                LogUpEntry { _tab: table }
-            }
-            #[allow(unused_mut)]
-            pub fn create<
-                'bldr: 'args,
-                'args: 'mut_bldr,
-                'mut_bldr,
-                A: ::flatbuffers::Allocator + 'bldr,
-            >(
-                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-                args: &'args LogUpEntryArgs<'args>,
-            ) -> ::flatbuffers::WIPOffset<LogUpEntry<'bldr>> {
-                let mut builder = LogUpEntryBuilder::new(_fbb);
-                if let Some(x) = args.value {
-                    builder.add_value(x);
-                }
-                if let Some(x) = args.bus_id {
-                    builder.add_bus_id(x);
-                }
-                builder.finish()
-            }
-
-            #[inline]
-            pub fn bus_id(&self) -> Option<&'a str> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe {
-                    self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<&str>>(LogUpEntry::VT_BUS_ID, None)
-                }
-            }
-            #[inline]
-            pub fn value(&self) -> Option<&'a Block128> {
-                // Safety:
-                // Created from valid Table for this object
-                // which contains a valid value in this slot
-                unsafe { self._tab.get::<Block128>(LogUpEntry::VT_VALUE, None) }
-            }
-        }
-
-        impl ::flatbuffers::Verifiable for LogUpEntry<'_> {
-            #[inline]
-            fn run_verifier(
-                v: &mut ::flatbuffers::Verifier,
-                pos: usize,
-            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
-                v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<&str>>(
-                        "bus_id",
-                        Self::VT_BUS_ID,
-                        false,
-                    )?
-                    .visit_field::<Block128>("value", Self::VT_VALUE, false)?
-                    .finish();
-                Ok(())
-            }
-        }
-        pub struct LogUpEntryArgs<'a> {
-            pub bus_id: Option<::flatbuffers::WIPOffset<&'a str>>,
-            pub value: Option<&'a Block128>,
-        }
-        impl<'a> Default for LogUpEntryArgs<'a> {
-            #[inline]
-            fn default() -> Self {
-                LogUpEntryArgs {
-                    bus_id: None,
-                    value: None,
-                }
-            }
-        }
-
-        pub struct LogUpEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
-            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
-        }
-        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LogUpEntryBuilder<'a, 'b, A> {
-            #[inline]
-            pub fn add_bus_id(&mut self, bus_id: ::flatbuffers::WIPOffset<&'b str>) {
-                self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<_>>(LogUpEntry::VT_BUS_ID, bus_id);
-            }
-            #[inline]
-            pub fn add_value(&mut self, value: &Block128) {
-                self.fbb_
-                    .push_slot_always::<&Block128>(LogUpEntry::VT_VALUE, value);
-            }
-            #[inline]
-            pub fn new(
-                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-            ) -> LogUpEntryBuilder<'a, 'b, A> {
-                let start = _fbb.start_table();
-                LogUpEntryBuilder {
-                    fbb_: _fbb,
-                    start_: start,
-                }
-            }
-            #[inline]
-            pub fn finish(self) -> ::flatbuffers::WIPOffset<LogUpEntry<'a>> {
-                let o = self.fbb_.end_table(self.start_);
-                ::flatbuffers::WIPOffset::new(o.value())
-            }
-        }
-
-        impl ::core::fmt::Debug for LogUpEntry<'_> {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                let mut ds = f.debug_struct("LogUpEntry");
-                ds.field("bus_id", &self.bus_id());
-                ds.field("value", &self.value());
+                ds.field("mask_masters", &self.mask_masters());
+                ds.field("fold_rounds", &self.fold_rounds());
+                ds.field("round_roots", &self.round_roots());
+                ds.field("final_layer", &self.final_layer());
+                ds.field("openings", &self.openings());
                 ds.finish()
             }
         }
@@ -1306,31 +1327,29 @@ pub mod hekate {
             }
 
             #[inline]
-            pub fn h_evals(
-                &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>>
-            {
+            pub fn h_evals(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
-                    self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>(LogUpAux::VT_H_EVALS, None)
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            LogUpAux::VT_H_EVALS,
+                            None,
+                        )
                 }
             }
             #[inline]
-            pub fn claimed_sums(
-                &self,
-            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>>
-            {
+            pub fn claimed_sums(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
-                    self._tab.get::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>(LogUpAux::VT_CLAIMED_SUMS, None)
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            LogUpAux::VT_CLAIMED_SUMS,
+                            None,
+                        )
                 }
             }
         }
@@ -1342,27 +1361,15 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>("h_evals", Self::VT_H_EVALS, false)?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<
-                        ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<LogUpEntry>>,
-                    >>("claimed_sums", Self::VT_CLAIMED_SUMS, false)?
-                    .finish();
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("h_evals", Self::VT_H_EVALS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("claimed_sums", Self::VT_CLAIMED_SUMS, false)?
+     .finish();
                 Ok(())
             }
         }
         pub struct LogUpAuxArgs<'a> {
-            pub h_evals: Option<
-                ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>,
-                >,
-            >,
-            pub claimed_sums: Option<
-                ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<LogUpEntry<'a>>>,
-                >,
-            >,
+            pub h_evals: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub claimed_sums: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
         }
         impl<'a> Default for LogUpAuxArgs<'a> {
             #[inline]
@@ -1382,9 +1389,7 @@ pub mod hekate {
             #[inline]
             pub fn add_h_evals(
                 &mut self,
-                h_evals: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<LogUpEntry<'b>>>,
-                >,
+                h_evals: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_
                     .push_slot_always::<::flatbuffers::WIPOffset<_>>(LogUpAux::VT_H_EVALS, h_evals);
@@ -1392,9 +1397,7 @@ pub mod hekate {
             #[inline]
             pub fn add_claimed_sums(
                 &mut self,
-                claimed_sums: ::flatbuffers::WIPOffset<
-                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<LogUpEntry<'b>>>,
-                >,
+                claimed_sums: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     LogUpAux::VT_CLAIMED_SUMS,
@@ -1489,13 +1492,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn values(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn values(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             OuterOpening::VT_VALUES,
                             None,
                         )
@@ -1523,7 +1526,7 @@ pub mod hekate {
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u32>>>("columns", Self::VT_COLUMNS, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("values", Self::VT_VALUES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("values", Self::VT_VALUES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<Multiproof>>("multiproof", Self::VT_MULTIPROOF, false)?
      .finish();
                 Ok(())
@@ -1531,7 +1534,7 @@ pub mod hekate {
         }
         pub struct OuterOpeningArgs<'a> {
             pub columns: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
-            pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub values: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub multiproof: Option<::flatbuffers::WIPOffset<Multiproof<'a>>>,
         }
         impl<'a> Default for OuterOpeningArgs<'a> {
@@ -1563,7 +1566,7 @@ pub mod hekate {
             #[inline]
             pub fn add_values(
                 &mut self,
-                values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                values: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     OuterOpening::VT_VALUES,
@@ -1679,39 +1682,39 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn interleaved(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn interleaved(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             OuterProof::VT_INTERLEAVED,
                             None,
                         )
                 }
             }
             #[inline]
-            pub fn linear(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn linear(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             OuterProof::VT_LINEAR,
                             None,
                         )
                 }
             }
             #[inline]
-            pub fn quadratic(&self) -> Option<::flatbuffers::Vector<'a, Block128>> {
+            pub fn quadratic(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block128>>>(
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
                             OuterProof::VT_QUADRATIC,
                             None,
                         )
@@ -1753,9 +1756,9 @@ pub mod hekate {
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("aux_root", Self::VT_AUX_ROOT, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("interleaved", Self::VT_INTERLEAVED, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("linear", Self::VT_LINEAR, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block128>>>("quadratic", Self::VT_QUADRATIC, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("interleaved", Self::VT_INTERLEAVED, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("linear", Self::VT_LINEAR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("quadratic", Self::VT_QUADRATIC, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<OuterOpening>>("pad_opening", Self::VT_PAD_OPENING, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<OuterOpening>>("aux_opening", Self::VT_AUX_OPENING, false)?
      .finish();
@@ -1764,9 +1767,9 @@ pub mod hekate {
         }
         pub struct OuterProofArgs<'a> {
             pub aux_root: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
-            pub interleaved: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
-            pub linear: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
-            pub quadratic: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block128>>>,
+            pub interleaved: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub linear: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub quadratic: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub pad_opening: Option<::flatbuffers::WIPOffset<OuterOpening<'a>>>,
             pub aux_opening: Option<::flatbuffers::WIPOffset<OuterOpening<'a>>>,
         }
@@ -1802,7 +1805,7 @@ pub mod hekate {
             #[inline]
             pub fn add_interleaved(
                 &mut self,
-                interleaved: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                interleaved: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     OuterProof::VT_INTERLEAVED,
@@ -1812,7 +1815,7 @@ pub mod hekate {
             #[inline]
             pub fn add_linear(
                 &mut self,
-                linear: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                linear: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_
                     .push_slot_always::<::flatbuffers::WIPOffset<_>>(OuterProof::VT_LINEAR, linear);
@@ -1820,7 +1823,7 @@ pub mod hekate {
             #[inline]
             pub fn add_quadratic(
                 &mut self,
-                quadratic: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block128>>,
+                quadratic: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
             ) {
                 self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
                     OuterProof::VT_QUADRATIC,
@@ -2037,13 +2040,13 @@ pub mod hekate {
                 }
             }
             #[inline]
-            pub fn eval_proof(&self) -> Option<EvalBatchProof<'a>> {
+            pub fn eval_proof(&self) -> Option<FoldEvalProof<'a>> {
                 // Safety:
                 // Created from valid Table for this object
                 // which contains a valid value in this slot
                 unsafe {
                     self._tab
-                        .get::<::flatbuffers::ForwardsUOffset<EvalBatchProof>>(
+                        .get::<::flatbuffers::ForwardsUOffset<FoldEvalProof>>(
                             Proof::VT_EVAL_PROOF,
                             None,
                         )
@@ -2163,7 +2166,7 @@ pub mod hekate {
                         Self::VT_MAIN_POINT_EVALUATION,
                         false,
                     )?
-                    .visit_field::<::flatbuffers::ForwardsUOffset<EvalBatchProof>>(
+                    .visit_field::<::flatbuffers::ForwardsUOffset<FoldEvalProof>>(
                         "eval_proof",
                         Self::VT_EVAL_PROOF,
                         false,
@@ -2211,7 +2214,7 @@ pub mod hekate {
             pub zerocheck_proof: Option<::flatbuffers::WIPOffset<SumcheckProof<'a>>>,
             pub main_logup_aux: Option<::flatbuffers::WIPOffset<LogUpAux<'a>>>,
             pub main_point_evaluation: Option<::flatbuffers::WIPOffset<PointEvaluation<'a>>>,
-            pub eval_proof: Option<::flatbuffers::WIPOffset<EvalBatchProof<'a>>>,
+            pub eval_proof: Option<::flatbuffers::WIPOffset<FoldEvalProof<'a>>>,
             pub chiplet_rows: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
             pub chiplet_zerocheck_proofs: Option<
                 ::flatbuffers::WIPOffset<
@@ -2315,10 +2318,10 @@ pub mod hekate {
             #[inline]
             pub fn add_eval_proof(
                 &mut self,
-                eval_proof: ::flatbuffers::WIPOffset<EvalBatchProof<'b>>,
+                eval_proof: ::flatbuffers::WIPOffset<FoldEvalProof<'b>>,
             ) {
                 self.fbb_
-                    .push_slot_always::<::flatbuffers::WIPOffset<EvalBatchProof>>(
+                    .push_slot_always::<::flatbuffers::WIPOffset<FoldEvalProof>>(
                         Proof::VT_EVAL_PROOF,
                         eval_proof,
                     );

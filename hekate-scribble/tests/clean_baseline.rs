@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceColumn};
-use hekate_math::{Block32, Block128, Flat};
+use hekate_math::{Block32, Block256, Flat};
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::{ProgramInstance, ProgramWitness};
 use hekate_scribble::{ScribbleConfig, assert_all_caught, assert_all_caught_all_targets};
@@ -11,7 +11,7 @@ use hekate_scribble::{ScribbleConfig, assert_all_caught, assert_all_caught_all_t
 const NUM_VARS: usize = 2;
 const N: usize = 1 << NUM_VARS;
 
-type F = Block128;
+type F = Block256;
 
 fn fixture(
     row0: u32,

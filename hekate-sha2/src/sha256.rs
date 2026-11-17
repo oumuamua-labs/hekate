@@ -736,13 +736,17 @@ mod tests {
             let chiplet = Sha256Chiplet::<F>::new(64, 1, r).unwrap();
             let program = chiplet.program();
             let half = program.num_columns() as u32;
+            let next: Vec<Option<usize>> = (0..half as usize).map(Some).collect();
+
             let rows = compile(
                 &program.constraint_ast(),
                 ClaimLayout {
                     pad_first: 2 * half,
                     half,
+                    next: &next,
                 },
-            );
+            )
+            .unwrap();
 
             let widest = rows
                 .affine

@@ -7,7 +7,7 @@ use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::{BoundaryConstraint, ConstraintAst};
@@ -21,14 +21,20 @@ use hekate_program::{
 };
 use hekate_prover_sys::prove;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{OuterStage, Rejection};
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const BUS: &str = "square_link";
 const LABEL: &[u8] = b"ordered_bus";
 const ROWS: usize = 32;
 const STEPS: usize = 4;
+
+const UNBALANCED: [Result<(), Rejection>; 2] = [
+    Err(Rejection::BusSum),
+    Err(Rejection::Outer(OuterStage::Linear)),
+];
 
 define_columns! {
     SquarerColumns {
@@ -422,9 +428,12 @@ fn verdicts<P: Program<F> + Sync>(
     public: &[F],
     main: &ColumnTrace,
     chiplets: &[ColumnTrace],
-) -> [bool; 2] {
+) -> [Result<(), Rejection>; 2] {
     [false, true].map(|zero_knowledge| {
         let config = Config {
+            num_queries: 2,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge,
             ..Config::dev()
         };
@@ -447,11 +456,10 @@ fn verdicts<P: Program<F> + Sync>(
             &mut transcript,
             &config,
         )
-        .unwrap_or(false)
     })
 }
 
-fn dense_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [bool; 2] {
+fn dense_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [Result<(), Rejection>; 2] {
     let emits = dense_emits(claims);
 
     verdicts(
@@ -462,7 +470,7 @@ fn dense_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [bool; 2
     )
 }
 
-fn tiled_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [bool; 2] {
+fn tiled_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [Result<(), Rejection>; 2] {
     let emits = dense_emits(claims);
 
     verdicts(
@@ -473,7 +481,10 @@ fn tiled_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [bool; 2
     )
 }
 
-fn sparse_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [bool; 2] {
+fn sparse_verdicts(
+    claims: &[(Block32, Block32)],
+    served: &[Block32],
+) -> [Result<(), Rejection>; 2] {
     let emits: Vec<(usize, Block32)> = sparse_layout()
         .iter()
         .zip(claims)
@@ -488,7 +499,7 @@ fn sparse_verdicts(claims: &[(Block32, Block32)], served: &[Block32]) -> [bool; 
     )
 }
 
-fn chain_verdicts(outputs: [Block32; 3], served: &[Block32]) -> [bool; 2] {
+fn chain_verdicts(outputs: [Block32; 3], served: &[Block32]) -> [Result<(), Rejection>; 2] {
     let seed = inputs()[0];
     let claims = [
         (seed, outputs[0]),
@@ -517,7 +528,7 @@ fn collision_verdicts(
     host: (Block32, Block32),
     asked: (Block32, Block32),
     served: &[Block32],
-) -> [bool; 2] {
+) -> [Result<(), Rejection>; 2] {
     let host_emits = dense_emits(&[host]);
     let asked_emits = dense_emits(&[asked]);
 
@@ -532,7 +543,7 @@ fn collision_verdicts(
     )
 }
 
-fn verify_twin(defect: Defect) -> [errors::Result<bool>; 2] {
+fn verify_twin(defect: Defect) -> [Result<(), Rejection>; 2] {
     let [x0, x1, _] = inputs();
     let emits = dense_emits(&[(x0, f(x0)), (x1, f(x1))]);
 
@@ -547,6 +558,9 @@ fn verify_twin(defect: Defect) -> [errors::Result<bool>; 2] {
 
     [false, true].map(|zero_knowledge| {
         let config = Config {
+            num_queries: 2,
+            fold_arity_log: 1,
+            early_stop_vars: 1,
             zero_knowledge,
             ..Config::dev()
         };
@@ -565,7 +579,7 @@ fn verify_twin(defect: Defect) -> [errors::Result<bool>; 2] {
         let mut transcript = Transcript::<H>::new(LABEL);
 
         HekateVerifier::<F, H>::verify(
-            &program_id::<F, _>(&twin)?,
+            &program_id::<F, _>(&twin).unwrap(),
             &twin,
             &instance,
             &proof,
@@ -575,12 +589,12 @@ fn verify_twin(defect: Defect) -> [errors::Result<bool>; 2] {
     })
 }
 
-fn rejected(message: &'static str) -> [errors::Result<bool>; 2] {
+fn rejected(message: &'static str) -> [Result<(), Rejection>; 2] {
     let err = || {
-        Err(errors::Error::Protocol {
+        Err(Rejection::Malformed(errors::Error::Protocol {
             protocol: "logup_bus",
             message,
-        })
+        }))
     };
 
     [err(), err()]
@@ -592,7 +606,7 @@ fn dense_host_honest_calls_verify() {
 
     assert_eq!(
         dense_verdicts(&[(x0, f(x0)), (x1, f(x1))], &[x0, x1]),
-        [true, true]
+        [Ok(()), Ok(())]
     );
 }
 
@@ -603,7 +617,7 @@ fn dense_host_traded_responses_rejected() {
     assert_ne!(f(x0), f(x1));
     assert_eq!(
         dense_verdicts(&[(x0, f(x1)), (x1, f(x0))], &[x0, x1]),
-        [false, false]
+        UNBALANCED
     );
 }
 
@@ -613,7 +627,7 @@ fn sparse_host_honest_calls_verify() {
 
     assert_eq!(
         sparse_verdicts(&[(x0, f(x0)), (x1, f(x1))], &[x0, x1]),
-        [true, true]
+        [Ok(()), Ok(())]
     );
 }
 
@@ -623,7 +637,7 @@ fn sparse_host_traded_responses_rejected() {
 
     assert_eq!(
         sparse_verdicts(&[(x0, f(x1)), (x1, f(x0))], &[x0, x1]),
-        [false, false]
+        UNBALANCED
     );
 }
 
@@ -633,7 +647,7 @@ fn honest_chain_verifies() {
 
     assert_eq!(
         chain_verdicts([f(s), f(f(s)), f(f(f(s)))], &[s, f(s), f(f(s))]),
-        [true, true]
+        [Ok(()), Ok(())]
     );
 }
 
@@ -644,7 +658,7 @@ fn rotated_chain_rejected() {
     assert_ne!(f(s), f(f(s)));
     assert_eq!(
         chain_verdicts([f(f(s)), f(s), f(f(f(s)))], &[s, f(s), f(f(s))]),
-        [false, false]
+        UNBALANCED
     );
 }
 
@@ -654,7 +668,7 @@ fn two_requester_tables_verify() {
 
     assert_eq!(
         collision_verdicts((x0, f(x0)), (x1, f(x1)), &[x0, x1]),
-        [true, true]
+        [Ok(()), Ok(())]
     );
 }
 
@@ -665,7 +679,7 @@ fn two_table_request_collision_rejected() {
 
     assert_eq!(
         collision_verdicts((x, forged), (x, forged), &[u, u]),
-        [false, false]
+        UNBALANCED
     );
 }
 
@@ -674,8 +688,11 @@ fn tiled_responder_honest_calls_verify() {
     let [x0, x1, _] = inputs();
 
     assert_eq!(
-        tiled_verdicts(&[(x0, f(x0)), (x1, f(x1))], &[x0, x1]),
-        [true, true]
+        tiled_verdicts(
+            &[(x0, f(x0)), (x1, f(x1)), (x0, f(x0)), (x1, f(x1))],
+            &[x0, x1, x0, x1]
+        ),
+        [Ok(()), Ok(())]
     );
 }
 
@@ -684,8 +701,11 @@ fn tiled_responder_traded_responses_rejected() {
     let [x0, x1, _] = inputs();
 
     assert_eq!(
-        tiled_verdicts(&[(x0, f(x1)), (x1, f(x0))], &[x0, x1]),
-        [false, false]
+        tiled_verdicts(
+            &[(x0, f(x1)), (x1, f(x0)), (x0, f(x1)), (x1, f(x0))],
+            &[x0, x1, x0, x1]
+        ),
+        UNBALANCED
     );
 }
 
@@ -695,13 +715,13 @@ fn tiled_responder_taller_than_its_calls_rejected() {
 
     assert_eq!(
         tiled_verdicts(&[(x0, f(x0)), (x1, f(x1))], &[x0, x1, u, u]),
-        [false, false]
+        UNBALANCED
     );
 }
 
 #[test]
 fn faithful_twin_verifies() {
-    assert_eq!(verify_twin(Defect::None), [Ok(true), Ok(true)]);
+    assert_eq!(verify_twin(Defect::None), [Ok(()), Ok(())]);
 }
 
 #[test]

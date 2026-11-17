@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceColumn};
-use hekate_math::{Bit, Block32, Block128, Flat, TowerField};
+use hekate_math::{Bit, Block32, Block256, Flat, TowerField};
 use hekate_program::FixedShape;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::{ProgramInstance, ProgramWitness};
@@ -13,7 +13,7 @@ const NUM_VARS: usize = 3;
 const N: usize = 1 << NUM_VARS;
 const X: usize = 0;
 
-type F = Block128;
+type F = Block256;
 
 fn odd_gated_fixture() -> (
     CircuitProgram<F>,

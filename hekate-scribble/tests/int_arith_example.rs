@@ -15,15 +15,16 @@ use hekate_gadgets::{
     ArithmeticOpcode, CpuArithColumns, IntArithmeticChiplet, IntArithmeticLayout, IntArithmeticOp,
     generate_arithmetic_trace,
 };
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_scribble::{
-    Mutation, MutationKind, ScribbleConfig, Target, assert_all_caught, check_single_mutation,
+    Mutation, MutationKind, ScribbleConfig, Target, Verdict, assert_all_caught,
+    check_single_mutation,
 };
 
-type F = Block128;
+type F = Block256;
 
 const BIT_WIDTH: usize = 32;
 
@@ -249,7 +250,10 @@ fn arith_result_tamper_on_chiplet_caught() {
     };
 
     let result = check_single_mutation(&air, &instance, &witness, &mutation);
-    assert!(result.is_ok(), "result-bit tamper escaped preflight");
+    assert!(
+        matches!(result, Verdict::Caught(_)),
+        "result-bit tamper escaped preflight"
+    );
 }
 
 #[test]
@@ -268,5 +272,8 @@ fn arith_opcode_tamper_on_chiplet_caught() {
     };
 
     let result = check_single_mutation(&air, &instance, &witness, &mutation);
-    assert!(result.is_ok(), "opcode tamper escaped preflight");
+    assert!(
+        matches!(result, Verdict::Caught(_)),
+        "opcode tamper escaped preflight"
+    );
 }

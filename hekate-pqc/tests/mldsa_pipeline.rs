@@ -5,10 +5,8 @@
 use hekate_core::config::Config;
 use hekate_core::errors::{self, Error};
 use hekate_core::trace::{ColumnType, TraceBuilder};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
 use hekate_keccak::shake256;
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_pqc::mldsa::{
     self, Forgery, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaOutput, MlDsaParams,
     MlDsaWitness,
@@ -16,15 +14,15 @@ use hekate_pqc::mldsa::{
 use hekate_pqc::ntt::NttParams;
 use hekate_pqc::wiring::N;
 use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
-use hekate_sdk::preflight::{PreflightReport, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 use ml_dsa::{B32, MlDsa44, MlDsa65, MlDsa87, SigningKey};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
+
+const CTRL: TableId = TableId::Chiplet(0);
 
 struct Signed {
     pk: Vec<u8>,
@@ -48,42 +46,6 @@ struct Proof {
     witness: ProgramWitness<F>,
 }
 
-impl Proof {
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"MlDsaPipeline",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"MlDsaPipeline");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
-}
-
 fn honest<P: ml_dsa::MlDsaParams>(params: MlDsaParams, messages: &[&[u8]]) {
     let calls: Vec<Signed> = messages
         .iter()
@@ -97,9 +59,11 @@ fn honest<P: ml_dsa::MlDsaParams>(params: MlDsaParams, messages: &[&[u8]]) {
         assert!(*output == reference(signed));
     }
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 fn run(params: MlDsaParams, calls: &[Signed]) -> (Proof, Vec<MlDsaOutput>) {
@@ -125,56 +89,36 @@ fn forged(
     host(&pipeline, traced)
 }
 
-fn assert_rejected_at(proof: &Proof, bus: &str) {
-    let report = proof.report();
-
-    assert!(
-        report
-            .bus_diagnostics
-            .iter()
-            .any(|d| d.bus_id == bus && d.has_failures())
+fn assert_rejected_only_at(honest: &Proof, forged: &Proof, bus: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            buses: &[bus],
+            ..Fault::NONE
+        },
     );
-    assert!(!proof.accepted(false));
-    assert!(!proof.accepted(true));
 }
 
-fn assert_rejected_only_at(proof: &Proof, bus: &str) {
-    let report = proof.report();
-
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.boundary_violations.is_empty());
-
-    let failing: Vec<&str> = report
-        .bus_diagnostics
-        .iter()
-        .filter(|d| d.has_failures())
-        .map(|d| d.bus_id.as_str())
-        .collect();
-
-    assert!(
-        !failing.is_empty() && failing.iter().all(|&b| b == bus),
-        "{failing:?}"
+fn assert_breaks_only(honest: &Proof, forged: &Proof, label: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            constraint_labels: &[(CTRL, label)],
+            ..Fault::NONE
+        },
     );
-    assert!(!proof.accepted(false));
-    assert!(!proof.accepted(true));
 }
 
-fn assert_breaks_only(proof: &Proof, label: &str) {
-    let report = proof.report();
-
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.bus_diagnostics.iter().all(|d| !d.has_failures()));
-    assert!(!report.constraint_violations.is_empty());
-    assert!(
-        report
-            .constraint_violations
-            .iter()
-            .all(|v| v.label == Some(label))
+fn assert_fault(honest: &Proof, forged: &Proof, fault: Fault<'_>) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        fault,
+        &Config::prod(),
     );
-    assert!(!proof.accepted(false));
-    assert!(!proof.accepted(true));
 }
 
 fn z_hat(params: MlDsaParams, signature: &[u8], j: usize) -> [u32; N] {
@@ -367,7 +311,7 @@ fn matrix_entries_forged_with_w_hat_kept_break_only_coef_bus() {
         Ok(())
     });
 
-    assert_rejected_only_at(&proof, "mldsa::coef");
+    assert_rejected_only_at(&run(params, &calls).0, &proof, "mldsa::coef");
 }
 
 #[test]
@@ -381,17 +325,30 @@ fn forged_hint_bit_breaks_hint_bus() {
         Ok(())
     });
 
-    assert_rejected_at(&proof, "mldsa::hint");
+    let fault = Fault {
+        buses: &["mldsa::hint", "mldsa::lane", "mldsa::word"],
+        ..Fault::NONE
+    };
+
+    assert_fault(&run(MlDsaParams::ML_DSA_44, &calls).0, &proof, fault);
 }
 
 #[test]
 fn unsigned_message_breaks_ctilde_comparison() {
-    let mut signed = sign::<MlDsa44>(5, b"a message the signer never signed");
+    let message = b"a message the signer never signed";
+
+    let mut signed = sign::<MlDsa44>(5, message);
     signed.message[3] ^= 0x20;
 
     let proof = forged(MlDsaParams::ML_DSA_44, &[signed], |_| Ok(()));
+    let honest = run(MlDsaParams::ML_DSA_44, &[sign::<MlDsa44>(5, message)]).0;
 
-    assert_rejected_at(&proof, "mldsa::word");
+    let fault = Fault {
+        buses: &["mldsa::lane", "mldsa::word"],
+        ..Fault::NONE
+    };
+
+    assert_fault(&honest, &proof, fault);
 }
 
 #[test]
@@ -410,7 +367,9 @@ fn tail_bytes_of_longer_signed_message_break_only_ctrl_tail() {
         Ok(())
     });
 
-    assert_breaks_only(&proof, "ctrl_tail");
+    let honest = run(params, &[sign::<MlDsa44>(6, b"fourteen bytes")]).0;
+
+    assert_breaks_only(&honest, &proof, "ctrl_tail");
 }
 
 #[test]
@@ -422,6 +381,8 @@ fn host_words_altered_alone_break_only_word_bus() {
     let z = ct + params.lambda() / 16;
     let h = z + 8 * params.l() * params.z_bits();
 
+    let honest = run(params, std::slice::from_ref(&signed)).0;
+
     for at in [ct, z, h] {
         let proof = forged(params, std::slice::from_ref(&signed), |f| {
             f.host(0)?[at] ^= 1 << 3;
@@ -429,34 +390,44 @@ fn host_words_altered_alone_break_only_word_bus() {
             Ok(())
         });
 
-        assert_rejected_only_at(&proof, "mldsa::word");
+        assert_rejected_only_at(&honest, &proof, "mldsa::word");
     }
 }
 
 #[test]
 fn host_t1_word_altered_alone_breaks_word_bus() {
-    let signed = sign::<MlDsa44>(10, b"host t1 word");
+    let calls = [sign::<MlDsa44>(10, b"host t1 word")];
 
-    let proof = forged(MlDsaParams::ML_DSA_44, &[signed], |f| {
+    let proof = forged(MlDsaParams::ML_DSA_44, &calls, |f| {
         f.host(0)?[8] ^= 1 << 3;
 
         Ok(())
     });
 
-    assert_rejected_at(&proof, "mldsa::word");
+    let fault = Fault {
+        buses: &["mldsa::lane", "mldsa::word"],
+        ..Fault::NONE
+    };
+
+    assert_fault(&run(MlDsaParams::ML_DSA_44, &calls).0, &proof, fault);
 }
 
 #[test]
 fn host_rho_word_altered_alone_breaks_lane_bus() {
-    let signed = sign::<MlDsa44>(11, b"host rho word");
+    let calls = [sign::<MlDsa44>(11, b"host rho word")];
 
-    let proof = forged(MlDsaParams::ML_DSA_44, &[signed], |f| {
+    let proof = forged(MlDsaParams::ML_DSA_44, &calls, |f| {
         f.host(0)?[0] ^= 1 << 3;
 
         Ok(())
     });
 
-    assert_rejected_at(&proof, "mldsa::lane");
+    let fault = Fault {
+        buses: &["mldsa::lane", "mldsa::word"],
+        ..Fault::NONE
+    };
+
+    assert_fault(&run(MlDsaParams::ML_DSA_44, &calls).0, &proof, fault);
 }
 
 #[test]
@@ -491,5 +462,7 @@ fn foreign_hint_decoded_while_high_bits_keeps_valid_one_breaks_only_hint_bus() {
         Ok(())
     });
 
-    assert_rejected_only_at(&proof, "mldsa::hint");
+    let honest = run(params, &[sign::<MlDsa44>(8, b"foreign hint")]).0;
+
+    assert_rejected_only_at(&honest, &proof, "mldsa::hint");
 }

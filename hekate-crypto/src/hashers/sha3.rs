@@ -4,6 +4,8 @@
 
 //! SHA-3-256 (FIPS-202, RustCrypto `sha3` crate).
 use crate::Hasher;
+#[cfg(target_arch = "aarch64")]
+use crate::hashers::sponge::{Batch, SHA3_PAD};
 use sha3::{Digest, Sha3_256};
 
 #[derive(Clone, Debug)]
@@ -12,7 +14,7 @@ pub struct Sha3_256Hasher {
 }
 
 impl Hasher for Sha3_256Hasher {
-    const OUTPUT_SIZE: usize = 32;
+    type Digest = [u8; 32];
 
     fn new() -> Self {
         Self {
@@ -21,7 +23,7 @@ impl Hasher for Sha3_256Hasher {
     }
 
     fn update(&mut self, data: &[u8]) {
-        self.inner.update(data);
+        Digest::update(&mut self.inner, data);
     }
 
     fn finalize(self) -> [u8; 32] {
@@ -31,5 +33,16 @@ impl Hasher for Sha3_256Hasher {
     fn finalize_reset(&mut self) -> [u8; 32] {
         let out = self.inner.finalize_reset();
         out.into()
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn digest_many(data: &[u8], len: usize, out: &mut [[u8; 32]]) {
+        Batch {
+            data,
+            len,
+            out,
+            pad: SHA3_PAD,
+        }
+        .run();
     }
 }

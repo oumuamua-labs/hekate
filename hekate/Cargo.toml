@@ -31,16 +31,25 @@ blake3 = [
     "hekate-core/blake3",
     "hekate-gadgets/blake3",
     "hekate-sdk/blake3",
+    "hekate-prover-sys/blake3",
 ]
 sha2 = [
     "hekate-core/sha2",
     "hekate-gadgets/sha2",
     "hekate-sdk/sha2",
+    "hekate-prover-sys/sha2",
 ]
 sha3 = [
     "hekate-core/sha3",
     "hekate-gadgets/sha3",
     "hekate-sdk/sha3",
+    "hekate-prover-sys/sha3",
+]
+shake256 = [
+    "hekate-core/shake256",
+    "hekate-gadgets/shake256",
+    "hekate-sdk/shake256",
+    "hekate-prover-sys/shake256",
 ]
 table-math = ["hekate-math/table-math", "hekate-verifier/table-math"]
 dhat-heap = ["dep:dhat"]
@@ -58,7 +67,7 @@ rayon = { version = "1.11", optional = true }
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
-hekate-prover-sys = { workspace = true, features = ["blake3"] }
+hekate-prover-sys = { workspace = true }
 hekate-sdk = { workspace = true }
 hekate-keccak = { workspace = true, features = ["std", "blake3"] }
 hekate-aes = { workspace = true, features = ["std", "blake3"] }
@@ -66,6 +75,7 @@ hekate-sha2 = { workspace = true, features = ["std", "blake3"] }
 hekate-rsa = { workspace = true, features = ["std", "blake3"] }
 hekate-pqc = { workspace = true, features = ["std", "blake3"] }
 hekate-scribble = { workspace = true }
+hekate-testkit = { workspace = true }
 proptest = "1.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing = { version = "0.1", features = ["attributes"] }

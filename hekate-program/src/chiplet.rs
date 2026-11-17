@@ -22,7 +22,7 @@ use crate::outer::TableStatics;
 use crate::permutation::{
     PermutationCheckSpec, RankTable, TableHeight, validate_fixed_selectors, validate_ordered_buses,
 };
-use crate::{Air, FixedColumn, InlineKernelHint, validate_fixed_columns};
+use crate::{Air, FixedColumn, InlineKernelHint, Program, validate_fixed_columns};
 
 /// Pre-computed chiplet AIR definition.
 #[derive(Clone)]
@@ -90,6 +90,21 @@ impl<F: TowerField> ChipletDef<F> {
             inline_kernels,
             permutation_checks,
         })
+    }
+
+    /// Copies a program's main table into a `ChipletDef`.
+    pub fn from_main_table<P: Program<F>>(program: &P) -> Self {
+        Self::from_parts(
+            program.name(),
+            program.num_columns(),
+            program.constraint_ast(),
+            program.column_layout().to_vec(),
+            program.virtual_column_layout().to_vec(),
+            program.boundary_constraints(),
+            program.fixed_columns(),
+            program.virtual_expander().cloned(),
+            program.permutation_checks(),
+        )
     }
 
     /// Borrowed views of what the `Air` getters clone.
@@ -474,6 +489,7 @@ mod tests {
     #[derive(Clone)]
     struct PairedAir {
         pinned: bool,
+        layout: Vec<ColumnType>,
     }
 
     impl Air<F> for PairedAir {
@@ -482,8 +498,7 @@ mod tests {
         }
 
         fn column_layout(&self) -> &[ColumnType] {
-            static LAYOUT: std::sync::OnceLock<Vec<ColumnType>> = std::sync::OnceLock::new();
-            LAYOUT.get_or_init(PairedAirCols::build_layout)
+            &self.layout
         }
 
         fn permutation_checks(&self) -> Vec<(String, PermutationCheckSpec)> {
@@ -589,6 +604,13 @@ mod tests {
         vec![FixedColumn::sparse(col, vec![(0, F::ONE)])]
     }
 
+    fn paired_air(pinned: bool) -> PairedAir {
+        PairedAir {
+            pinned,
+            layout: PairedAirCols::build_layout(),
+        }
+    }
+
     #[test]
     fn def_rejects_permutation_without_clock() {
         let spec = PermutationCheckSpec::new(key_only(), Some(1));
@@ -648,12 +670,12 @@ mod tests {
 
     #[test]
     fn chiplet_def_rejects_paired_spec_with_witness_selectors() {
-        assert_logup_bus_err(ChipletDef::<F>::from_air(&PairedAir { pinned: false }));
+        assert_logup_bus_err(ChipletDef::<F>::from_air(&paired_air(false)));
     }
 
     #[test]
     fn chiplet_def_accepts_paired_spec_with_fixed_selectors() {
-        ChipletDef::<F>::from_air(&PairedAir { pinned: true })
+        ChipletDef::<F>::from_air(&paired_air(true))
             .expect("paired AIR with fixed selectors must snapshot");
     }
 

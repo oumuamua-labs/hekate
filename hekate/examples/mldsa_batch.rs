@@ -15,7 +15,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, ValueEnum};
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block32, Block128, TowerField};
+use hekate::math::{Bit, Block32, Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::{ColumnTrace, Trace, TraceBuilder};
 use hekate_pqc::mldsa::{self, MLDSA_DATA_BUS_ID, MlDsaChiplet, MlDsaInput, MlDsaParams};
@@ -28,7 +28,7 @@ use ml_dsa::{B32, MlDsa44, MlDsa65, MlDsa87, SigningKey};
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const DIGEST_WORDS: usize = 16;
@@ -275,7 +275,7 @@ fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, batch: &[Signed
     let pinned_id = args.audited_id(&program);
 
     let verify_start = Instant::now();
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &program,
@@ -284,7 +284,6 @@ fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, batch: &[Signed
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
     let verify_time = verify_start.elapsed();
 
@@ -309,7 +308,7 @@ fn run(args: &common::RunArgs, label: &str, params: MlDsaParams, batch: &[Signed
         proof_bytes as f64 / 1024.0
     );
 
-    common::result(is_valid);
+    common::result(outcome);
 }
 
 fn main() {

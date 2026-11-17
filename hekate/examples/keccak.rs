@@ -9,7 +9,7 @@ use clap::Parser;
 use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_keccak::{CpuKeccakColumns, KeccakChiplet, KeccakColumns, generate_keccak_trace};
@@ -22,7 +22,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 #[derive(Parser)]
@@ -267,7 +267,7 @@ fn main() {
     let mut verifier_transcript = Transcript::<H>::new(b"Keccak_E2E");
 
     let pinned_id = args.run.audited_id(&air);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &air,
@@ -276,8 +276,7 @@ fn main() {
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }

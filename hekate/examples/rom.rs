@@ -9,7 +9,7 @@ use clap::Parser;
 use hekate::core::trace::ColumnTrace;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::errors;
 use hekate_core::trace::TraceBuilder;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
@@ -22,7 +22,7 @@ use hekate_verifier::HekateVerifier;
 use rand::{TryRngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // =================================================================
@@ -155,7 +155,7 @@ fn main() {
     let mut verifier_transcript = Transcript::<H>::new(b"ROM_Example");
 
     let pinned_id = args.audited_id(&air);
-    let is_valid = common::phase_with_mem("Verifying", || {
+    let outcome = common::phase_with_mem("Verifying", || {
         HekateVerifier::<F, H>::verify(
             &pinned_id,
             &air,
@@ -164,8 +164,7 @@ fn main() {
             &mut verifier_transcript,
             &config,
         )
-        .expect("Verifier failed")
     });
 
-    common::result(is_valid);
+    common::result(outcome);
 }

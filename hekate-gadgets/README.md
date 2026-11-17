@@ -8,7 +8,7 @@
 *Copyright (c) 2026 Andrei Kochergin and Oumuamua Labs.*
 
 The base parts of [Hekate](https://oumuamua.dev/hekate), the Rust zero-knowledge proof engine, in two forms.
-Chiplets are tables your program calls over a LogUp bus: integer arithmetic, RAM, ROM and the modular exponentiation
+Chiplets are tables your program calls over a logUp bus: integer arithmetic, RAM, ROM and the modular exponentiation
 behind RSA. Atoms are constraint helpers that run inside your own table: carry and borrow chains, range checks,
 multiplication and arithmetic modulo a constant.
 
@@ -23,13 +23,13 @@ Fibonacci over 32-bit integers, every addition offloaded to the arithmetic chipl
 ```rust
 use hekate_core::errors;
 use hekate_gadgets::IntArithmeticChiplet;
-use hekate_math::{Block128, TowerField};
+use hekate_math::{Block256, TowerField};
 use hekate_program::FixedShape;
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::define_columns;
 
-type F = Block128;
+type F = Block256;
 
 define_columns! {
     ProgColumns {
@@ -53,6 +53,7 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
 
     let cs = cx.cs();
 
+    // Cell readers on this row and on the next one
     let col = |c: Col| cs.col(c.index());
     let next = |c: Col| cs.next(c.index());
 
@@ -60,18 +61,21 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
     cs.constrain(col(selector) * (next(b) + col(res))); // next(b) = res = a + b
     cs.constrain(col(opcode)); // opcode = ADD
 
+    // The chiplet checks res = a op b modulo 2^32 on every selected row
     cx.call(
         &IntArithmeticChiplet::service(),
         &[a, b, res, opcode],
         selector,
     )?;
 
+    // The chiplet as its own table: 32-bit operands, num_rows - 1 operations
     cx.attach(ChipletDef::from_air(&IntArithmeticChiplet::new(
         32,
         num_rows,
         num_rows - 1,
     )?)?);
 
+    // SELECTOR is 1 on every row but the last
     cx.fix(
         selector,
         FixedShape::Cadence {
@@ -82,9 +86,11 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
         },
     );
 
+    // The sequence starts at 0, 1
     cx.boundary(a, 0, F::ZERO);
     cx.boundary(b, 0, F::ONE);
 
+    // The last term is public
     cx.publish(b, num_rows - 1);
 
     cx.compile()
@@ -92,9 +98,8 @@ fn build_program(num_rows: usize) -> errors::Result<CircuitProgram<F>> {
 ```
 
 The chiplet computes the operation its opcode names, and the opcode is part of the request: the host pins it to
-`ADD`, which is 0, or a prover could request any operation. With the pin, the bus guarantees `res = a + b` modulo
-2^32 on every row where the selector is 1. `generate_arithmetic_trace` builds the chiplet's trace from the list of
-operations.
+`ADD`, which is 0, or a prover could request any operation. `generate_arithmetic_trace` builds the chiplet's trace
+from the list of operations.
 
 An atom runs inside your own table instead. `range_check` proves a 12-bit value is below q = 3329, the ML-KEM
 modulus, on every row:
@@ -102,11 +107,11 @@ modulus, on every row:
 ```rust
 use hekate_core::errors;
 use hekate_gadgets::atoms::int_arith::range_check;
-use hekate_math::Block128;
+use hekate_math::Block256;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::define_columns;
 
-type F = Block128;
+type F = Block256;
 
 const Q: u32 = 3329;
 
@@ -125,16 +130,20 @@ fn below_q(rows: usize) -> errors::Result<CircuitProgram<F>> {
     let cs = cx.cs();
 
     let col = |c: Col| cs.col(c.index());
+
+    // The cells of width bit columns starting at column first
     let bits = |first: usize, width: usize| -> Vec<_> {
         (0..width).map(|i| col(cols.at(first + i))).collect()
     };
 
     let value = bits(Coefficients::VALUE, 12);
 
+    // range_check checks no bit: the value's bits are checked here
     for &bit in &value {
         cs.assert_boolean(bit);
     }
 
+    // value < q on every row
     range_check(cs, &value, &bits(Coefficients::BORROW, 11), Q);
 
     cx.compile()
@@ -142,15 +151,15 @@ fn below_q(rows: usize) -> errors::Result<CircuitProgram<F>> {
 ```
 
 `range_check` subtracts the value from q − 1 bit by bit and pins the last borrow to zero, which holds exactly when the
-value is below q. It boolean-checks nothing: the value's bits are yours to check, as the loop does, and they fix every
-borrow bit. The trace fills `BORROW` with the borrows out of bits 0 to 10 on every row.
+value is below q. The value's bits fix every borrow bit, and the trace fills `BORROW` with the borrows out of bits 0
+to 10 on every row.
 
 ## Documentation
 
 - [Quick Example](https://oumuamua.dev/hekate/docs#quick-example): this program with its traces, proved and verified
 - [Cryptographic Chiplets: chiplets and atoms](https://oumuamua.dev/hekate/docs/basics/cryptographic-chiplets#gadgets-chiplets-and-atoms):
   which form to use, and what each costs
-- [LogUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses): what the bus between a host and a chiplet checks
+- [logUp Buses](https://oumuamua.dev/hekate/docs/basics/logup-buses): what the bus between a host and a chiplet checks
 - [RSA-2048 PKCS#1 v1.5 Verification](https://oumuamua.dev/primitives/signatures/rsa): the modexp chiplet at work
 - [API reference](https://docs.rs/hekate-gadgets)
 

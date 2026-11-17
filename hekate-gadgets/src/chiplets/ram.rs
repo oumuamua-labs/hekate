@@ -138,7 +138,7 @@ impl RamChiplet {
         RamColumns::NUM_COLUMNS
     }
 
-    /// Physical layout for Brakedown commitment.
+    /// The committed columns, before virtual expansion.
     pub fn build_physical_layout() -> Vec<ColumnType> {
         let mut layout = Vec::with_capacity(NUM_PHYSICAL_COLUMNS);
 
@@ -1029,8 +1029,8 @@ mod tests {
 
         // Verify sources 4-7 are
         // RowIndexByte (virtual bytes).
-        for i in 4..8 {
-            match &cpu_spec.sources[i].0 {
+        for (i, (source, _)) in cpu_spec.sources.iter().enumerate().skip(4).take(4) {
+            match source {
                 Source::RowIndexByte(_) => {}
                 _ => panic!("CPU spec should use RowIndexByte for clock at index {}", i),
             }
@@ -1047,8 +1047,8 @@ mod tests {
         assert_eq!(ram_spec.num_sources(), 13);
 
         // Verify sources 4-7 are Columns
-        for i in 4..8 {
-            match &ram_spec.sources[i].0 {
+        for (i, (source, _)) in ram_spec.sources.iter().enumerate().skip(4).take(4) {
+            match source {
                 Source::Column(_) => {}
                 _ => panic!("RAM spec should use Column for clock at index {}", i),
             }

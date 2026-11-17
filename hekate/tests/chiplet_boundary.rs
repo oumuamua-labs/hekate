@@ -7,36 +7,34 @@
 
 use hekate::core::config::Config;
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceBuilder};
-use hekate::crypto::DefaultHasher;
-use hekate::crypto::transcript::Transcript;
-use hekate::math::{Bit, Block128, TowerField};
+use hekate::math::{Bit, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram};
 use hekate_program::constraint::builder::ConstraintSystem;
 use hekate_program::constraint::{BoundaryConstraint, BoundaryTarget, ConstraintAst};
-use hekate_program::digest::program_id;
 use hekate_program::{Air, Program, ProgramInstance, ProgramWitness, define_columns};
 use hekate_prover_sys::prove;
-use hekate_verifier::HekateVerifier;
+use hekate_testkit::verdict::verify;
+use hekate_verifier::rejection::{OuterStage, Rejection, Table, ZerocheckStage};
 use rand::{TryRngCore, rngs::OsRng};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
 
 fn test_config() -> Config {
     Config {
         num_queries: 8,
         min_security_bits: 0,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
 
-fn run_prove_verify<P: Program<F>>(
+fn run_prove_verify<P: Program<F> + Sync>(
     program: &P,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F>,
-) -> bool {
+) -> Result<(), Rejection> {
     run_split_air(program, program, instance, witness)
 }
 
@@ -45,10 +43,10 @@ fn run_split_air<PProver, PVerifier>(
     verifier_air: &PVerifier,
     instance: &ProgramInstance<F>,
     witness: &ProgramWitness<F>,
-) -> bool
+) -> Result<(), Rejection>
 where
     PProver: Program<F>,
-    PVerifier: Program<F>,
+    PVerifier: Program<F> + Sync,
 {
     let mut seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut seed).unwrap();
@@ -59,18 +57,7 @@ where
     let proof =
         prove(domain, prover_air, instance, witness, &cfg, seed, None).expect("prove failed");
 
-    let mut verifier_t = Transcript::<H>::new(domain);
-    let pinned_id = program_id(verifier_air).unwrap();
-
-    HekateVerifier::<F, H>::verify(
-        &pinned_id,
-        verifier_air,
-        instance,
-        &proof,
-        &mut verifier_t,
-        &cfg,
-    )
-    .unwrap_or(false)
+    verify(verifier_air, instance, &cfg, &proof, domain)
 }
 
 // =================================================================
@@ -136,7 +123,7 @@ fn build_traces(num_vars: usize, row0_flag: Bit) -> (ColumnTrace, ColumnTrace) {
 
 #[test]
 fn chiplet_boundary_happy_path() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = single_bnd_host(num_rows, F::ONE);
@@ -145,15 +132,14 @@ fn chiplet_boundary_happy_path() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(
-        run_prove_verify(&air, &instance, &witness),
-        "honest trace must verify"
-    );
+    let outcome = run_prove_verify(&air, &instance, &witness);
+
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]
 fn chiplet_boundary_pin_zero_happy_path() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = single_bnd_host(num_rows, F::ZERO);
@@ -162,15 +148,14 @@ fn chiplet_boundary_pin_zero_happy_path() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(
-        run_prove_verify(&air, &instance, &witness),
-        "pin-zero trace must verify"
-    );
+    let outcome = run_prove_verify(&air, &instance, &witness);
+
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]
 fn chiplet_boundary_violation_rejected() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = single_bnd_host(num_rows, F::ONE);
@@ -180,15 +165,14 @@ fn chiplet_boundary_violation_rejected() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(
-        !run_prove_verify(&air, &instance, &witness),
-        "trace violating chiplet boundary must reject"
-    );
+    let outcome = run_prove_verify(&air, &instance, &witness);
+
+    assert_eq!(outcome, Err(Rejection::Outer(OuterStage::Linear)));
 }
 
 #[test]
 fn chiplet_boundary_constant_swap_rejected() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let prover_air = single_bnd_host(num_rows, F::ONE);
@@ -199,9 +183,14 @@ fn chiplet_boundary_constant_swap_rejected() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(
-        !run_split_air(&prover_air, &verifier_air, &instance, &witness),
-        "constant swap between prover and verifier must reject (transcript binding)"
+    let outcome = run_split_air(&prover_air, &verifier_air, &instance, &witness);
+
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Chiplet(0),
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -277,7 +266,7 @@ fn build_multi_traces(
 
 #[test]
 fn chiplet_multiple_boundaries_all_satisfied() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);
@@ -286,12 +275,14 @@ fn chiplet_multiple_boundaries_all_satisfied() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(run_prove_verify(&air, &instance, &witness));
+    let outcome = run_prove_verify(&air, &instance, &witness);
+
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]
 fn chiplet_multiple_boundaries_first_violated() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);
@@ -300,12 +291,14 @@ fn chiplet_multiple_boundaries_first_violated() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(!run_prove_verify(&air, &instance, &witness));
+    let outcome = run_prove_verify(&air, &instance, &witness);
+
+    assert_eq!(outcome, Err(Rejection::Outer(OuterStage::Linear)));
 }
 
 #[test]
 fn chiplet_multiple_boundaries_last_violated() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);
@@ -314,12 +307,14 @@ fn chiplet_multiple_boundaries_last_violated() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(!run_prove_verify(&air, &instance, &witness));
+    let outcome = run_prove_verify(&air, &instance, &witness);
+
+    assert_eq!(outcome, Err(Rejection::Outer(OuterStage::Linear)));
 }
 
 #[test]
 fn chiplet_multiple_boundaries_both_violated() {
-    let num_vars = 3;
+    let num_vars = 5;
     let num_rows = 1 << num_vars;
 
     let air = multi_bnd_host(num_rows);
@@ -328,7 +323,9 @@ fn chiplet_multiple_boundaries_both_violated() {
     let instance = ProgramInstance::new(num_rows, vec![]);
     let witness = ProgramWitness::new(main).with_chiplets(vec![chiplet]);
 
-    assert!(!run_prove_verify(&air, &instance, &witness));
+    let outcome = run_prove_verify(&air, &instance, &witness);
+
+    assert_eq!(outcome, Err(Rejection::Outer(OuterStage::Linear)));
 }
 
 // =================================================================

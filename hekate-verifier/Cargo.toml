@@ -7,8 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Analytical verifier for the Hekate ZK proving system: Fiat-Shamir replay, Sumcheck, Brakedown LDT, LogUp bus matching."
-keywords = ["zk", "cryptography", "verifier", "brakedown", "sumcheck"]
+description = "Analytical verifier for the Hekate ZK proving system: Fiat-Shamir replay, Sumcheck, BaseFold opening, logUp bus matching."
+keywords = ["zk", "cryptography", "verifier", "basefold", "sumcheck"]
 categories = ["cryptography", "no-std"]
 readme = "README.md"
 
@@ -23,6 +23,7 @@ std = [
 blake3 = ["hekate-core/blake3"]
 sha2 = ["hekate-core/sha2"]
 sha3 = ["hekate-core/sha3"]
+shake256 = ["hekate-core/shake256"]
 transcript-trace = ["hekate-crypto/transcript-trace"]
 parallel = [
     "dep:rayon",

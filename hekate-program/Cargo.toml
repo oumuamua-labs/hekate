@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "AIR program and chiplet definition API for the Hekate ZK proving system: constraint DSL, typed column schema, virtual expansion, LogUp bus wiring."
+description = "AIR program and chiplet definition API for the Hekate ZK proving system: constraint DSL, typed column schema, virtual expansion, logUp bus wiring."
 keywords = ["zk", "cryptography", "air", "constraints", "no-std"]
 categories = ["cryptography", "no-std"]
 readme = "README.md"
@@ -25,6 +25,7 @@ std = [
 blake3 = ["hekate-core/blake3"]
 sha2 = ["hekate-core/sha2"]
 sha3 = ["hekate-core/sha3"]
+shake256 = ["hekate-core/shake256"]
 parallel = [
     "hekate-core/parallel",
     "hekate-math/parallel",

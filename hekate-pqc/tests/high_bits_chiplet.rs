@@ -4,9 +4,7 @@
 
 use hekate_core::config::Config;
 use hekate_core::trace::{ColumnTrace, ColumnType, TraceBuilder, TraceColumn};
-use hekate_crypto::DefaultHasher;
-use hekate_crypto::transcript::Transcript;
-use hekate_math::{Bit, Block16, Block32, Block64, Block128, HardwareField, TowerField};
+use hekate_math::{Bit, Block16, Block32, Block64, Block256, HardwareField, TowerField};
 use hekate_pqc::high_bits::{HighBitsChiplet, HighBitsRow};
 use hekate_pqc::mldsa::{MlDsaParams, Q};
 use hekate_pqc::wiring::{
@@ -14,15 +12,15 @@ use hekate_pqc::wiring::{
     hint_spec, lane_spec,
 };
 use hekate_program::circuit::{Circuit, CircuitProgram};
-use hekate_program::digest::program_id;
 use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
-use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, assert_all_caught_all_targets};
-use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
-use hekate_verifier::HekateVerifier;
+use hekate_sdk::preflight::TableId;
+use hekate_testkit::fault::Fault;
+use hekate_testkit::verdict::{assert_rejected, assert_verifies};
 
-type F = Block128;
-type H = DefaultHasher;
+type F = Block256;
+
+const HIGH_BITS: TableId = TableId::Chiplet(0);
 
 const HOST_LAYOUT: [ColumnType; 11] = [
     ColumnType::B16,
@@ -137,6 +135,12 @@ impl Case {
         }
 
         st
+    }
+
+    fn honest(&self) -> Proof {
+        let trace = self.chiplet.trace_rows(&self.rows).unwrap();
+
+        self.proof(trace, &self.statement(&self.rows))
     }
 
     fn proof(&self, trace: ColumnTrace, st: &Statement) -> Proof {
@@ -255,46 +259,6 @@ impl Case {
     }
 }
 
-impl Proof {
-    fn report(&self) -> PreflightReport<F> {
-        preflight(&self.program, &self.instance, &self.witness).unwrap()
-    }
-
-    fn accepted(&self, zero_knowledge: bool) -> bool {
-        let config = Config {
-            zero_knowledge,
-            ..Config::prod()
-        };
-
-        let proof = prove(
-            b"HighBitsChiplet",
-            &self.program,
-            &self.instance,
-            &self.witness,
-            &config,
-            [7; 32],
-            None,
-        )
-        .unwrap();
-
-        let mut transcript = Transcript::<H>::new(b"HighBitsChiplet");
-
-        HekateVerifier::<F, H>::verify(
-            &program_id(&self.program).unwrap(),
-            &self.program,
-            &self.instance,
-            &proof,
-            &mut transcript,
-            &config,
-        )
-        .unwrap_or(false)
-    }
-
-    fn rejected(&self) -> bool {
-        !self.accepted(false) && !self.accepted(true)
-    }
-}
-
 fn honest_case(case: Case) {
     for (i, (&poly, h)) in case.inputs.iter().zip(&case.hints).enumerate() {
         let w = case.values.get(poly).unwrap();
@@ -306,34 +270,44 @@ fn honest_case(case: Case) {
         }
     }
 
-    let trace = case.chiplet.trace_rows(&case.rows).unwrap();
-    let proof = case.proof(trace, &case.statement(&case.rows));
+    let proof = case.honest();
 
-    assert!(proof.report().is_clean());
-    assert!(proof.accepted(false));
-    assert!(proof.accepted(true));
+    assert_verifies(
+        &proof.program,
+        (&proof.instance, &proof.witness),
+        &Config::prod(),
+    );
 }
 
 fn assert_forgery_breaks_only(case: &Case, forged: &[HighBitsRow], label: &str) {
     let trace = case.chiplet.trace_rows(forged).unwrap();
 
-    assert_breaks_only(&case.proof(trace, &case.statement(forged)), label);
+    assert_breaks_only(
+        &case.honest(),
+        &case.proof(trace, &case.statement(forged)),
+        label,
+    );
 }
 
-fn assert_breaks_only(proof: &Proof, label: &str) {
-    let report = proof.report();
+fn assert_breaks_only(honest: &Proof, forged: &Proof, label: &str) {
+    assert_fault(
+        honest,
+        forged,
+        Fault {
+            constraint_labels: &[(HIGH_BITS, label)],
+            ..Fault::NONE
+        },
+    );
+}
 
-    assert!(report.boundary_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(report.bus_diagnostics.is_empty());
-    assert!(!report.constraint_violations.is_empty());
-
-    for v in &report.constraint_violations {
-        assert!(v.table == TableId::Chiplet(0));
-        assert_eq!(v.label, Some(label));
-    }
-
-    assert!(proof.rejected());
+fn assert_fault(honest: &Proof, forged: &Proof, fault: Fault<'_>) {
+    assert_rejected(
+        &forged.program,
+        (&honest.instance, &honest.witness),
+        (&forged.instance, &forged.witness),
+        fault,
+        &Config::prod(),
+    );
 }
 
 fn host_trace(st: &Statement, rows: usize) -> ColumnTrace {
@@ -430,7 +404,7 @@ fn coefficient_at_q_breaks_only_hb_w_range() {
     let mut st = case.statement(&forged);
     st.coefs[at].2 = Q;
 
-    assert_breaks_only(&case.proof(trace, &st), "hb_w_range");
+    assert_breaks_only(&case.honest(), &case.proof(trace, &st), "hb_w_range");
 }
 
 #[test]
@@ -459,7 +433,7 @@ fn lane_other_than_its_bits_breaks_only_hb_lane() {
 
     st.lanes[0].2 = forged;
 
-    assert_breaks_only(&case.proof(trace, &st), "hb_lane");
+    assert_breaks_only(&case.honest(), &case.proof(trace, &st), "hb_lane");
 }
 
 #[test]
@@ -473,19 +447,14 @@ fn hint_bit_flipped_at_high_bits_is_caught_by_bus_alone() {
     forged[pos] = HighBitsRow::new(&case.params, w, true).unwrap();
 
     let trace = case.chiplet.trace_rows(&forged).unwrap();
-    let proof = case.proof(trace, &case.statement(&forged));
-    let report = proof.report();
+    let forged = case.proof(trace, &case.statement(&forged));
 
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(
-        report
-            .bus_diagnostics
-            .iter()
-            .all(|d| d.bus_id == HINT_BUS_ID)
-    );
-    assert!(proof.rejected());
+    let fault = Fault {
+        buses: &[HINT_BUS_ID],
+        ..Fault::NONE
+    };
+
+    assert_fault(&case.honest(), &forged, fault);
 }
 
 #[test]
@@ -496,13 +465,14 @@ fn host_reading_different_lane_is_caught_by_bus_alone() {
     st.lanes[3].2 ^= 1 << 17;
 
     let trace = case.chiplet.trace_rows(&case.rows).unwrap();
-    let proof = case.proof(trace, &st);
-    let report = proof.report();
+    let forged = case.proof(trace, &st);
 
-    assert!(report.constraint_violations.is_empty());
-    assert!(report.fixed_column_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(proof.rejected());
+    let fault = Fault {
+        buses: &[LANE_BUS_ID],
+        ..Fault::NONE
+    };
+
+    assert_fault(&case.honest(), &forged, fault);
 }
 
 #[test]
@@ -511,16 +481,30 @@ fn hint_key_without_its_bit_is_caught_by_bus_alone() {
 
     let mut st = case.statement(&case.rows);
     let unset = case.hints[0].iter().position(|&h| !h).unwrap();
+    let set = st.hints[0].1 as usize;
 
     st.hints[0] = (1, unset as u16);
 
     let trace = case.chiplet.trace_rows(&case.rows).unwrap();
-    let proof = case.proof(trace, &st);
-    let report = proof.report();
+    let forged = case.proof(trace, &st);
 
-    assert!(report.constraint_violations.is_empty());
-    assert!(!report.bus_diagnostics.is_empty());
-    assert!(proof.rejected());
+    let w = case.values.get(case.inputs[0]).unwrap();
+
+    let mut moved = case.rows.clone();
+    moved[set] = HighBitsRow::new(&case.params, w[set], false).unwrap();
+    moved[unset] = HighBitsRow::new(&case.params, w[unset], true).unwrap();
+
+    let mut twin = case.statement(&moved);
+    twin.hints[0] = st.hints[0];
+
+    let honest = case.proof(case.chiplet.trace_rows(&moved).unwrap(), &twin);
+
+    let fault = Fault {
+        buses: &[HINT_BUS_ID],
+        ..Fault::NONE
+    };
+
+    assert_fault(&honest, &forged, fault);
 }
 
 #[test]

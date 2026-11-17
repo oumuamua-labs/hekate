@@ -640,18 +640,19 @@ mod tests {
     use hekate_crypto::DefaultHasher;
     use hekate_crypto::transcript::Transcript;
     use hekate_keccak::generate_keccak_trace;
-    use hekate_math::{Bit, Block16, Block32, Block64, Block128};
+    use hekate_math::{Bit, Block16, Block32, Block64, Block256};
     use hekate_program::digest::program_id;
     use hekate_program::permutation::{BusKind, ServiceSlot};
     use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
     use hekate_prover_sys::prove;
-    use hekate_sdk::preflight::{PreflightReport, preflight};
+    use hekate_sdk::preflight::{PreflightReport, TableId, preflight};
     use hekate_verifier::HekateVerifier;
+    use hekate_verifier::rejection::{OuterStage, Rejection, Table, ZerocheckStage};
     use sha3::{Digest, Sha3_256, Sha3_512};
 
     use crate::wiring::PolyLabels;
 
-    type F = Block128;
+    type F = Block256;
 
     const SHA3: u8 = 0x06;
     const SHA3_512_RATE: usize = 9;
@@ -693,7 +694,7 @@ mod tests {
             preflight(&self.program, &self.instance, &self.witness).unwrap()
         }
 
-        fn accepted(&self, zero_knowledge: bool) -> bool {
+        fn verdict(&self, zero_knowledge: bool) -> Result<(), Rejection> {
             let config = Config {
                 zero_knowledge,
                 ..Config::prod()
@@ -720,7 +721,6 @@ mod tests {
                 &mut transcript,
                 &config,
             )
-            .unwrap_or(false)
         }
     }
 
@@ -745,10 +745,7 @@ mod tests {
         }
 
         let rows = asm.into_rows();
-        let height = rows
-            .len()
-            .next_power_of_two()
-            .max(Config::prod().min_table_rows());
+        let height = rows.len().next_power_of_two();
 
         Sha3Program {
             ctrl: CtrlChiplet::new("Sha3Ctrl", &service(), rows, height).unwrap(),
@@ -842,13 +839,9 @@ mod tests {
         seed: Stream,
         lanes: &[u64],
     ) -> Proof {
-        let floor = Config::prod().min_table_rows();
-        let rows = hosted.len().max(lanes.len()).next_power_of_two().max(floor);
-
+        let rows = hosted.len().max(lanes.len()).next_power_of_two();
         let blocks = trace.keccak.len();
-        let keccak_rows = (blocks * KeccakChiplet::BLOCK_ROWS)
-            .next_power_of_two()
-            .max(floor);
+        let keccak_rows = (blocks * KeccakChiplet::BLOCK_ROWS).next_power_of_two();
 
         let mut cx = Circuit::<F>::new("CtrlHost", rows).unwrap();
 
@@ -955,8 +948,23 @@ mod tests {
                 .iter()
                 .all(|v| v.label == Some(label))
         );
-        assert!(!proof.accepted(false));
-        assert!(!proof.accepted(true));
+
+        let table = match report.constraint_violations[0].table {
+            TableId::Main => Table::Main,
+            TableId::Chiplet(index) => Table::Chiplet(index),
+        };
+
+        assert_eq!(
+            proof.verdict(false),
+            Err(Rejection::Zerocheck {
+                table,
+                stage: ZerocheckStage::Sumcheck,
+            })
+        );
+        assert_eq!(
+            proof.verdict(true),
+            Err(Rejection::Outer(OuterStage::Linear))
+        );
     }
 
     #[test]

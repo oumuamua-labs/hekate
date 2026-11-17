@@ -34,7 +34,8 @@ struct Publisher {
 
 #[derive(Debug, Deserialize)]
 struct Target {
-    variant: String,
+    mode: String,
+    hasher: String,
     triple: String,
     filename: String,
     sha256: String,
@@ -43,7 +44,7 @@ struct Target {
     url: String,
 }
 
-fn pick_variant() -> Result<&'static str, Box<dyn std::error::Error>> {
+fn pick_mode() -> Result<&'static str, Box<dyn std::error::Error>> {
     let ct = env::var_os("CARGO_FEATURE_CT").is_some();
     let public = env::var_os("CARGO_FEATURE_PUBLIC").is_some();
 
@@ -61,6 +62,36 @@ fn pick_variant() -> Result<&'static str, Box<dyn std::error::Error>> {
     }
 }
 
+fn pick_hasher() -> Result<&'static str, Box<dyn std::error::Error>> {
+    let enabled: Vec<&'static str> = ["blake3", "sha2", "sha3", "shake256"]
+        .into_iter()
+        .filter(|name| env::var_os(format!("CARGO_FEATURE_{}", name.to_uppercase())).is_some())
+        .collect();
+
+    match enabled.as_slice() {
+        [hasher] => Ok(hasher),
+        [] => Err(
+            "hekate-prover-sys: enable exactly one of features `blake3`, `sha2`, `sha3` or \
+                   `shake256`, the hash of the linked binary."
+                .into(),
+        ),
+        several => Err(format!(
+            "hekate-prover-sys: features {} are mutually exclusive. Enable exactly one, with \
+             `default-features = false` to drop the default `blake3`.",
+            several.join(", ")
+        )
+        .into()),
+    }
+}
+
+fn link_name(filename: &str) -> Result<&str, Box<dyn std::error::Error>> {
+    filename
+        .strip_prefix("lib")
+        .and_then(|rest| rest.split('.').next())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("cdylib filename {filename} is not lib<name>.<ext>").into())
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     if env::var_os("DOCS_RS").is_some() {
         return Ok(());
@@ -75,23 +106,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("read manifest at {}: {e}", manifest_path.display()))?;
     let manifest: Manifest = toml::from_str(&manifest_str)?;
 
-    if manifest.schema_version != 2 {
+    if manifest.schema_version != 3 {
         return Err(format!(
-            "manifest schema_version = {}, expected 2",
+            "manifest schema_version = {}, expected 3",
             manifest.schema_version
         )
         .into());
     }
 
-    let variant = pick_variant()?;
+    let mode = pick_mode()?;
+    let hasher = pick_hasher()?;
+
     let triple = env::var("TARGET")?;
     let target = manifest
         .targets
         .iter()
-        .find(|t| t.triple == triple && t.variant == variant)
+        .find(|t| t.triple == triple && t.mode == mode && t.hasher == hasher)
         .ok_or_else(|| {
             format!(
-                "no manifest entry for variant {variant} / triple {triple} (manifest version {})",
+                "no manifest entry for mode {mode} / hasher {hasher} / triple {triple} \
+                 (manifest version {})",
                 manifest.hekate_version
             )
         })?;
@@ -115,7 +149,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let staged_dir = stage_into_outdir(&cdylib, &target.filename)?;
 
     println!("cargo:rustc-link-search=native={}", staged_dir.display());
-    println!("cargo:rustc-link-lib=dylib=hekate_prover_cdylib");
+    println!(
+        "cargo:rustc-link-lib=dylib={}",
+        link_name(&target.filename)?
+    );
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", staged_dir.display());
 
     Ok(())
@@ -156,7 +193,7 @@ fn link_unsigned(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed={}", path.display());
     println!("cargo:rustc-link-search=native={}", staged_dir.display());
-    println!("cargo:rustc-link-lib=dylib=hekate_prover_cdylib");
+    println!("cargo:rustc-link-lib=dylib={}", link_name(filename)?);
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", staged_dir.display());
 
     Ok(())
@@ -208,7 +245,8 @@ fn cache_path(manifest: &Manifest, target: &Target) -> Result<PathBuf, Box<dyn s
 
     let dir = root
         .join(&manifest.hekate_version)
-        .join(&target.variant)
+        .join(&target.mode)
+        .join(&target.hasher)
         .join(&target.triple);
 
     fs::create_dir_all(&dir)?;

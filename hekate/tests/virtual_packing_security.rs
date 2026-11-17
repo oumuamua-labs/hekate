@@ -6,7 +6,7 @@ use hekate::core::config::Config;
 use hekate::core::trace::ColumnType;
 use hekate::crypto::DefaultHasher;
 use hekate::crypto::transcript::Transcript;
-use hekate::math::{Block128, TowerField};
+use hekate::math::{Block256, TowerField};
 use hekate_core::trace::TraceBuilder;
 use hekate_math::{Bit, Block32, HardwareField};
 use hekate_program::chiplet::ChipletDef;
@@ -17,14 +17,16 @@ use hekate_program::digest::program_id;
 use hekate_program::expander::VirtualExpander;
 use hekate_program::{Air, FixedColumn, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
+use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
+use hekate_verifier::rejection::{Rejection, Table, ZerocheckStage};
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 const MAGIC: u32 = 0xDEAD_BEEF;
 
-const NUM_VARS: usize = 4;
+const NUM_VARS: usize = 5;
 const NUM_ROWS: usize = 1 << NUM_VARS;
 
 // =========================================================
@@ -155,7 +157,8 @@ fn zk_config() -> Config {
         num_queries: 4,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     }
 }
@@ -165,10 +168,7 @@ fn zk_config() -> Config {
 // Virtual Packing Eval Forgery
 //
 // Corrupt a virtual bit column evaluation in
-// the chiplet's point_evaluation. The TensorPCS
-// proximity check must catch the mismatch between
-// claimed virtual values and the physically
-// committed trace data.
+// the chiplet's point_evaluation.
 // =========================================================
 
 #[test]
@@ -191,23 +191,25 @@ fn virtual_packing_eval_forgery_rejected() {
     let mut vt = Transcript::<H>::new(b"VirtualPackEvalForgery");
     let pinned_id = program_id(&air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-        .expect("verification must not error");
+    let outcome =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(ok, "baseline must verify");
+    assert_eq!(outcome, Ok(()));
 
     // Corrupt virtual bit column 17
     let evals = &mut proof.chiplet_point_evaluations[0].1;
     assert!(evals.len() > 17);
+
     evals[17] += F::ONE;
 
-    let mut at = Transcript::<H>::new(b"VirtualPackEvalForgery");
-    let attack =
-        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut at, &config);
+    let outcome = verify(&air, &instance, &config, &proof, b"VirtualPackEvalForgery");
 
-    assert!(
-        attack.is_err() || !attack.unwrap(),
-        "forged virtual bit column 17 accepted",
+    assert_eq!(
+        outcome,
+        Err(Rejection::Zerocheck {
+            table: Table::Main,
+            stage: ZerocheckStage::Sumcheck,
+        })
     );
 }
 
@@ -217,7 +219,7 @@ fn virtual_packing_eval_forgery_rejected() {
 //
 // Stage A:
 // With ZK enabled, the magic witness bytes must
-// NOT appear in chiplet LDT openings. The noise
+// NOT appear in the fold openings. The noise
 // generation path through parse_virtual_row must
 // mask the data.
 // =========================================================
@@ -231,10 +233,9 @@ fn virtual_expansion_witness_isolation() {
     let scan_openings = |proof: &hekate_core::proofs::InnerProof<F>| -> bool {
         proof
             .eval_proof
-            .ldt_proof
-            .opened_columns
+            .openings
             .iter()
-            .any(|col| col.windows(needle.len()).any(|w| w == needle))
+            .any(|opening| opening.leaves.windows(needle.len()).any(|w| w == needle))
     };
 
     let config_zk = zk_config();
@@ -252,29 +253,27 @@ fn virtual_expansion_witness_isolation() {
     let mut vt_zk = Transcript::<H>::new(b"VirtualPackWitnessIsolation");
     let pinned_id = program_id(&air).unwrap();
 
-    assert!(
+    assert_eq!(
         HekateVerifier::<F, H>::verify(
             &pinned_id, &air, &instance, &proof_zk, &mut vt_zk, &config_zk
-        )
-        .unwrap(),
-        "ZK proof must verify"
+        ),
+        Ok(())
     );
 
     assert!(
         !scan_openings(&proof_zk),
-        "ZK enabled but witness bytes leaked in chiplet LDT openings",
+        "ZK enabled but witness bytes leaked in fold openings",
     );
 
-    // The non-systematic row code emits no verbatim
-    // column, no real leak exists to detect.
+    // No real leak exists to detect
     let mut planted = proof_zk.clone();
 
     let target = planted
         .eval_proof
-        .ldt_proof
-        .opened_columns
+        .openings
         .iter_mut()
-        .find(|col| col.len() >= needle.len())
+        .map(|opening| &mut opening.leaves)
+        .find(|leaves| leaves.len() >= needle.len())
         .expect("opening wide enough to hold the needle");
 
     target[..needle.len()].copy_from_slice(&needle);

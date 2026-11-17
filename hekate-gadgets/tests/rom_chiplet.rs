@@ -7,7 +7,7 @@ use hekate_core::trace::{ColumnTrace, IntoTraceColumn, TraceColumn};
 use hekate_crypto::DefaultHasher;
 use hekate_crypto::transcript::Transcript;
 use hekate_gadgets::{CpuFetchColumns, Instruction, RomChiplet, generate_rom_trace};
-use hekate_math::{Bit, Block32, Block128, TowerField};
+use hekate_math::{Bit, Block32, Block256, TowerField};
 use hekate_program::chiplet::ChipletDef;
 use hekate_program::circuit::{Circuit, CircuitProgram, Col};
 use hekate_program::digest::program_id;
@@ -16,7 +16,7 @@ use hekate_prover_sys::prove;
 use hekate_scribble::{MutationKind, ScribbleConfig, Target, assert_all_caught};
 use hekate_verifier::HekateVerifier;
 
-type F = Block128;
+type F = Block256;
 type H = DefaultHasher;
 
 // Define Combined AIR for Testing
@@ -173,10 +173,11 @@ fn rom_cpu_linking() {
     let instance = ProgramInstance::new(num_rows, vec![]); // No public inputs
 
     let config = Config {
-        num_queries: 4,
+        num_queries: 2,
         min_security_bits: 0,
         zero_knowledge: true,
-        ldt_support_size: 4,
+        fold_arity_log: 1,
+        early_stop_vars: 1,
         ..Config::default()
     };
 
@@ -200,7 +201,7 @@ fn rom_cpu_linking() {
         &config,
     );
 
-    assert!(result.unwrap(), "Verification failed");
+    assert_eq!(result, Ok(()));
 
     // 4. Bus Consistency
     // Both spec endpoints sit on the main trace
@@ -249,10 +250,10 @@ fn rom_gpa_large_trace() {
     let mut vt = Transcript::<H>::new(b"ROM_Large");
     let pinned_id = program_id(&air).unwrap();
 
-    let ok = HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config)
-        .unwrap();
+    let outcome =
+        HekateVerifier::<F, H>::verify(&pinned_id, &air, &instance, &proof, &mut vt, &config);
 
-    assert!(ok, "Large trace verification failed");
+    assert_eq!(outcome, Ok(()), "Large trace verification failed");
 }
 
 /// Test: ROM Padding Transparency via HekateProver.
@@ -275,7 +276,6 @@ fn rom_padding_transparency() {
 
     // Reads plaintext claimed sums
     let config = Config {
-        ldt_support_size: 4,
         min_security_bits: 0,
         zero_knowledge: false,
         ..Config::default()
@@ -297,8 +297,13 @@ fn rom_padding_transparency() {
     // row and both main-side
     // claimed_sums are zero.
     assert_eq!(proof.main_logup_aux.claimed_sums.len(), 2);
-    assert_eq!(proof.main_logup_aux.claimed_sums[0].1, F::ZERO);
-    assert_eq!(proof.main_logup_aux.claimed_sums[1].1, F::ZERO);
+    assert!(
+        proof
+            .main_logup_aux
+            .claimed_sums
+            .iter()
+            .all(|&s| s == F::ZERO)
+    );
 }
 
 #[test]
