@@ -1429,6 +1429,152 @@ pub mod hekate {
                 ds.finish()
             }
         }
+        pub enum ProductLevelOffset {}
+        #[derive(Copy, Clone, PartialEq)]
+
+        pub struct ProductLevel<'a> {
+            pub _tab: ::flatbuffers::Table<'a>,
+        }
+
+        impl<'a> ::flatbuffers::Follow<'a> for ProductLevel<'a> {
+            type Inner = ProductLevel<'a>;
+            #[inline]
+            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+                Self {
+                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
+                }
+            }
+        }
+
+        impl<'a> ProductLevel<'a> {
+            pub const VT_SUMS: ::flatbuffers::VOffsetT = 4;
+            pub const VT_SUMCHECK: ::flatbuffers::VOffsetT = 6;
+
+            #[inline]
+            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+                ProductLevel { _tab: table }
+            }
+            #[allow(unused_mut)]
+            pub fn create<
+                'bldr: 'args,
+                'args: 'mut_bldr,
+                'mut_bldr,
+                A: ::flatbuffers::Allocator + 'bldr,
+            >(
+                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+                args: &'args ProductLevelArgs<'args>,
+            ) -> ::flatbuffers::WIPOffset<ProductLevel<'bldr>> {
+                let mut builder = ProductLevelBuilder::new(_fbb);
+                if let Some(x) = args.sumcheck {
+                    builder.add_sumcheck(x);
+                }
+                if let Some(x) = args.sums {
+                    builder.add_sums(x);
+                }
+                builder.finish()
+            }
+
+            #[inline]
+            pub fn sums(&self) -> Option<::flatbuffers::Vector<'a, Block256>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Block256>>>(
+                            ProductLevel::VT_SUMS,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn sumcheck(&self) -> Option<SumcheckProof<'a>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<SumcheckProof>>(
+                            ProductLevel::VT_SUMCHECK,
+                            None,
+                        )
+                }
+            }
+        }
+
+        impl ::flatbuffers::Verifiable for ProductLevel<'_> {
+            #[inline]
+            fn run_verifier(
+                v: &mut ::flatbuffers::Verifier,
+                pos: usize,
+            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+                v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("sums", Self::VT_SUMS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<SumcheckProof>>("sumcheck", Self::VT_SUMCHECK, false)?
+     .finish();
+                Ok(())
+            }
+        }
+        pub struct ProductLevelArgs<'a> {
+            pub sums: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
+            pub sumcheck: Option<::flatbuffers::WIPOffset<SumcheckProof<'a>>>,
+        }
+        impl<'a> Default for ProductLevelArgs<'a> {
+            #[inline]
+            fn default() -> Self {
+                ProductLevelArgs {
+                    sums: None,
+                    sumcheck: None,
+                }
+            }
+        }
+
+        pub struct ProductLevelBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+        }
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ProductLevelBuilder<'a, 'b, A> {
+            #[inline]
+            pub fn add_sums(
+                &mut self,
+                sums: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, Block256>>,
+            ) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<_>>(ProductLevel::VT_SUMS, sums);
+            }
+            #[inline]
+            pub fn add_sumcheck(&mut self, sumcheck: ::flatbuffers::WIPOffset<SumcheckProof<'b>>) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<SumcheckProof>>(
+                        ProductLevel::VT_SUMCHECK,
+                        sumcheck,
+                    );
+            }
+            #[inline]
+            pub fn new(
+                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            ) -> ProductLevelBuilder<'a, 'b, A> {
+                let start = _fbb.start_table();
+                ProductLevelBuilder {
+                    fbb_: _fbb,
+                    start_: start,
+                }
+            }
+            #[inline]
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<ProductLevel<'a>> {
+                let o = self.fbb_.end_table(self.start_);
+                ::flatbuffers::WIPOffset::new(o.value())
+            }
+        }
+
+        impl ::core::fmt::Debug for ProductLevel<'_> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut ds = f.debug_struct("ProductLevel");
+                ds.field("sums", &self.sums());
+                ds.field("sumcheck", &self.sumcheck());
+                ds.finish()
+            }
+        }
         pub enum OuterOpeningOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -1625,12 +1771,15 @@ pub mod hekate {
         }
 
         impl<'a> OuterProof<'a> {
-            pub const VT_AUX_ROOT: ::flatbuffers::VOffsetT = 4;
-            pub const VT_INTERLEAVED: ::flatbuffers::VOffsetT = 6;
-            pub const VT_LINEAR: ::flatbuffers::VOffsetT = 8;
-            pub const VT_QUADRATIC: ::flatbuffers::VOffsetT = 10;
-            pub const VT_PAD_OPENING: ::flatbuffers::VOffsetT = 12;
-            pub const VT_AUX_OPENING: ::flatbuffers::VOffsetT = 14;
+            pub const VT_CLAIMS_ROOT: ::flatbuffers::VOffsetT = 4;
+            pub const VT_PRODUCTS: ::flatbuffers::VOffsetT = 6;
+            pub const VT_AUX_ROOT: ::flatbuffers::VOffsetT = 8;
+            pub const VT_INTERLEAVED: ::flatbuffers::VOffsetT = 10;
+            pub const VT_LINEAR: ::flatbuffers::VOffsetT = 12;
+            pub const VT_QUADRATIC: ::flatbuffers::VOffsetT = 14;
+            pub const VT_PAD_OPENING: ::flatbuffers::VOffsetT = 16;
+            pub const VT_CLAIMS_OPENING: ::flatbuffers::VOffsetT = 18;
+            pub const VT_AUX_OPENING: ::flatbuffers::VOffsetT = 20;
 
             #[inline]
             pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1650,6 +1799,9 @@ pub mod hekate {
                 if let Some(x) = args.aux_opening {
                     builder.add_aux_opening(x);
                 }
+                if let Some(x) = args.claims_opening {
+                    builder.add_claims_opening(x);
+                }
                 if let Some(x) = args.pad_opening {
                     builder.add_pad_opening(x);
                 }
@@ -1665,9 +1817,42 @@ pub mod hekate {
                 if let Some(x) = args.aux_root {
                     builder.add_aux_root(x);
                 }
+                if let Some(x) = args.products {
+                    builder.add_products(x);
+                }
+                if let Some(x) = args.claims_root {
+                    builder.add_claims_root(x);
+                }
                 builder.finish()
             }
 
+            #[inline]
+            pub fn claims_root(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                            OuterProof::VT_CLAIMS_ROOT,
+                            None,
+                        )
+                }
+            }
+            #[inline]
+            pub fn products(
+                &self,
+            ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ProductLevel<'a>>>>
+            {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab.get::<::flatbuffers::ForwardsUOffset<
+                        ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ProductLevel>>,
+                    >>(OuterProof::VT_PRODUCTS, None)
+                }
+            }
             #[inline]
             pub fn aux_root(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
                 // Safety:
@@ -1734,6 +1919,19 @@ pub mod hekate {
                 }
             }
             #[inline]
+            pub fn claims_opening(&self) -> Option<OuterOpening<'a>> {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<::flatbuffers::ForwardsUOffset<OuterOpening>>(
+                            OuterProof::VT_CLAIMS_OPENING,
+                            None,
+                        )
+                }
+            }
+            #[inline]
             pub fn aux_opening(&self) -> Option<OuterOpening<'a>> {
                 // Safety:
                 // Created from valid Table for this object
@@ -1755,33 +1953,46 @@ pub mod hekate {
                 pos: usize,
             ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
                 v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("claims_root", Self::VT_CLAIMS_ROOT, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<ProductLevel>>>>("products", Self::VT_PRODUCTS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("aux_root", Self::VT_AUX_ROOT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("interleaved", Self::VT_INTERLEAVED, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("linear", Self::VT_LINEAR, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Block256>>>("quadratic", Self::VT_QUADRATIC, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<OuterOpening>>("pad_opening", Self::VT_PAD_OPENING, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<OuterOpening>>("claims_opening", Self::VT_CLAIMS_OPENING, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<OuterOpening>>("aux_opening", Self::VT_AUX_OPENING, false)?
      .finish();
                 Ok(())
             }
         }
         pub struct OuterProofArgs<'a> {
+            pub claims_root: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+            pub products: Option<
+                ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<ProductLevel<'a>>>,
+                >,
+            >,
             pub aux_root: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
             pub interleaved: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub linear: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub quadratic: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Block256>>>,
             pub pad_opening: Option<::flatbuffers::WIPOffset<OuterOpening<'a>>>,
+            pub claims_opening: Option<::flatbuffers::WIPOffset<OuterOpening<'a>>>,
             pub aux_opening: Option<::flatbuffers::WIPOffset<OuterOpening<'a>>>,
         }
         impl<'a> Default for OuterProofArgs<'a> {
             #[inline]
             fn default() -> Self {
                 OuterProofArgs {
+                    claims_root: None,
+                    products: None,
                     aux_root: None,
                     interleaved: None,
                     linear: None,
                     quadratic: None,
                     pad_opening: None,
+                    claims_opening: None,
                     aux_opening: None,
                 }
             }
@@ -1792,6 +2003,28 @@ pub mod hekate {
             start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
         }
         impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> OuterProofBuilder<'a, 'b, A> {
+            #[inline]
+            pub fn add_claims_root(
+                &mut self,
+                claims_root: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    OuterProof::VT_CLAIMS_ROOT,
+                    claims_root,
+                );
+            }
+            #[inline]
+            pub fn add_products(
+                &mut self,
+                products: ::flatbuffers::WIPOffset<
+                    ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<ProductLevel<'b>>>,
+                >,
+            ) {
+                self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+                    OuterProof::VT_PRODUCTS,
+                    products,
+                );
+            }
             #[inline]
             pub fn add_aux_root(
                 &mut self,
@@ -1842,6 +2075,17 @@ pub mod hekate {
                     );
             }
             #[inline]
+            pub fn add_claims_opening(
+                &mut self,
+                claims_opening: ::flatbuffers::WIPOffset<OuterOpening<'b>>,
+            ) {
+                self.fbb_
+                    .push_slot_always::<::flatbuffers::WIPOffset<OuterOpening>>(
+                        OuterProof::VT_CLAIMS_OPENING,
+                        claims_opening,
+                    );
+            }
+            #[inline]
             pub fn add_aux_opening(
                 &mut self,
                 aux_opening: ::flatbuffers::WIPOffset<OuterOpening<'b>>,
@@ -1872,11 +2116,14 @@ pub mod hekate {
         impl ::core::fmt::Debug for OuterProof<'_> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 let mut ds = f.debug_struct("OuterProof");
+                ds.field("claims_root", &self.claims_root());
+                ds.field("products", &self.products());
                 ds.field("aux_root", &self.aux_root());
                 ds.field("interleaved", &self.interleaved());
                 ds.field("linear", &self.linear());
                 ds.field("quadratic", &self.quadratic());
                 ds.field("pad_opening", &self.pad_opening());
+                ds.field("claims_opening", &self.claims_opening());
                 ds.field("aux_opening", &self.aux_opening());
                 ds.finish()
             }

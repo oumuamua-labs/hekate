@@ -65,6 +65,11 @@ table LogUpAux {
 
 // ===== Outer Argument =====
 
+table ProductLevel {
+  sums: [Block256];
+  sumcheck: SumcheckProof;
+}
+
 table OuterOpening {
   columns: [uint32];
   values: [Block256];
@@ -72,11 +77,14 @@ table OuterOpening {
 }
 
 table OuterProof {
+  claims_root: [ubyte];
+  products: [ProductLevel];
   aux_root: [ubyte];
   interleaved: [Block256];
   linear: [Block256];
   quadratic: [Block256];
   pad_opening: OuterOpening;
+  claims_opening: OuterOpening;
   aux_opening: OuterOpening;
 }
 
