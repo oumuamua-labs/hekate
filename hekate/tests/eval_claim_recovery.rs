@@ -121,15 +121,6 @@ fn recover_from_high_half(claim: F, weight: F) -> Option<Block64> {
     (target == 0).then(|| Block64::from(solution))
 }
 
-fn recover_from_proof(zero_knowledge: bool) -> (F, F) {
-    let (air, point_evaluation, secret_f) = prove_slot_constant(zero_knowledge);
-
-    (
-        recover_slot_constant(&air, &point_evaluation, SECRET, BLOCK),
-        secret_f,
-    )
-}
-
 fn prove_slot_constant(zero_knowledge: bool) -> (CircuitProgram<F>, (Vec<F>, Vec<F>), F) {
     let secret = Block64::from(0x0BAD_C0FF_EE15_F00Du64);
     let trace = slot_constant_trace(secret);
@@ -175,39 +166,32 @@ fn prove_slot_constant(zero_knowledge: bool) -> (CircuitProgram<F>, (Vec<F>, Vec
 }
 
 #[test]
-fn point_evaluation_hides_slot_constant_secret() {
-    let (recovered, secret_f) = recover_from_proof(false);
+fn slot_constant_claim_travels_only_in_raw_mode() {
+    let (air, point_evaluation, secret_f) = prove_slot_constant(false);
+
     assert_eq!(
-        recovered, secret_f,
+        recover_slot_constant(&air, &point_evaluation, SECRET, BLOCK),
+        secret_f,
         "raw claims must recover the slot constant, else the probe is broken"
     );
 
-    let (recovered, secret_f) = recover_from_proof(true);
-    assert_ne!(
-        recovered, secret_f,
-        "secret recovered exactly from point_evaluation and the public row layout"
-    );
+    let (_, (_, claims), _) = prove_slot_constant(true);
+
+    assert!(claims.is_empty());
 }
 
 #[test]
-fn point_evaluation_high_half_hides_slot_constant_secret() {
-    let recover = |zero_knowledge| {
-        let (air, (r_final, claims), secret_f) = prove_slot_constant(zero_knowledge);
-        let weight = slot_weight(&air, &r_final, BLOCK);
+fn slot_constant_high_half_travels_only_in_raw_mode() {
+    let (air, (r_final, claims), secret_f) = prove_slot_constant(false);
+    let weight = slot_weight(&air, &r_final, BLOCK);
 
-        (
-            recover_from_high_half(claims[SECRET], weight).map(F::from),
-            secret_f,
-        )
-    };
-
-    let (recovered, secret_f) = recover(false);
     assert_eq!(
-        recovered,
+        recover_from_high_half(claims[SECRET], weight).map(F::from),
         Some(secret_f),
         "the raw high half must recover the slot constant, else the probe is broken"
     );
 
-    let (recovered, secret_f) = recover(true);
-    assert_ne!(recovered, Some(secret_f));
+    let (_, (_, claims), _) = prove_slot_constant(true);
+
+    assert!(claims.is_empty());
 }

@@ -22,7 +22,7 @@ use hekate_program::{Air, FixedColumn, FixedShape, Program, ProgramInstance, Pro
 use hekate_prover_sys::prove;
 use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
-use hekate_verifier::rejection::{FoldStage, PoolStage, Rejection, Table, ZerocheckStage};
+use hekate_verifier::rejection::{FoldStage, Rejection, Table, ZerocheckStage};
 use rand::{TryRngCore, rngs::OsRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -658,14 +658,26 @@ fn algebraic_and_evaluation_perfect_hiding() {
     );
 
     // GUARANTEE 3:
-    // Seed dependence only:
-    // r_final differs across seeds.
+    // No trace evaluation travels; the
+    // claims oracle differs across seeds.
     let eval_no_zk = &p_no_zk.main_point_evaluation.1;
-    let eval_zk_a = &p_zk_a.main_point_evaluation.1;
-    let eval_zk_b = &p_zk_b.main_point_evaluation.1;
 
-    assert_ne!(eval_no_zk, eval_zk_a, "ZK failed to hide trace evaluations");
-    assert_ne!(eval_zk_a, eval_zk_b, "ZK failed to hide trace evaluations");
+    assert!(!eval_no_zk.is_empty());
+
+    let claims_root = |proof: &hekate_core::proofs::InnerProof<F>| {
+        assert!(
+            proof.main_point_evaluation.1.is_empty(),
+            "ZK failed to hide trace evaluations"
+        );
+
+        proof.outer.as_ref().unwrap().claims_root.clone()
+    };
+
+    assert_ne!(
+        claims_root(&p_zk_a),
+        claims_root(&p_zk_b),
+        "claims roots agree across seeds"
+    );
 
     // Raw-mode control: the proof draws no randomness without zero knowledge
     let p_raw_a = prove(
@@ -708,8 +720,8 @@ fn algebraic_and_evaluation_perfect_hiding() {
     );
 }
 
-/// Per column: `(claim, MLE(r_final))` for the base claim
-/// and, where the column ships one, the next-row claim.
+/// Per column: `(claim, MLE(r_final))` for the base claim and, where
+/// the column ships one, the next-row claim; none under zero knowledge.
 fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<(ClaimVsMle, Option<ClaimVsMle>)> {
     let num_vars = 6;
     let num_rows = 1 << num_vars;
@@ -755,6 +767,12 @@ fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<(ClaimVsMle, Opti
     let slots = plan.next_slots();
 
     assert_eq!(r_final.len(), num_vars);
+
+    if zero_knowledge {
+        assert!(claims.is_empty());
+        return Vec::new();
+    }
+
     assert_eq!(claims.len(), half + plan.next_claims());
 
     let r_hw: Vec<Flat<F>> = r_final.iter().map(|x| x.to_hardware()).collect();
@@ -774,24 +792,17 @@ fn point_evaluation_claims_vs_mle(zero_knowledge: bool) -> Vec<(ClaimVsMle, Opti
 
 #[test]
 fn point_evaluation_claims_are_not_witness_functionals() {
-    for zero_knowledge in [false, true] {
-        let pairs = point_evaluation_claims_vs_mle(zero_knowledge);
-        let shipped: Vec<bool> = pairs.iter().map(|(_, next)| next.is_some()).collect();
+    assert!(point_evaluation_claims_vs_mle(true).is_empty());
 
-        assert_eq!(
-            shipped,
-            [true, true, false],
-            "zero_knowledge {zero_knowledge}"
-        );
+    let pairs = point_evaluation_claims_vs_mle(false);
+    let shipped: Vec<bool> = pairs.iter().map(|(_, next)| next.is_some()).collect();
 
-        for (col, (base, next)) in pairs.into_iter().enumerate() {
-            let pairs = [Some(base), next];
-            for (claim, mle) in pairs.into_iter().flatten() {
-                match zero_knowledge {
-                    false => assert_eq!(claim, mle, "raw claim of column {col}"),
-                    true => assert_ne!(claim, mle, "masked claim of column {col}"),
-                }
-            }
+    assert_eq!(shipped, [true, true, false]);
+
+    for (col, (base, next)) in pairs.into_iter().enumerate() {
+        let pairs = [Some(base), next];
+        for (claim, mle) in pairs.into_iter().flatten() {
+            assert_eq!(claim, mle, "raw claim of column {col}");
         }
     }
 }
@@ -952,10 +963,10 @@ fn opened_symbol_top_byte_tamper_rejected() {
 }
 
 #[test]
-fn noise_shift_sign_forgery() {
+fn zk_proof_ships_no_claims() {
     // OBJECTIVE:
-    // Ensure that the Verifier detects if the prover swaps or
-    // modifies the base/shifted noise values (B(r) vs B(x_next)).
+    // Ensure that no base or shifted noise value (B(r), B(x_next))
+    // travels in the proof, and that one shipping them is rejected.
 
     let num_vars = 5;
     let num_rows = 1usize << num_vars;
@@ -989,31 +1000,26 @@ fn noise_shift_sign_forgery() {
     )
     .unwrap();
 
-    // In Hekate architecture, noise columns
-    // are appended after physical data.
-    // FibAir has 3 data columns (indices 0, 1, 2).
-    // The sumcheck noise column is at index 3.
-    let noise_col_idx = 3;
+    assert!(proof.main_point_evaluation.1.is_empty());
 
     // ATTACK:
-    // Swap the base noise value and the next-row
-    // noise value. This "disconnects" the algebraic
-    // claim from the physical Merkle tree data.
+    // Ship a full claim vector beside the claims oracle.
     let pool = fold_pool(&air, num_vars, &config);
     let plan = &pool.tables()[0].plan;
-    let next_noise_idx = plan.total_claims() + plan.next_slots()[noise_col_idx].unwrap();
 
-    let base_noise = proof.main_point_evaluation.1[noise_col_idx];
-    let next_noise = proof.main_point_evaluation.1[next_noise_idx];
-
-    proof.main_point_evaluation.1[noise_col_idx] = next_noise;
-    proof.main_point_evaluation.1[next_noise_idx] = base_noise;
+    proof.main_point_evaluation.1 = vec![F::ONE; plan.total_claims() + plan.next_claims()];
 
     // 2. Verify the forged proof
     let outcome = verify(&air, &instance, &config, &proof, b"ZK_NoiseShift");
 
     // 3. Guarantee rejection
-    assert_eq!(outcome, Err(Rejection::PoolEval(PoolStage::Sumcheck)));
+    assert_eq!(
+        outcome,
+        Err(Rejection::Malformed(hekate_core::errors::Error::Protocol {
+            protocol: "verifier",
+            message: "zero-knowledge proof carries evals outside the claims oracle",
+        }))
+    );
 }
 
 #[test]
