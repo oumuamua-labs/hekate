@@ -15,12 +15,12 @@ use hekate_program::expander::RingSwitchPlan;
 use hekate_program::fold_pool::FoldPool;
 use hekate_program::linearized::RingGadget;
 use hekate_program::outer::{
-    BusColumnRow, ConsistencyInputs, EvalRecord, OuterLayout, OuterStatement, TableRecord,
-    TableShape, assemble, linear_tensor_vars, linear_weights, linear_weights_of_rows,
-    statement_rows, table_plan,
+    BusColumnRow, ConsistencyInputs, EvalRecord, LevelRecord, LevelSums, OuterLayout,
+    OuterStatement, PRODUCT_SUMCHECK_DEGREE, TableRecord, TableShape, assemble, linear_tensor_vars,
+    linear_weights, linear_weights_of_rows, statement_rows, table_plan,
 };
 use hekate_program::permutation::{BusFraction, BusKind, Slot, bus_columns, h_planes, plane_basis};
-use hekate_program::predicate::Unknown;
+use hekate_program::predicate::{LevelEntry, Unknown, level_rounds};
 use hekate_sha2::Sha256Chiplet;
 
 const NUM_ROWS: usize = 256;
@@ -91,25 +91,25 @@ fn kem(params: MlKemParams) -> errors::Result<Vec<ChipletDef<F>>> {
     MlKemChiplet::<F>::new(params, &KEM_CALLS)?.defs()
 }
 
-/// A record over `def`'s AST, bus specs and fixed
-/// pins with random masked values, its pads taken
-/// from `base` on; returns the next free pad.
+/// Record over `def`'s AST, bus specs and fixed pins with
+/// random masked values, its pads from `base` on and its
+/// claims from `claims_first` on; returns the next free pad.
 fn record<'d>(
     def: &'d ChipletDef<F>,
+    levels: &'d [Vec<LevelEntry>],
     shape: TableShape,
     next_slots: &[Option<usize>],
     blind_units: usize,
     base: u32,
+    claims_first: u32,
 ) -> (TableRecord<'d, F>, u32) {
     let statics = def.statics();
     let seed = base as u128;
 
     let half = shape.eval_claims() as u32;
-    let claims = half + shape.next_claims as u32;
     let planes = h_planes::<F>();
 
-    let h_pad = base + claims;
-    let sums_pad = h_pad + shape.h_columns() as u32;
+    let sums_pad = base + shape.h_columns() as u32;
     let mask_pad = sums_pad + shape.bus_columns as u32;
 
     let fraction = |k: usize| {
@@ -132,7 +132,7 @@ fn record<'d>(
 
     let mut buses = Vec::new();
     let mut claimed_sums = Vec::new();
-    let mut first_wire = shape.mul_nodes as u32;
+    let mut first_wire = shape.product_levels as u32;
 
     for (c, column) in bus_columns(statics.specs, shape.sumcheck_degree)
         .iter()
@@ -152,7 +152,7 @@ fn record<'d>(
         };
 
         buses.push(BusColumnRow {
-            h_pads: (0..planes).map(|j| h_pad + plane(j)).collect(),
+            h_pads: (0..planes).map(|j| base + plane(j)).collect(),
             h_masked: (0..planes)
                 .map(|j| mix(seed + 10 + plane(j) as u128))
                 .collect(),
@@ -170,11 +170,11 @@ fn record<'d>(
 
     assert_eq!(first_wire as usize, shape.mul_wires());
 
-    let record = TableRecord {
-        claims_masked: (0..claims as u128).map(|i| mix(seed + 500 + i)).collect(),
+    let mut record = TableRecord {
         ast: statics.ast,
+        products: Vec::new(),
         consistency: ConsistencyInputs {
-            pad_first: base,
+            claims_first,
             eq_zc: mix(seed + 1),
             alpha: mix(seed + 2),
             planes: plane_basis::<F>().unwrap(),
@@ -209,7 +209,7 @@ fn record<'d>(
             .map(|fc| {
                 let col = fc.col_idx as u32;
 
-                (base + col, col, mix(seed + 80 + col as u128))
+                (col, mix(seed + 80 + col as u128))
             })
             .collect(),
         claimed_sums,
@@ -218,7 +218,39 @@ fn record<'d>(
         shape,
     };
 
-    (record, mask_pad + 3)
+    let mut pad = mask_pad + 3;
+    for (l, entries) in levels.iter().enumerate() {
+        let s = seed + 2000 + 100 * l as u128;
+
+        let sums = (l > 0).then(|| {
+            let first = pad;
+
+            pad += 2;
+
+            LevelSums {
+                pad: first,
+                masked: [mix(s + 1), mix(s + 2)],
+                tau: mix(s + 3),
+            }
+        });
+
+        let rounds = level_rounds(entries.len());
+        let round_first = pad;
+
+        pad += (PRODUCT_SUMCHECK_DEGREE * rounds) as u32;
+
+        record.products.push(LevelRecord {
+            entries,
+            challenges: (0..rounds as u128).map(|i| mix(s + 10 + i)).collect(),
+            round_first,
+            claim_masked: mix(s + 4),
+            sums,
+        });
+    }
+
+    assert_eq!(record.products.len(), shape.product_levels);
+
+    (record, pad)
 }
 
 /// The pool's eval record with random masked values,
@@ -226,15 +258,16 @@ fn record<'d>(
 /// from `first_wire` on; returns the next free pad.
 fn eval(subfield_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32) {
     let seed = base as u128;
-    let ring_pad = base + 3;
 
     let mut mask_form: Vec<(Unknown, Flat<F>)> = (0..3)
         .map(|j| (Unknown::Pad(base + j), mix(seed + 30 + j as u128)))
         .collect();
 
+    let next_pad = base + mask_form.len() as u32;
+
     let gadget = subfield_units.then(|| {
         let entries = (0..4)
-            .map(|c| (ring_pad + c, mix(seed + 40 + c as u128), c as usize % 2))
+            .map(|claim| (claim, mix(seed + 40 + claim as u128), claim as usize % 2))
             .collect();
 
         let mu = (0..2u128)
@@ -259,7 +292,7 @@ fn eval(subfield_units: bool, base: u32, first_wire: u32) -> (EvalRecord<F>, u32
         gadget,
     };
 
-    (record, ring_pad + 4)
+    (record, next_pad)
 }
 
 #[test]
@@ -289,16 +322,23 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
         let heights: Vec<(&RingSwitchPlan, usize)> = plans.iter().map(|p| (p, num_vars)).collect();
         let pool = FoldPool::new(&heights, &config).unwrap();
 
+        let levels: Vec<_> = defs.iter().map(|def| def.statics().levels()).collect();
+
         let mut records = Vec::with_capacity(defs.len());
         let mut base = 0;
+        let mut claims = 0;
 
-        for ((def, shape), layout) in defs.iter().zip(&shapes).zip(pool.tables()) {
+        let tables = defs.iter().zip(&levels).zip(&shapes).zip(pool.tables());
+        for (((def, levels), shape), layout) in tables {
             let slots = layout.plan.next_slots();
-            let (table, next) = record(def, shape.at(layout), slots, blind_units, base);
+            let shape = shape.at(layout);
+
+            let (table, next) = record(def, levels, shape, slots, blind_units, base, claims);
 
             records.push(table);
 
             base = next;
+            claims += shape.claims() as u32;
         }
 
         let subfield_units = records.iter().any(|r| r.shape.subfield_units);
@@ -313,15 +353,20 @@ fn reverse_pass_reproduces_assembled_weights_on_shipped_tables() {
 
         let statement = OuterStatement {
             masked_scalars: next as usize,
+            claims: claims as usize,
             mul_wires: table_wires + gadget_wires,
         };
 
         let geom = config
-            .outer_geom(statement.masked_scalars, statement.mul_wires, field_bits)
+            .outer_geom(
+                statement.masked_scalars,
+                statement.claims,
+                statement.mul_wires,
+                field_bits,
+            )
             .unwrap();
 
-        let layout =
-            OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires).unwrap();
+        let layout = OuterLayout::new(&geom, &statement).unwrap();
 
         let rows = statement_rows(&records, &eval, &statement).unwrap();
         let assembled = assemble(&records, &eval, &statement).unwrap();

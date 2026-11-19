@@ -164,7 +164,12 @@ fn shipped_tables_fit_outer_statement() {
 
     assert!(
         config
-            .outer_geom(statement.masked_scalars, statement.mul_wires, field_bits)
+            .outer_geom(
+                statement.masked_scalars,
+                statement.claims,
+                statement.mul_wires,
+                field_bits,
+            )
             .is_ok(),
         "{} mul wires exceed the outer statement:\n{}",
         statement.mul_wires,
