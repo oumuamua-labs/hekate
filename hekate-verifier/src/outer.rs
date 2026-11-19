@@ -44,13 +44,14 @@ impl PadCursor {
 }
 
 /// The zk-Ligero segment: geometry from the statement, FS challenges
-/// after `aux_root`, both oracles opened at the same columns,
+/// after `aux_root`, the three oracles opened at the same columns,
 /// and the three Ligero tests over the assembled rows.
 #[instrument(skip_all, level = "trace", name = "verify_outer")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_outer<F, H>(
     proof: &InnerProof<F>,
     pad_root: Option<&H::Digest>,
+    claims_root: Option<&H::Digest>,
     transcript: &mut Transcript<H>,
     config: &Config,
     statement: OuterStatement,
@@ -67,21 +68,26 @@ where
         return Err(Rejection::Outer(OuterStage::PadCount));
     }
 
-    let (pad_root, outer) = match (pad_root, proof.outer.as_ref()) {
-        (Some(root), Some(outer)) => (root, outer),
+    let (pad_root, claims_root, outer) = match (pad_root, claims_root, proof.outer.as_ref()) {
+        (Some(pad_root), Some(claims_root), Some(outer)) => (pad_root, claims_root, outer),
         _ => {
             return Err(Rejection::Malformed(errors::Error::Protocol {
                 protocol: "outer",
-                message: "eval-claim hiding needs both pad_root and the outer segment",
+                message: "eval-claim hiding needs pad_root, claims_root and the outer segment",
             }));
         }
     };
 
     let aux_root = root::<H>(&outer.aux_root)?;
 
-    let field_bits = F::BITS;
-    let geom = config.outer_geom(statement.masked_scalars, statement.mul_wires, field_bits)?;
-    let layout = OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires)?;
+    let geom = config.outer_geom(
+        statement.masked_scalars,
+        statement.claims,
+        statement.mul_wires,
+        F::BITS,
+    )?;
+
+    let layout = OuterLayout::new(&geom, &statement)?;
 
     let encoder = scratch.encoder(&geom)?;
 
@@ -115,7 +121,7 @@ where
 
     let columns = protocol::challenge_outer_queries(transcript, geom.queries, geom.domain_len)?;
 
-    let aux_rows = layout.total_rows() - layout.pad_rows;
+    let aux_rows = layout.total_rows() - layout.aux_first();
 
     let opened = |opening: &OuterOpening<F>| -> bool {
         opening.columns.len() == columns.len()
@@ -126,27 +132,33 @@ where
                 .all(|(&col, &want)| col as usize == want)
     };
 
-    if !opened(&outer.pad_opening) || !opened(&outer.aux_opening) {
+    if !opened(&outer.pad_opening) || !opened(&outer.claims_opening) || !opened(&outer.aux_opening)
+    {
         warn!("outer openings do not cover the queried columns");
         return Err(Rejection::Outer(OuterStage::Coverage));
     }
 
     let openings = || {
         trace_span!("openings").in_scope(|| {
-            let (pad, aux) = join(
-                || verify_opening::<F, H>(pad_root, &geom, layout.pad_rows, &outer.pad_opening),
-                || verify_opening::<F, H>(&aux_root, &geom, aux_rows, &outer.aux_opening),
-            );
+            let pad =
+                || verify_opening::<F, H>(pad_root, &geom, layout.pad_rows, &outer.pad_opening);
+            let claims = || {
+                verify_opening::<F, H>(claims_root, &geom, layout.claim_rows, &outer.claims_opening)
+            };
+            let aux = || verify_opening::<F, H>(&aux_root, &geom, aux_rows, &outer.aux_opening);
 
-            pad && aux
+            let (pad, (claims, aux)) = join(pad, || join(claims, aux));
+
+            pad && claims && aux
         })
     };
 
     let tests = || -> Result<(), Rejection> {
         let pad_opening = Opening::from_wire(&outer.pad_opening, layout.pad_rows)?;
+        let claims_opening = Opening::from_wire(&outer.claims_opening, layout.claim_rows)?;
         let aux_opening = Opening::from_wire(&outer.aux_opening, aux_rows)?;
 
-        let stacked = Opening::stack(&[&pad_opening, &aux_opening])?;
+        let stacked = Opening::stack(&[&pad_opening, &claims_opening, &aux_opening])?;
         let vanisher = encoder.vanisher_at(&columns)?;
 
         let interleaved = || {
