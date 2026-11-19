@@ -32,7 +32,8 @@ pub struct InnerProof<F: TowerField> {
     /// bus endpoints, pinned to the committed `h`.
     pub main_logup_aux: LogUpAux<F>,
 
-    /// `(r_final, claimed_column_evals)` of main.
+    /// `(r_final, claimed_column_evals)` of main; under zero
+    /// knowledge the evals travel in the claims oracle alone.
     pub main_point_evaluation: (Vec<F>, Vec<F>),
 
     /// Pins every table's trace evaluations to the two roots.
@@ -87,6 +88,16 @@ impl<F: TowerField> InnerProof<F> {
 // OUTER ARGUMENT
 // ===================================
 
+/// One level of a table's product reduction.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProductLevel<F: TowerField> {
+    /// The two padded sums a level past the
+    /// first starts from; empty at the first.
+    pub sums: Vec<F>,
+
+    pub sumcheck: SumcheckProof<F>,
+}
+
 /// One oracle's opened columns: `values` holds
 /// every column's rows back to back, in `columns`
 /// order; its length is `columns.len() * rows`.
@@ -97,16 +108,24 @@ pub struct OuterOpening<F: TowerField> {
     pub multiproof: Multiproof,
 }
 
-/// The zk-Ligero segment after the base protocol:
-/// AUX root, the three test responses, and both
-/// oracles opened at the same query columns.
+/// The zk-Ligero segment after the base protocol: two roots, three test
+/// responses, and the three oracles opened at the same query columns.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OuterProof<F: TowerField> {
+    /// Root over every table's eval claims,
+    /// absorbed after the last zerocheck.
+    pub claims_root: Vec<u8>,
+
+    /// Product reductions, table by table in
+    /// pool order, each from its roots down.
+    pub products: Vec<ProductLevel<F>>,
+
     pub aux_root: Vec<u8>,
     pub interleaved: Vec<F>,
     pub linear: Vec<F>,
     pub quadratic: Vec<F>,
     pub pad_opening: OuterOpening<F>,
+    pub claims_opening: OuterOpening<F>,
     pub aux_opening: OuterOpening<F>,
 }
 
