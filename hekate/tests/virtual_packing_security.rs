@@ -19,7 +19,7 @@ use hekate_program::{Air, FixedColumn, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
-use hekate_verifier::rejection::{Rejection, Table, ZerocheckStage};
+use hekate_verifier::rejection::{PoolStage, Rejection};
 
 type F = Block256;
 type H = DefaultHasher;
@@ -165,14 +165,14 @@ fn zk_config() -> Config {
 
 // =========================================================
 // TEST 1:
-// Virtual Packing Eval Forgery
+// Virtual Packing Claims Root Corruption
 //
-// Corrupt a virtual bit column evaluation in
-// the chiplet's point_evaluation.
+// Corrupt the claims root, which binds every
+// virtual bit column evaluation of the chiplet.
 // =========================================================
 
 #[test]
-fn virtual_packing_eval_forgery_rejected() {
+fn virtual_packing_claims_root_corruption_rejected() {
     let (air, instance, witness) = make_test_system();
     let config = zk_config();
     let seed = [0xAAu8; 32];
@@ -196,21 +196,12 @@ fn virtual_packing_eval_forgery_rejected() {
 
     assert_eq!(outcome, Ok(()));
 
-    // Corrupt virtual bit column 17
-    let evals = &mut proof.chiplet_point_evaluations[0].1;
-    assert!(evals.len() > 17);
-
-    evals[17] += F::ONE;
+    // Corrupt the root over the virtual column evaluations
+    proof.outer.as_mut().unwrap().claims_root[0] ^= 1;
 
     let outcome = verify(&air, &instance, &config, &proof, b"VirtualPackEvalForgery");
 
-    assert_eq!(
-        outcome,
-        Err(Rejection::Zerocheck {
-            table: Table::Main,
-            stage: ZerocheckStage::Sumcheck,
-        })
-    );
+    assert_eq!(outcome, Err(Rejection::PoolEval(PoolStage::Sumcheck)));
 }
 
 // =========================================================
