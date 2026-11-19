@@ -629,8 +629,9 @@ fn small_sigma1<'a, F: TowerField>(cs: &'a ConstraintSystem<F>, w: &Word<'a, F>)
 mod tests {
     use super::*;
     use hekate_math::Block128;
+    use hekate_program::outer::mul_node_count;
     use hekate_program::permutation::EMIT_RANK_LABEL;
-    use hekate_program::predicate::{ClaimLayout, compile};
+    use hekate_program::predicate::{ClaimLayout, compile, fixed_only, fixed_values};
 
     type F = Block128;
 
@@ -738,33 +739,48 @@ mod tests {
             let half = program.num_columns() as u32;
             let next: Vec<Option<usize>> = (0..half as usize).map(Some).collect();
 
+            let ast = program.constraint_ast();
+            let pins = program.fixed_columns();
+            let marks = fixed_only(&ast, pins.iter().map(|pin| pin.col_idx));
+
+            let mut fixed = Vec::new();
+            fixed_values(&ast, &marks, |_| Some(Flat::from_raw(F::ONE)), &mut fixed).unwrap();
+
             let rows = compile(
-                &program.constraint_ast(),
+                &ast,
                 ClaimLayout {
-                    pad_first: 2 * half,
+                    first: 0,
                     half,
                     next: &next,
                 },
+                &fixed,
             )
             .unwrap();
 
             let widest = rows
                 .affine
                 .iter()
-                .map(|row| row.unknowns.len() + row.claims.len())
+                .map(|row| row.unknowns.len())
                 .max()
                 .unwrap();
 
             let per_mul = rows.affine.len() / rows.mul_nodes as usize;
 
             assert_eq!(per_mul, 2, "rounds_per_row = {r}");
-            assert_eq!(widest, 25, "rounds_per_row = {r}");
+
+            // Twelve claims and the wire they pin
+            assert_eq!(widest, 13, "rounds_per_row = {r}");
 
             let per_round = (ADDS_PER_ROUND + 2) * WORD_BITS;
             let gated = 3 * STATE_WORDS + BLOCK_WORDS;
 
             assert_eq!(
                 rows.mul_nodes as usize,
+                r * per_round,
+                "rounds_per_row = {r}"
+            );
+            assert_eq!(
+                mul_node_count(&ast, &fixed_only(&ast, [])),
                 r * per_round + gated,
                 "rounds_per_row = {r}"
             );

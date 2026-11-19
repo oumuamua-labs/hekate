@@ -9,7 +9,9 @@ use hekate_pqc::mldsa::{MlDsaChiplet, MlDsaParams};
 use hekate_pqc::mlkem::{MlKemCall, MlKemChiplet, MlKemParams};
 use hekate_program::Air;
 use hekate_program::constraint::{ConstraintExpr, ExprId};
-use hekate_program::predicate::{ClaimLayout, compile, wire_values};
+use hekate_program::predicate::{
+    ClaimLayout, Unknown, compile, fixed_only, fixed_values, wire_values,
+};
 
 const KEM_CALLS: [MlKemCall; 3] = [MlKemCall::KeyGen, MlKemCall::Encaps, MlKemCall::Decaps];
 
@@ -34,7 +36,13 @@ fn check<A: Air<F>>(name: &str, air: &A) {
     let mut node_values = Vec::new();
     ast.evaluate_into(&consts, &current, &next, &mut node_values);
 
-    let wires = wire_values(&ast, &node_values);
+    let pins = air.fixed_columns();
+    let marks = fixed_only(&ast, pins.iter().map(|pin| pin.col_idx));
+
+    let mut fixed = Vec::new();
+    fixed_values(&ast, &marks, |col| current.get(col).copied(), &mut fixed).unwrap();
+
+    let wires = wire_values(&ast, &marks, &node_values);
 
     let mut reads = vec![false; width];
     for id in 0..ast.arena.len() as u32 {
@@ -56,12 +64,12 @@ fn check<A: Air<F>>(name: &str, air: &A) {
         .collect();
 
     let layout = ClaimLayout {
-        pad_first: 0,
+        first: 0,
         half: width as u32,
         next: &next_slots,
     };
 
-    let rows = compile(&ast, layout).unwrap();
+    let rows = compile(&ast, layout, &fixed).unwrap();
 
     assert_eq!(wires.len(), rows.mul_nodes as usize, "{name}: wire count");
 
@@ -72,13 +80,12 @@ fn check<A: Air<F>>(name: &str, air: &A) {
         .map(|(_, &value)| value);
 
     let claims: Vec<Flat<F>> = current.iter().copied().chain(shifted).collect();
-    let pad = vec![Flat::from_raw(F::ZERO); claims.len()];
 
     let expected = ast.evaluate(&current, &next);
 
     for (k, form) in rows.roots.iter().enumerate() {
         assert_eq!(
-            form.evaluate(&claims, &pad, &wires),
+            form.evaluate(&claims, &[], &wires),
             expected[k],
             "{name}: root {k}"
         );
@@ -90,21 +97,14 @@ fn check<A: Air<F>>(name: &str, air: &A) {
             .iter()
             .map(|&(u, c)| {
                 c * match u {
-                    hekate_program::predicate::Unknown::Pad(i) => pad[i as usize],
-                    hekate_program::predicate::Unknown::Wire { mul, role } => {
-                        wires[mul as usize][role as usize]
-                    }
+                    Unknown::Claim(i) => claims[i as usize],
+                    Unknown::Wire { mul, role } => wires[mul as usize][role as usize],
+                    Unknown::Pad(i) => panic!("{name}: compiled row reads pad {i}"),
                 }
             })
             .fold(Flat::from_raw(F::ZERO), |a, b| a + b);
 
-        let rhs = row
-            .claims
-            .iter()
-            .map(|&(i, c)| c * claims[i as usize])
-            .fold(row.constant, |a, b| a + b);
-
-        assert_eq!(lhs, rhs, "{name}: affine row");
+        assert_eq!(lhs, row.constant, "{name}: affine row");
     }
 
     for w in &wires {
