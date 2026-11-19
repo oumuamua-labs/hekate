@@ -15,13 +15,16 @@ use hekate_core::proofs::OuterOpening;
 use hekate_crypto::merkle::MerkleTree;
 use hekate_crypto::{DefaultHasher, Digest, Hasher};
 use hekate_math::{Block128, Block256, Flat, HardwareField, TowerField};
-use hekate_program::outer::{OuterLayout, aux_filler_len, build_aux_rows, build_pad_rows};
+use hekate_program::outer::{
+    OuterLayout, OuterStatement, aux_filler_len, build_aux_rows, build_claim_rows, build_pad_rows,
+};
 
 type K = Block256;
 type H = DefaultHasher;
 type D = <H as Hasher>::Digest;
 
 const MASKED_SCALARS: usize = 16;
+const CLAIMS: usize = 16;
 const WIRE_COUNTS: [usize; 2] = [6, 40];
 const SEED: u128 = 0x0f1e_2d3c_4b5a_6978_8796_a5b4_c3d2_e1f0;
 
@@ -47,8 +50,10 @@ struct Coins {
 
 struct View {
     pad_root: D,
+    claims_root: D,
     aux_root: D,
     pad: OuterOpening<K>,
+    claims: OuterOpening<K>,
     aux: OuterOpening<K>,
     interleaved: Vec<Flat<K>>,
     linear: Vec<Flat<K>>,
@@ -94,10 +99,17 @@ fn rank(mut rows: Vec<Vec<Flat<K>>>) -> usize {
 }
 
 fn outer(mul_wires: usize) -> Outer {
+    let statement = OuterStatement {
+        masked_scalars: MASKED_SCALARS,
+        claims: CLAIMS,
+        mul_wires,
+    };
+
     let geom = Config::dev()
-        .outer_geom(MASKED_SCALARS, mul_wires, K::BITS)
+        .outer_geom(MASKED_SCALARS, CLAIMS, mul_wires, K::BITS)
         .unwrap();
-    let layout = OuterLayout::new(&geom, MASKED_SCALARS, mul_wires).unwrap();
+
+    let layout = OuterLayout::new(&geom, &statement).unwrap();
     let encoder = RowEncoder::<K>::new(&geom).unwrap();
     let vanisher = encoder.message_vanisher().unwrap();
 
@@ -225,7 +237,13 @@ fn coins(outer: &Outer, state: &mut u128) -> Coins {
 
     columns.sort_unstable();
 
-    let rows_used = vec![0, layout.pad_rows, layout.pad_rows + layout.aux_rows];
+    let rows_used = vec![
+        0,
+        layout.pad_rows,
+        layout.aux_first(),
+        layout.aux_first() + layout.aux_rows,
+    ];
+
     let messages: Vec<Vec<Flat<K>>> = rows_used
         .iter()
         .map(|_| (0..geom.message_len).map(|_| rnd(state)).collect())
@@ -378,12 +396,15 @@ fn simulate(outer: &Outer, coins: &Coins, state: &mut u128) -> View {
     }
 
     let (pad_root, pad) = commit(outer, coins, &opened, 0..layout.pad_rows);
-    let (aux_root, aux) = commit(outer, coins, &opened, layout.pad_rows..total);
+    let (claims_root, claims) = commit(outer, coins, &opened, layout.pad_rows..layout.aux_first());
+    let (aux_root, aux) = commit(outer, coins, &opened, layout.aux_first()..total);
 
     View {
         pad_root,
+        claims_root,
         aux_root,
         pad,
+        claims,
         aux,
         interleaved: wire_form(outer, &interleaved, outer.geom.code_len),
         linear: wire_form(outer, &linear, 2 * outer.geom.code_len),
@@ -401,17 +422,19 @@ fn accepts(outer: &Outer, coins: &Coins, view: &View) -> bool {
         ..
     } = outer;
 
-    let aux_rows = layout.total_rows() - layout.pad_rows;
+    let aux_rows = layout.total_rows() - layout.aux_first();
 
     if !verify_opening::<K, H>(&view.pad_root, geom, layout.pad_rows, &view.pad)
+        || !verify_opening::<K, H>(&view.claims_root, geom, layout.claim_rows, &view.claims)
         || !verify_opening::<K, H>(&view.aux_root, geom, aux_rows, &view.aux)
     {
         return false;
     }
 
     let pad = Opening::from_wire(&view.pad, layout.pad_rows).unwrap();
+    let claims = Opening::from_wire(&view.claims, layout.claim_rows).unwrap();
     let aux = Opening::from_wire(&view.aux, aux_rows).unwrap();
-    let stacked = Opening::stack(&[&pad, &aux]).unwrap();
+    let stacked = Opening::stack(&[&pad, &claims, &aux]).unwrap();
 
     let opened_weights = weights_at_columns(encoder, &coins.messages, &coins.columns).unwrap();
     let opened_vanisher = encoder.vanisher_at(&coins.columns).unwrap();
@@ -456,10 +479,13 @@ fn accepts(outer: &Outer, coins: &Coins, view: &View) -> bool {
 fn honest_rows(outer: &Outer, coins: &Coins, state: &mut u128) -> Vec<Vec<Flat<K>>> {
     let Outer { geom, layout, .. } = outer;
 
+    let tail = geom.code_len - geom.message_len;
+
     let pad: Vec<Flat<K>> = (0..MASKED_SCALARS).map(|_| rnd(state)).collect();
-    let pad_filler: Vec<Flat<K>> = (0..layout.pad_rows * (geom.code_len - geom.message_len))
-        .map(|_| rnd(state))
-        .collect();
+    let pad_filler: Vec<Flat<K>> = (0..layout.pad_rows * tail).map(|_| rnd(state)).collect();
+
+    let claims: Vec<Flat<K>> = (0..CLAIMS).map(|_| rnd(state)).collect();
+    let claims_filler: Vec<Flat<K>> = (0..layout.claim_rows * tail).map(|_| rnd(state)).collect();
 
     let wires: Vec<[Flat<K>; 3]> = coins
         .triples
@@ -477,6 +503,7 @@ fn honest_rows(outer: &Outer, coins: &Coins, state: &mut u128) -> Vec<Vec<Flat<K
         .collect();
 
     let mut rows = build_pad_rows(layout, &pad, geom.code_len, &pad_filler).unwrap();
+    rows.extend(build_claim_rows(layout, &claims, geom.code_len, &claims_filler).unwrap());
     rows.extend(build_aux_rows(layout, &wires, geom.code_len, &aux_filler).unwrap());
 
     rows
@@ -552,12 +579,20 @@ fn honest_view(outer: &Outer, coins: &Coins, rows: &[Vec<Flat<K>>]) -> View {
         .collect();
 
     let (pad_root, pad) = commit(outer, coins, &opened, 0..layout.pad_rows);
-    let (aux_root, aux) = commit(outer, coins, &opened, layout.pad_rows..layout.total_rows());
+    let (claims_root, claims) = commit(outer, coins, &opened, layout.pad_rows..layout.aux_first());
+    let (aux_root, aux) = commit(
+        outer,
+        coins,
+        &opened,
+        layout.aux_first()..layout.total_rows(),
+    );
 
     View {
         pad_root,
+        claims_root,
         aux_root,
         pad,
+        claims,
         aux,
         interleaved: wire_form(outer, &interleaved, geom.code_len),
         linear: wire_form(outer, &linear, 2 * geom.code_len),
@@ -582,7 +617,7 @@ fn product_code_basis_is_independent() {
 fn interleaved_mask_spans_row_code() {
     for wires in WIRE_COUNTS {
         let outer = outer(wires);
-        let row = outer.layout.interleaved_mask() - outer.layout.pad_rows;
+        let row = outer.layout.interleaved_mask() - outer.layout.aux_first();
 
         let images = mask_images(&outer, |rows, c| rows[row][c]);
 
@@ -600,8 +635,8 @@ fn interleaved_mask_spans_row_code() {
 fn linear_mask_spans_zero_sum_product_code() {
     for wires in WIRE_COUNTS {
         let outer = outer(wires);
-        let low = outer.layout.linear_mask() - outer.layout.pad_rows;
-        let high = outer.layout.linear_mask_hi() - outer.layout.pad_rows;
+        let low = outer.layout.linear_mask() - outer.layout.aux_first();
+        let high = outer.layout.linear_mask_hi() - outer.layout.aux_first();
 
         let images = mask_images(&outer, |rows, c| {
             rows[low][c] + outer.vanisher[c] * rows[high][c]
@@ -631,8 +666,8 @@ fn linear_mask_spans_zero_sum_product_code() {
 fn quadratic_mask_spans_vanishing_product_code() {
     for wires in WIRE_COUNTS {
         let outer = outer(wires);
-        let low = outer.layout.quadratic_mask() - outer.layout.pad_rows;
-        let high = outer.layout.quadratic_mask_hi() - outer.layout.pad_rows;
+        let low = outer.layout.quadratic_mask() - outer.layout.aux_first();
+        let high = outer.layout.quadratic_mask_hi() - outer.layout.aux_first();
 
         let images = mask_images(&outer, |rows, c| {
             rows[low][c] + outer.vanisher[c] * rows[high][c]

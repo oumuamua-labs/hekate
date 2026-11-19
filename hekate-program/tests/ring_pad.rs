@@ -44,14 +44,14 @@ impl Draw for Block256 {
 fn linear_residual(
     layout: &OuterLayout,
     batch: &LinearBatch<K>,
-    pad: &[Flat<K>],
+    claims: &[Flat<K>],
     wires: &[[Flat<K>; 3]],
 ) -> Flat<K> {
     let zero = Flat::from_raw(K::ZERO);
     let mut message = vec![vec![zero; layout.message_len]; layout.total_rows()];
 
-    for (i, &value) in pad.iter().enumerate() {
-        let (row, col) = layout.slot(Unknown::Pad(i as u32));
+    for (i, &value) in claims.iter().enumerate() {
+        let (row, col) = layout.slot(Unknown::Claim(i as u32));
         message[row][col] = value;
     }
 
@@ -103,9 +103,9 @@ fn horner_delta<F: Draw>(seed: u128) {
         let plan = RingSwitchPlan::new(&layout, Some(&entries), 2, num_h, &reads).unwrap();
         let total = plan.total_claims() + plan.next_claims();
 
-        let claims: Vec<F> = (0..total).map(|_| F::next(&mut state)).collect();
-        let pad: Vec<F> = (0..total).map(|_| F::next(&mut state)).collect();
-        let masked: Vec<F> = claims.iter().zip(&pad).map(|(c, h)| *c + *h).collect();
+        let claims: Vec<Flat<F>> = (0..total)
+            .map(|_| F::next(&mut state).to_hardware())
+            .collect();
 
         let unit_weights = UnitWeights {
             units: (0..plan.num_units)
@@ -116,29 +116,20 @@ fn horner_delta<F: Draw>(seed: u128) {
 
         let r_mix: Vec<F> = (0..F::BITS.ilog2()).map(|_| F::next(&mut state)).collect();
 
-        let to_flat = |v: &[F]| -> Vec<Flat<F>> { v.iter().map(|x| x.to_hardware()).collect() };
-
-        let mut ring_maps = RingMaps::new(&r_mix);
-
-        let t_masked =
-            ring_target(&plan, &unit_weights, &to_flat(&masked), &mut ring_maps).unwrap();
-
-        let t_plain = ring_target(&plan, &unit_weights, &to_flat(&claims), &mut ring_maps).unwrap();
-
-        let expected = (t_masked - t_plain).to_hardware();
+        let expected = ring_target(&plan, &unit_weights, &claims, &mut RingMaps::new(&r_mix))
+            .unwrap()
+            .to_hardware();
 
         let mut whole_part = Flat::from_raw(F::ZERO);
         let mut ring: Vec<(u32, Flat<F>, usize)> = Vec::new();
-        let mut ring_pad: Vec<Flat<F>> = Vec::new();
+        let mut ring_claims: Vec<Flat<F>> = Vec::new();
         let mut fields: Vec<ColumnType> = Vec::new();
 
         let weights = claim_weights(&plan, &unit_weights);
 
         for (c, (field, weight)) in weights.into_iter().enumerate() {
-            let h = pad[c].to_hardware();
-
             if field == ColumnType::B128 {
-                whole_part += weight * h;
+                whole_part += weight * claims[c];
                 continue;
             }
 
@@ -151,7 +142,7 @@ fn horner_delta<F: Draw>(seed: u128) {
             };
 
             ring.push((c as u32, weight, k));
-            ring_pad.push(h);
+            ring_claims.push(claims[c]);
         }
 
         let maps: Vec<(Vec<F>, usize)> = fields
@@ -164,7 +155,7 @@ fn horner_delta<F: Draw>(seed: u128) {
         let gadget = RingGadget::new(ring, mu, 0).unwrap();
 
         assert_eq!(
-            whole_part + gadget.delta(&ring_pad).unwrap(),
+            whole_part + gadget.delta(&ring_claims).unwrap(),
             expected,
             "{} bits, {num_h} h columns",
             F::BITS
@@ -172,21 +163,20 @@ fn horner_delta<F: Draw>(seed: u128) {
     }
 }
 
-/// `ring_target(c + h) - ring_target(c)` equals the
-/// linear whole-unit part plus the ring part through
-/// the Frobenius-Horner chain, on a plan with ring,
-/// whole and blind units and shifted claims.
+/// `ring_target` of the claims equals the linear whole-unit part
+/// plus the ring part through the Frobenius-Horner chain, on
+/// a plan with ring, whole and blind units and shifted claims.
 #[test]
-fn pad_contribution_to_ring_target_is_horner_delta() {
+fn ring_target_of_claims_is_horner_delta() {
     horner_delta::<Block128>(0x0101_0202_0303_0404_0505_0606_0707_0808);
     horner_delta::<Block256>(0x0101_0202_0303_0404_0505_0606_0707_0808);
 }
 
-/// A pad swapped after `r''` closes the eval row on
-/// a false claim over its own oracle row, yet the
-/// linear batch rejects it against the committed pad.
+/// Claims swapped after `r''` close the eval row over
+/// their own oracle row, yet the linear batch rejects
+/// their gadget wires against the committed claims.
 #[test]
-fn pad_swapped_after_ring_challenge_is_rejected() {
+fn claims_swapped_after_ring_challenge_are_rejected() {
     let config = Config {
         zero_knowledge: true,
         ..Config::dev()
@@ -223,12 +213,9 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
     let mut draw = || K::next(&mut state).to_hardware();
 
     let truth: Vec<Flat<K>> = (0..total).map(|_| draw()).collect();
-    let pad: Vec<Flat<K>> = (0..total).map(|_| draw()).collect();
 
-    let mut forged = truth.clone();
-    forged[ring_claim] += draw();
-
-    let masked: Vec<Flat<K>> = forged.iter().zip(&pad).map(|(&c, &h)| c + h).collect();
+    let mut committed = truth.clone();
+    committed[ring_claim] += draw();
 
     let eta = draw();
     let rho: Vec<Flat<K>> = (0..pool.rho_vars()).map(|_| draw()).collect();
@@ -236,15 +223,11 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
 
     let unit_weights = pool.unit_weights(0, eta, &rho).unwrap();
 
-    let target = |claims: &[Flat<K>]| {
-        ring_target(plan, &unit_weights, claims, &mut RingMaps::new(&r_mix))
-            .unwrap()
-            .to_hardware()
-    };
+    let fin = ring_target(plan, &unit_weights, &truth, &mut RingMaps::new(&r_mix))
+        .unwrap()
+        .to_hardware();
 
-    let swapped: Vec<Flat<K>> = masked.iter().zip(&truth).map(|(&m, &c)| m + c).collect();
-
-    let claim_pads: Vec<u32> = (0..total as u32).collect();
+    let zero = Flat::from_raw(K::ZERO);
     let rho_tower: Vec<K> = rho.iter().map(|r| r.to_tower()).collect();
 
     let eval = eval_record(&EvalInputs {
@@ -253,26 +236,34 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
         rho: &rho_tower,
         r_mix: &r_mix,
         challenges: &[],
-        claim_masked: target(&masked),
-        fin: target(&truth),
-        claim_pads: &claim_pads,
-        round_first: total as u32,
+        claim_masked: zero,
+        fin,
+        claims: total,
+        round_first: 0,
         first_wire: 0,
     })
     .unwrap();
 
     let gadget = eval.gadget.as_ref().unwrap();
 
+    // `outer_geom` rejects empty pads;
+    // with no round, no row reads this one scalar.
     let statement = OuterStatement {
-        masked_scalars: total,
+        masked_scalars: 1,
+        claims: total,
         mul_wires: K::BITS - 1,
     };
 
     let geom = config
-        .outer_geom(statement.masked_scalars, statement.mul_wires, K::BITS)
+        .outer_geom(
+            statement.masked_scalars,
+            statement.claims,
+            statement.mul_wires,
+            K::BITS,
+        )
         .unwrap();
 
-    let layout = OuterLayout::new(&geom, statement.masked_scalars, statement.mul_wires).unwrap();
+    let layout = OuterLayout::new(&geom, &statement).unwrap();
 
     let rows = statement_rows(&[], &eval, &statement).unwrap();
     let tensor: Vec<K> = (0..linear_tensor_vars(rows))
@@ -291,15 +282,16 @@ fn pad_swapped_after_ring_challenge_is_rejected() {
         gadget.wires(&ring).unwrap()
     };
 
-    let zero = Flat::from_raw(K::ZERO);
-
     assert_eq!(
-        linear_residual(&layout, &batch, &swapped, &chain(&swapped)),
+        linear_residual(&layout, &batch, &truth, &chain(&truth)),
         zero
     );
     assert_ne!(
-        linear_residual(&layout, &batch, &pad, &chain(&swapped)),
+        linear_residual(&layout, &batch, &committed, &chain(&truth)),
         zero
     );
-    assert_ne!(linear_residual(&layout, &batch, &pad, &chain(&pad)), zero);
+    assert_ne!(
+        linear_residual(&layout, &batch, &committed, &chain(&committed)),
+        zero
+    );
 }
