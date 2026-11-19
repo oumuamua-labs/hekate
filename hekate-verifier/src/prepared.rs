@@ -64,12 +64,10 @@ impl<F: TowerField> PreparedProgram<F> {
         validate_bus_tags::<F>(endpoints)?;
 
         let main_statics = main.statics();
-        let main_shape = TableShape::from_air(&main, &main_statics)?;
+        let (main_shape, main_levels) = TableShape::leveled(&main, &main_statics, config)?;
         let main_plan = table_plan(&main, &main_statics, &main_shape, config)?;
 
         check_next_reads(main_statics.ast, &main_plan)?;
-
-        let main_levels = main_statics.levels();
 
         let mut chiplet_plans = Vec::with_capacity(chiplets.len());
         let mut chiplet_shapes = Vec::with_capacity(chiplets.len());
@@ -77,14 +75,14 @@ impl<F: TowerField> PreparedProgram<F> {
 
         for def in &chiplets {
             let statics = def.statics();
-            let shape = TableShape::from_air(def, &statics)?;
+            let (shape, levels) = TableShape::leveled(def, &statics, config)?;
             let plan = table_plan(def, &statics, &shape, config)?;
 
             check_next_reads(statics.ast, &plan)?;
 
             chiplet_plans.push(plan);
             chiplet_shapes.push(shape);
-            chiplet_levels.push(statics.levels());
+            chiplet_levels.push(levels);
         }
 
         let program_id = digest::program_id_from_parts(
