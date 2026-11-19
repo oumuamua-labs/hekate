@@ -684,15 +684,17 @@ mod tests {
     type F = Block256;
 
     fn geometry() -> OuterGeometry {
-        Config::prod().outer_geom(4_075, 2_384, 256).unwrap()
+        Config::prod().outer_geom(75, 4_000, 2_384, 256).unwrap()
     }
 
     fn geometries() -> Vec<OuterGeometry> {
         let config = Config::prod();
 
-        [(1, 0), (4_075, 2_384), (41_025, 34_648)]
+        [(1, 1, 0), (75, 4_000, 2_384), (1_025, 40_000, 34_648)]
             .iter()
-            .map(|&(scalars, wires)| config.outer_geom(scalars, wires, 256).unwrap())
+            .map(|&(scalars, claims, wires)| {
+                config.outer_geom(scalars, claims, wires, 256).unwrap()
+            })
             .collect()
     }
 
