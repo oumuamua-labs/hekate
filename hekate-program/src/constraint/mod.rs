@@ -573,6 +573,7 @@ mod tests {
     use crate::constraint::builder::ConstraintSystem;
     use crate::outer::{TableShape, TableStatics};
     use crate::{Air, Program};
+    use hekate_core::config::Config;
     use hekate_core::trace::ColumnType;
     use hekate_math::{Block128, Flat};
 
@@ -1004,5 +1005,37 @@ mod tests {
                 other => panic!("{case}: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn leveled_shape_counts_product_levels_under_zero_knowledge_only() {
+        let ast = TestFibProgram.constraint_ast();
+        let statics = TableStatics {
+            ast: &ast,
+            specs: &[],
+            fixed: &[],
+            boundary: &[],
+        };
+
+        let complete = TableShape::from_air(&TestFibProgram, &statics).unwrap();
+
+        let (masked, levels) =
+            TableShape::leveled(&TestFibProgram, &statics, &Config::prod()).unwrap();
+
+        assert!(!levels.is_empty());
+        assert_eq!(levels, statics.levels());
+        assert_eq!(masked, complete);
+
+        let (base, none) = TableShape::leveled(&TestFibProgram, &statics, &Config::dev()).unwrap();
+
+        assert!(none.is_empty());
+        assert_eq!(
+            base,
+            TableShape {
+                product_levels: 0,
+                product_rounds: 0,
+                ..complete
+            }
+        );
     }
 }

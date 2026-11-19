@@ -185,78 +185,26 @@ impl TableShape {
         air: &impl Air<F>,
         statics: &TableStatics<'_, F>,
     ) -> errors::Result<Self> {
-        let ast = statics.ast;
+        let shape = Self::unleveled(air, statics)?;
 
-        ast.validate_order()?;
+        Ok(shape.counting(&statics.levels()))
+    }
 
-        let layout = air.virtual_column_layout();
+    /// Derives the shape with its product levels under zero knowledge;
+    /// base mode derives no level and the shape counts none.
+    pub fn leveled<F: TowerField>(
+        air: &impl Air<F>,
+        statics: &TableStatics<'_, F>,
+        config: &Config,
+    ) -> errors::Result<(Self, Vec<Vec<LevelEntry>>)> {
+        let shape = Self::unleveled(air, statics)?;
 
-        let byte_lanes = (0..ast.arena.len() as u32).all(|id| match ast.arena.get(ExprId(id)) {
-            ConstraintExpr::Cell(cell) => layout.get(cell.col_idx) == Some(&ColumnType::Bit),
-            ConstraintExpr::Const(c) | ConstraintExpr::Scale(c, _) => in_byte_field(c),
-            _ => true,
-        });
+        let levels = match config.zero_knowledge {
+            true => statics.levels(),
+            false => Vec::new(),
+        };
 
-        let mut sumcheck_degree = ast.max_degree() + 1;
-
-        if !statics.boundary.is_empty() {
-            sumcheck_degree = sumcheck_degree.max(2);
-        }
-
-        if !statics.specs.is_empty() {
-            sumcheck_degree = sumcheck_degree.max(3);
-        }
-
-        let columns = bus_columns(statics.specs, sumcheck_degree);
-        let bus_wires = columns
-            .iter()
-            .map(|column| column_wires(column, statics.specs))
-            .sum();
-
-        if sumcheck_degree + 1 > MAX_POINTS {
-            return Err(errors::Error::Protocol {
-                protocol: "air",
-                message: "sumcheck degree exceeds the interpolation stack bound",
-            });
-        }
-
-        if air.num_columns() != air.virtual_column_layout().len() {
-            return Err(errors::Error::Protocol {
-                protocol: "air",
-                message: "num_columns does not match the virtual column layout",
-            });
-        }
-
-        let entries = air.virtual_expander().map(|e| e.expansion_entries());
-
-        let plan = RingSwitchPlan::new(
-            air.column_layout(),
-            entries.as_deref(),
-            0,
-            0,
-            &next_row_reads(ast, air.num_columns())?,
-        )?;
-
-        let levels = statics.levels();
-
-        Ok(Self {
-            num_vars: 0,
-            num_columns: air.num_columns(),
-            sumcheck_degree,
-            bus_columns: columns.len(),
-            h_planes: h_planes::<F>(),
-            bus_wires,
-            product_levels: levels.len(),
-            product_rounds: levels.iter().map(|level| level_rounds(level.len())).sum(),
-            expands_bits: plan.expands_bits(),
-            subfield_units: plan.has_subfield_units(),
-            whole_blinds: 0,
-            next_claims: 0,
-            skip_lanes: match byte_lanes {
-                true => SkipLanes::Block8,
-                false => SkipLanes::Block16,
-            },
-        })
+        Ok((shape.counting(&levels), levels))
     }
 
     /// Counts the committed `h` planes.
@@ -351,6 +299,90 @@ impl TableShape {
     /// product level and those of the bus products.
     pub fn mul_wires(&self) -> usize {
         self.product_levels + self.bus_wires
+    }
+
+    fn unleveled<F: TowerField>(
+        air: &impl Air<F>,
+        statics: &TableStatics<'_, F>,
+    ) -> errors::Result<Self> {
+        let ast = statics.ast;
+
+        ast.validate_order()?;
+
+        let layout = air.virtual_column_layout();
+
+        let byte_lanes = (0..ast.arena.len() as u32).all(|id| match ast.arena.get(ExprId(id)) {
+            ConstraintExpr::Cell(cell) => layout.get(cell.col_idx) == Some(&ColumnType::Bit),
+            ConstraintExpr::Const(c) | ConstraintExpr::Scale(c, _) => in_byte_field(c),
+            _ => true,
+        });
+
+        let mut sumcheck_degree = ast.max_degree() + 1;
+
+        if !statics.boundary.is_empty() {
+            sumcheck_degree = sumcheck_degree.max(2);
+        }
+
+        if !statics.specs.is_empty() {
+            sumcheck_degree = sumcheck_degree.max(3);
+        }
+
+        let columns = bus_columns(statics.specs, sumcheck_degree);
+        let bus_wires = columns
+            .iter()
+            .map(|column| column_wires(column, statics.specs))
+            .sum();
+
+        if sumcheck_degree + 1 > MAX_POINTS {
+            return Err(errors::Error::Protocol {
+                protocol: "air",
+                message: "sumcheck degree exceeds the interpolation stack bound",
+            });
+        }
+
+        if air.num_columns() != air.virtual_column_layout().len() {
+            return Err(errors::Error::Protocol {
+                protocol: "air",
+                message: "num_columns does not match the virtual column layout",
+            });
+        }
+
+        let entries = air.virtual_expander().map(|e| e.expansion_entries());
+
+        let plan = RingSwitchPlan::new(
+            air.column_layout(),
+            entries.as_deref(),
+            0,
+            0,
+            &next_row_reads(ast, air.num_columns())?,
+        )?;
+
+        Ok(Self {
+            num_vars: 0,
+            num_columns: air.num_columns(),
+            sumcheck_degree,
+            bus_columns: columns.len(),
+            h_planes: h_planes::<F>(),
+            bus_wires,
+            product_levels: 0,
+            product_rounds: 0,
+            expands_bits: plan.expands_bits(),
+            subfield_units: plan.has_subfield_units(),
+            whole_blinds: 0,
+            next_claims: 0,
+            skip_lanes: match byte_lanes {
+                true => SkipLanes::Block8,
+                false => SkipLanes::Block16,
+            },
+        })
+    }
+
+    fn counting(self, levels: &[Vec<LevelEntry>]) -> Self {
+        Self {
+            product_levels: levels.len(),
+            product_rounds: levels.iter().map(|level| level_rounds(level.len())).sum(),
+            ..self
+        }
     }
 }
 
