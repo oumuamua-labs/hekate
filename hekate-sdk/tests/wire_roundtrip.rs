@@ -11,8 +11,10 @@
 
 use hekate_core::config::{CodeRate, Config};
 use hekate_core::errors;
+use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::{
-    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof, TreeOpening,
+    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, ProductLevel, SumcheckProof,
+    TreeOpening,
 };
 use hekate_core::trace::ColumnTrace;
 use hekate_core::trace::{ColumnType, Trace, TraceBuilder, TraceColumn};
@@ -1763,12 +1765,26 @@ fn proof_outer_segment_round_trips() {
         multiproof: multiproof.clone(),
     };
 
+    let round = |seed: u128| vec![wide(seed), wide(seed + 1), wide(seed + 2)];
+    let level = |seed: u128, sums: Vec<F>| ProductLevel {
+        sums,
+        sumcheck: SumcheckProof {
+            skip: vec![],
+            round_polys: vec![UnivariatePoly::new(round(seed))],
+            claimed_evaluation: wide(seed + 3),
+        },
+    };
+
+    let deeper_sums = vec![wide(5_100), wide(5_101)];
     let outer = OuterProof {
+        claims_root: vec![6u8; 32],
+        products: vec![level(4_000, vec![]), level(5_000, deeper_sums.clone())],
         aux_root: vec![4u8; 32],
         interleaved: vec![wide(100), wide(101)],
         linear: vec![wide(200)],
         quadratic: vec![wide(300), wide(301), wide(302)],
         pad_opening: opening(1_000),
+        claims_opening: opening(3_000),
         aux_opening: opening(2_000),
     };
 
@@ -1795,7 +1811,29 @@ fn proof_outer_segment_round_trips() {
     let outer = restored.outer.expect("outer segment must survive the wire");
     let bytes_of = |v: &[F]| v.iter().map(|f| f.to_bytes()).collect::<Vec<_>>();
 
+    assert_eq!(outer.claims_root, vec![6u8; 32]);
     assert_eq!(outer.aux_root, vec![4u8; 32]);
+    assert_eq!(outer.products.len(), 2);
+
+    for (level, (seed, sums)) in outer
+        .products
+        .iter()
+        .zip([(4_000, vec![]), (5_000, deeper_sums)])
+    {
+        let sumcheck = &level.sumcheck;
+
+        assert_eq!(bytes_of(&level.sums), bytes_of(&sums));
+        assert_eq!(sumcheck.round_polys.len(), 1);
+        assert_eq!(
+            bytes_of(&sumcheck.round_polys[0].evals),
+            bytes_of(&round(seed))
+        );
+        assert_eq!(
+            sumcheck.claimed_evaluation.to_bytes(),
+            wide(seed + 3).to_bytes()
+        );
+    }
+
     assert_eq!(
         bytes_of(&outer.interleaved),
         bytes_of(&[wide(100), wide(101)])
@@ -1806,7 +1844,11 @@ fn proof_outer_segment_round_trips() {
         bytes_of(&[wide(300), wide(301), wide(302)])
     );
 
-    for (opening, seed) in [(&outer.pad_opening, 1_000), (&outer.aux_opening, 2_000)] {
+    for (opening, seed) in [
+        (&outer.pad_opening, 1_000),
+        (&outer.claims_opening, 3_000),
+        (&outer.aux_opening, 2_000),
+    ] {
         assert_eq!(opening.columns, vec![3, 17, 40]);
         assert_eq!(
             bytes_of(&opening.values),

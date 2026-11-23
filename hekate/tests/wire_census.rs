@@ -9,7 +9,8 @@
 use hekate::core::config::Config;
 use hekate::core::poly::univariate::UnivariatePoly;
 use hekate::core::proofs::{
-    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof, TreeOpening,
+    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, ProductLevel, SumcheckProof,
+    TreeOpening,
 };
 use hekate::core::trace::{ColumnTrace, ColumnType, TraceColumn};
 use hekate::crypto::DefaultHasher;
@@ -37,6 +38,7 @@ const NUM_VARS: usize = 5;
 struct Census {
     padded: usize,
     running_claim: usize,
+    level_claim: usize,
     fold: usize,
     master_evals: usize,
     mask_masters: usize,
@@ -192,16 +194,38 @@ fn logup(aux: &LogUpAux<F>, census: &mut Census) {
 
 fn outer(proof: &OuterProof<F>, census: &mut Census) {
     let OuterProof {
+        claims_root: _,
+        products,
         aux_root: _,
         interleaved,
         linear,
         quadratic,
         pad_opening,
+        claims_opening,
         aux_opening,
     } = proof;
 
+    for ProductLevel {
+        sums,
+        sumcheck:
+            SumcheckProof {
+                skip,
+                round_polys,
+                claimed_evaluation: _,
+            },
+    } in products
+    {
+        census.padded += sums.len() + skip.len();
+
+        for UnivariatePoly { evals } in round_polys {
+            census.padded += evals.len();
+        }
+
+        census.level_claim += 1;
+    }
+
     census.outer += interleaved.len() + linear.len() + quadratic.len();
-    census.outer += opening(pad_opening) + opening(aux_opening);
+    census.outer += opening(pad_opening) + opening(claims_opening) + opening(aux_opening);
 }
 
 /// No `..` in any wire pattern: a new field element on the
@@ -255,6 +279,24 @@ fn pad_budget<P: Program<F> + Sync>(program: &P, chiplet_num_vars: &[usize]) -> 
         OuterStatement::for_tables(program, NUM_VARS, &defs, chiplet_num_vars, &config()).unwrap();
 
     statement.masked_scalars
+}
+
+fn level_budget<P: Program<F>>(program: &P) -> usize {
+    let parts = TableParts::of(program);
+    let main = TableShape::from_air(program, &parts.statics()).unwrap();
+
+    let chiplets: usize = program
+        .chiplet_defs()
+        .unwrap()
+        .iter()
+        .map(|def| {
+            TableShape::from_air(def, &def.statics())
+                .unwrap()
+                .product_levels
+        })
+        .sum();
+
+    main.product_levels + chiplets
 }
 
 fn pool_polys<P: Program<F>>(program: &P, chiplet_num_vars: &[usize]) -> usize {
@@ -333,6 +375,7 @@ fn every_scalar_of_bus_free_proof_is_accounted() {
 
     assert_eq!(counted.padded, pad_budget(&air, &[]));
     assert_eq!(counted.running_claim, 2);
+    assert_eq!(counted.level_claim, level_budget(&air));
     assert_eq!(
         counted.master_evals + counted.mask_masters,
         pool_polys(&air, &[])
@@ -410,6 +453,7 @@ fn every_scalar_of_bus_proof_is_accounted() {
 
     assert_eq!(counted.padded, budget);
     assert_eq!(counted.running_claim, 3);
+    assert_eq!(counted.level_claim, level_budget(&air));
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
     assert_eq!(
@@ -491,6 +535,8 @@ fn every_scalar_of_virtually_packed_proof_is_accounted() {
 
     assert_eq!(counted.padded, pad_budget(&air, &[CHIPLET_VARS]));
     assert_eq!(counted.running_claim, 3);
+    assert_eq!(counted.level_claim, level_budget(&air));
+    assert!(counted.level_claim > 0);
     assert!(counted.padded > 0);
     assert!(counted.fold > 0);
     assert_eq!(

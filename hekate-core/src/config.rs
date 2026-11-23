@@ -22,9 +22,6 @@ pub const MAX_FOLD_ARITY_LOG: usize = 4;
 /// Below 2 the quadratic test has no soundness.
 pub const OUTER_RATE_LOG2: u32 = 4;
 
-/// Target row count of the outer AUX oracle.
-pub const OUTER_ROWS: usize = 32;
-
 /// Precision of `log2_ratio_fixed`:
 /// 32 holds the truncation error below
 /// `num_queries · 2⁻³²`, under one bit.
@@ -45,8 +42,8 @@ pub enum Error {
         min_bits: usize,
     },
 
-    /// No scalar to mask;
-    /// a pad of length zero hides nothing.
+    /// No scalar to mask or no claim to bind;
+    /// an oracle of length zero proves nothing.
     EmptyOuterStatement,
 
     /// No column opening;
@@ -107,7 +104,7 @@ impl fmt::Display for Error {
                  but {min_bits} required",
             ),
             Self::EmptyOuterStatement => {
-                write!(f, "outer statement masks no scalars")
+                write!(f, "outer statement has no masked scalar or no claim")
             }
             Self::ZeroOuterQueries => write!(f, "outer_queries cannot be zero"),
             Self::OuterDomainTooLarge { code_len, max_log2 } => write!(

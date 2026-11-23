@@ -35,7 +35,7 @@ pub use sumcheck::{verify, verify_skip};
 use crate::evaluator::{Claims, EvalOutcome, EvalVerifyContext, EvaluatorVerifier, TableClaims};
 use crate::outer::PadCursor;
 use crate::prepared::{PreparedProgram, VerifierScratch};
-use crate::rejection::{Rejection, Table, ZerocheckStage};
+use crate::rejection::{OuterStage, Rejection, SumcheckRejection, Table, ZerocheckStage};
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -56,13 +56,15 @@ use hekate_program::digest::ProgramId;
 use hekate_program::expander::RingSwitchPlan;
 use hekate_program::fold_pool::FoldPool;
 use hekate_program::outer::{
-    EvalInputs, EvalRecord, OuterStatement, TableInputs, TablePads, TableRecord, TableShape,
-    TableStatics, check_draws, eval_record, table_record,
+    EvalInputs, EvalRecord, LevelRecord, LevelSums, OuterStatement, PRODUCT_SUMCHECK_DEGREE,
+    ProductWeights, TableInputs, TablePads, TableRecord, TableShape, TableStatics, check_draws,
+    eval_record, table_record,
 };
 use hekate_program::permutation::{
     self, BusFraction, PermutationCheckSpec, RankClock, RankTable, TableHeight, bus_alpha_weights,
     bus_columns, plane_basis, rank_clocks,
 };
+use hekate_program::predicate::{LevelEntry, level_rounds};
 use hekate_program::{
     Air, FixedColumn, Program, ProgramInstance, ShapeEvaluator, validate_fixed_columns,
 };
@@ -92,6 +94,7 @@ struct ZerocheckOutcome<F: HardwareField> {
 struct ChipletTable<'a, F: TowerField> {
     def: &'a ChipletDef<F>,
     shape: TableShape,
+    levels: &'a [Vec<LevelEntry>],
     plan: &'a RingSwitchPlan,
 }
 
@@ -104,6 +107,7 @@ struct TableView<'a, 's, F: TowerField> {
     plan: &'a RingSwitchPlan,
     statics: TableStatics<'s, F>,
     shape: &'a TableShape,
+    levels: &'a [Vec<LevelEntry>],
     clocks: &'a [Option<RankClock>],
 }
 
@@ -120,7 +124,6 @@ struct CheckedTable<'a, 's, F: TowerField + HardwareField> {
     logup_aux: &'a LogUpAux<F>,
     claims: Claims<'a, F>,
     zerocheck: ZerocheckOutcome<F>,
-    claims_first: Option<u32>,
 }
 
 /// Phase-3 LogUp challenges that
@@ -305,9 +308,10 @@ where
         let prepared_chiplets = chiplet_defs
             .iter()
             .zip(&prepared.chiplet_plans)
-            .zip(&prepared.chiplet_shapes);
+            .zip(&prepared.chiplet_shapes)
+            .zip(&prepared.chiplet_levels);
 
-        for ((def, plan), shape) in prepared_chiplets {
+        for (((def, plan), shape), levels) in prepared_chiplets {
             let c_num_rows = proof.chiplet_rows[chiplet_tables.len()];
 
             if c_num_rows == 0 || !c_num_rows.is_power_of_two() {
@@ -338,6 +342,7 @@ where
                     num_vars: c_num_vars,
                     ..*shape
                 },
+                levels,
                 plan,
             });
         }
@@ -383,6 +388,7 @@ where
             plan: main_plan,
             statics: main_statics,
             shape: &main_shape,
+            levels: &prepared.main_levels,
             clocks: &clocks[0],
         };
 
@@ -522,6 +528,19 @@ where
             pad_cursor.as_mut(),
         )?);
 
+        // Before `eval_eta`: the claims root fixes
+        // the evals the eval batch binds to the trace.
+        let claims_root = match &proof.outer {
+            Some(outer) => {
+                let claims_root = root::<H>(&outer.claims_root)?;
+
+                transcript.append_message(b"claims_root", &outer.claims_root);
+
+                Some(claims_root)
+            }
+            None => None,
+        };
+
         // =========================================================
         // PHASE 6: POOL EVAL AT EVERY TABLE'S r_final
         // =========================================================
@@ -556,12 +575,17 @@ where
                 .in_scope(|| OuterStatement::new::<F>(&shapes, pool.layout().num_vars()));
             let first_wire = shapes.iter().map(TableShape::mul_wires).sum::<usize>() as u32;
 
-            let eval = Self::pool_eval_record(&pool, &checked, &outcome, first_wire, &mut cursor)?;
-            let records = Self::table_records(&pool, &checked, &logup, config)?;
+            let eval =
+                Self::pool_eval_record(&pool, &statement, &outcome, first_wire, &mut cursor)?;
+
+            let mut records = Self::table_records(&pool, &checked, &logup, config)?;
+
+            Self::verify_products(&mut records, &checked, proof, transcript, &mut cursor)?;
 
             return outer::verify_outer(
                 proof,
                 pad_root.as_ref(),
+                claims_root.as_ref(),
                 transcript,
                 config,
                 statement,
@@ -655,6 +679,7 @@ where
                 plan: table.plan,
                 statics: def.statics(),
                 shape: &table.shape,
+                levels: table.levels,
                 clocks: &chiplet_clocks[c_idx],
             };
 
@@ -691,19 +716,31 @@ where
         transcript: &mut Transcript<H>,
         config: &Config,
         logup: &LogUpContext<'_, F>,
-        mut cursor: Option<&mut PadCursor>,
+        cursor: Option<&mut PadCursor>,
     ) -> Result<CheckedTable<'a, 's, F>, Rejection> {
         let claims = Claims::new(&proof.point_evaluation.1);
         let half = plan.total_claims();
+        let masked = cursor.is_some();
 
-        if claims.flat().len() != half + plan.next_claims() {
+        let (sent, mismatch) = match masked {
+            true => (
+                0,
+                "zero-knowledge proof carries evals outside the claims oracle",
+            ),
+            false => (
+                half + plan.next_claims(),
+                "combined trace values length mismatch with physical trace",
+            ),
+        };
+
+        if claims.flat().len() != sent {
             return Err(Rejection::Malformed(errors::Error::Protocol {
                 protocol: "verifier",
-                message: "combined trace values length mismatch with physical trace",
+                message: mismatch,
             }));
         }
 
-        let (values, values_next) = claims.flat().split_at(half);
+        let (values, values_next) = claims.flat().split_at(half.min(sent));
 
         let zerocheck = Self::verify_zerocheck(
             &view,
@@ -713,7 +750,7 @@ where
             values,
             (values_next, plan.next_slots()),
             logup,
-            cursor.as_deref_mut(),
+            cursor,
         )?;
 
         if canonical_slice_to_flat(&proof.point_evaluation.0) != zerocheck.r_final {
@@ -723,40 +760,29 @@ where
             }));
         }
 
-        let claims_first = cursor.map(|c| c.take(claims.flat().len()));
-
-        transcript.append_field_list(b"claimed_val", claims.canonical());
+        if !masked {
+            transcript.append_field_list(b"claimed_val", claims.canonical());
+        }
 
         Ok(CheckedTable {
             view,
             logup_aux: proof.logup_aux,
             claims,
             zerocheck,
-            claims_first,
         })
     }
 
-    /// The pool eval's outer record; its rounds take
-    /// the pads after every table's claim pads.
+    /// The pool eval's outer record; its rounds
+    /// take the pads after every table's own.
     #[instrument(skip_all, level = "trace", name = "pool_eval_record")]
     fn pool_eval_record(
         pool: &FoldPool,
-        checked: &[CheckedTable<'_, '_, F>],
+        statement: &OuterStatement,
         outcome: &EvalOutcome<F>,
         first_wire: u32,
         cursor: &mut PadCursor,
     ) -> errors::Result<EvalRecord<F>> {
         let round_first = cursor.take(2 * pool.layout().num_vars());
-
-        let mut claim_pads = Vec::new();
-        for table in checked {
-            let first = table.claims_first.ok_or(errors::Error::Protocol {
-                protocol: "verifier",
-                message: "masked claims carry no pads",
-            })?;
-
-            claim_pads.extend((0..table.claims.flat().len() as u32).map(|c| first + c));
-        }
 
         eval_record(&EvalInputs {
             pool,
@@ -766,7 +792,7 @@ where
             challenges: &outcome.challenges,
             claim_masked: outcome.claim_masked,
             fin: outcome.fin,
-            claim_pads: &claim_pads,
+            claims: statement.claims,
             round_first,
             first_wire,
         })
@@ -782,16 +808,22 @@ where
     ) -> errors::Result<Vec<TableRecord<'s, F>>> {
         let unpadded = || errors::Error::Protocol {
             protocol: "verifier",
-            message: "masked claims carry no pads",
+            message: "masked zerocheck carries no pads",
         };
+
+        let mut claims_next = 0u32;
 
         checked
             .iter()
             .zip(pool.tables())
             .map(|(table, pooled)| {
                 let masked = table.zerocheck.masked.as_ref().ok_or_else(unpadded)?;
-                let claims_first = table.claims_first.ok_or_else(unpadded)?;
                 let view = &table.view;
+                let plan = &pooled.plan;
+
+                let claims_first = claims_next;
+
+                claims_next += (plan.total_claims() + plan.next_claims()) as u32;
 
                 let _record = trace_span!("table_record", table = ?view.table).entered();
 
@@ -810,18 +842,96 @@ where
                     claimed_sums_masked: &table.logup_aux.claimed_sums,
                     h_evals_masked: &table.logup_aux.h_evals,
                     val_final_masked: masked.val_final,
-                    claims_masked: table.claims.flat().to_vec(),
-                    bindings: pooled.plan.binding_claims(),
-                    next_slots: pooled.plan.next_slots().to_vec(),
+                    bindings: plan.binding_claims(),
+                    next_slots: plan.next_slots().to_vec(),
                     pads: TablePads {
                         claimed_sums: masked.claimed_sums_first,
                         zerocheck: masked.zerocheck_first,
                         h_evals: masked.h_evals_first,
-                        claims: claims_first,
                     },
+                    claims_first,
                 })
             })
             .collect()
+    }
+
+    /// Replays every table's product reduction on padded
+    /// values, level by level from the roots down, and
+    /// leaves each level's challenges in the table's record.
+    #[instrument(skip_all, level = "trace", name = "verify_products")]
+    fn verify_products<'a>(
+        records: &mut [TableRecord<'a, F>],
+        checked: &[CheckedTable<'a, '_, F>],
+        proof: &InnerProof<F>,
+        transcript: &mut Transcript<H>,
+        cursor: &mut PadCursor,
+    ) -> Result<(), Rejection> {
+        let shape = || Rejection::Outer(OuterStage::Products);
+
+        let outer = proof.outer.as_ref().ok_or_else(shape)?;
+        let mut sent = outer.products.iter();
+
+        for (record, table) in records.iter_mut().zip(checked) {
+            let levels = table.view.levels;
+
+            if levels.is_empty() {
+                continue;
+            }
+
+            let mut claim = ProductWeights::new(record)?.claim()?;
+            for (l, entries) in levels.iter().enumerate() {
+                let level = sent.next().ok_or_else(shape)?;
+
+                let sums = match (l, level.sums.as_slice()) {
+                    (0, []) => None,
+                    (1.., &[lhs, rhs]) => {
+                        let pad = cursor.take(2);
+
+                        transcript.append_field_list(b"product_sums", &level.sums);
+
+                        let tau = transcript
+                            .challenge_field::<F>(b"product_tau")?
+                            .to_hardware();
+
+                        let masked = [lhs.to_hardware(), rhs.to_hardware()];
+
+                        claim = masked[0] + tau * masked[1];
+
+                        Some(LevelSums { pad, masked, tau })
+                    }
+                    _ => return Err(shape()),
+                };
+
+                if !level.sumcheck.skip.is_empty() {
+                    return Err(shape());
+                }
+
+                let rounds = level_rounds(entries.len());
+                let round_first = cursor.take(PRODUCT_SUMCHECK_DEGREE * rounds);
+
+                let (challenges, claim_masked) = verify(
+                    rounds,
+                    PRODUCT_SUMCHECK_DEGREE,
+                    claim,
+                    &level.sumcheck,
+                    transcript,
+                )
+                .map_err(SumcheckRejection::products)?;
+
+                record.products.push(LevelRecord {
+                    entries,
+                    challenges,
+                    round_first,
+                    claim_masked,
+                    sums,
+                });
+            }
+        }
+
+        match sent.next() {
+            None => Ok(()),
+            Some(_) => Err(shape()),
+        }
     }
 
     /// Absorbs every public parameter before the first challenge.

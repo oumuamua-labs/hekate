@@ -270,20 +270,27 @@ where
         return segment_sz;
     };
 
+    let claims_root_sz = enc_size(&outer.claims_root, cfg);
+    let products_sz = enc_size(&outer.products, cfg);
     let aux_root_sz = enc_size(&outer.aux_root, cfg);
     let int_sz = enc_size(&outer.interleaved, cfg);
     let lin_sz = enc_size(&outer.linear, cfg);
     let quad_sz = enc_size(&outer.quadratic, cfg);
 
-    let columns_sz =
-        enc_size(&outer.pad_opening.columns, cfg) + enc_size(&outer.aux_opening.columns, cfg);
+    let columns_sz = enc_size(&outer.pad_opening.columns, cfg)
+        + enc_size(&outer.claims_opening.columns, cfg)
+        + enc_size(&outer.aux_opening.columns, cfg);
 
     let pad_values_sz = enc_size(&outer.pad_opening.values, cfg);
     let pad_path_sz = enc_size(&outer.pad_opening.multiproof, cfg);
+    let claims_values_sz = enc_size(&outer.claims_opening.values, cfg);
+    let claims_path_sz = enc_size(&outer.claims_opening.multiproof, cfg);
     let aux_values_sz = enc_size(&outer.aux_opening.values, cfg);
     let aux_path_sz = enc_size(&outer.aux_opening.multiproof, cfg);
 
     println!("  Outer Argument (zk-Ligero):");
+    println!("    Claims Root:          {:>8} bytes", claims_root_sz);
+    println!("    Product Levels:       {:>8} bytes", products_sz);
     println!("    AUX Root:             {:>8} bytes", aux_root_sz);
     println!("    Interleaved Response: {:>8} bytes", int_sz);
     println!("    Linear Response:      {:>8} bytes", lin_sz);
@@ -291,6 +298,8 @@ where
     println!("    Query Columns:        {:>8} bytes", columns_sz);
     println!("    PAD Opened Values:    {:>8} bytes", pad_values_sz);
     println!("    PAD Merkle Path:      {:>8} bytes", pad_path_sz);
+    println!("    Claims Opened Values: {:>8} bytes", claims_values_sz);
+    println!("    Claims Merkle Path:   {:>8} bytes", claims_path_sz);
     println!("    AUX Opened Values:    {:>8} bytes", aux_values_sz);
     println!("    AUX Merkle Path:      {:>8} bytes", aux_path_sz);
     println!("    Segment total:        {:>8} bytes", segment_sz);

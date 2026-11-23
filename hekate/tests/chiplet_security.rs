@@ -2,12 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Oumuamua Labs <info@oumuamua.dev>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Adversarial security tests for the
-//! independent chiplet pipeline.
+//! Adversarial security tests for the independent chiplet pipeline.
 //!
-//! Exercises forgery vectors specific
-//! to chiplet isolation, transcript binding,
-//! and evaluation argument integrity.
+//! Exercises forgery vectors specific to chiplet isolation,
+//! transcript binding, and evaluation argument integrity.
 
 use hekate::core::config::{Config, MAX_TABLE_VARS};
 use hekate::core::trace::{ColumnTrace, TraceColumn};
@@ -25,7 +23,9 @@ use hekate_program::{FixedShape, ProgramInstance, ProgramWitness};
 use hekate_prover_sys::prove;
 use hekate_testkit::verdict::verify;
 use hekate_verifier::HekateVerifier;
-use hekate_verifier::rejection::{FoldStage, OuterStage, Rejection, Table, ZerocheckStage};
+use hekate_verifier::rejection::{
+    FoldStage, OuterStage, PoolStage, Rejection, Table, ZerocheckStage,
+};
 
 type F = Block256;
 type H = DefaultHasher;
@@ -225,33 +225,23 @@ fn missing_chiplet_rows_rejected() {
 // ==========================================================
 // EXPLOIT: Corrupted chiplet evaluation values
 //
-// A malicious prover modifies the claimed evaluation
-// values for a chiplet.
+// A malicious prover modifies the root over
+// every table's claimed evaluation values.
 // ==========================================================
 
 #[test]
-fn chiplet_eval_values_forgery() {
+fn chiplet_claims_root_corruption_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
     assert_eq!(baseline, Ok(()));
 
     // ATTACK:
-    // Corrupt first chiplet's
-    // claimed evaluation at r_final.
-    let c_eval = &mut proof.chiplet_point_evaluations[0];
-    assert!(!c_eval.1.is_empty());
-
-    c_eval.1[0] += F::ONE;
+    // Corrupt the root over every table's claimed evaluations.
+    proof.outer.as_mut().unwrap().claims_root[0] ^= 1;
 
     let outcome = verify(&air, &instance, &config, &proof, b"ChipletSecurity");
 
-    assert_eq!(
-        outcome,
-        Err(Rejection::Zerocheck {
-            table: Table::Main,
-            stage: ZerocheckStage::Sumcheck,
-        })
-    );
+    assert_eq!(outcome, Err(Rejection::PoolEval(PoolStage::Sumcheck)));
 }
 
 // ==========================================================
@@ -285,24 +275,25 @@ fn pool_root_swap_rejected() {
 }
 
 // ==========================================================
-// EXPLOIT: Truncate chiplet claimed values
+// EXPLOIT: Stray chiplet claimed values
 //
-// A malicious prover strips entries from the
-// chiplet's combined evaluation vector. The
+// A malicious prover ships an entry in the
+// chiplet's combined evaluation vector, which zero
+// knowledge keeps empty. The
 // verifier must reject with an error, not panic.
 // ==========================================================
 
 #[test]
-fn chiplet_eval_values_truncated() {
+fn chiplet_stray_eval_values_rejected() {
     let (air, instance, witness, config) = build_test_system(6);
     let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
     assert_eq!(baseline, Ok(()));
 
     // ATTACK:
-    // Truncate chiplet's combined trace values
-    // to 1 entry; the verifier's length check
-    // rejects without panicking.
-    proof.chiplet_point_evaluations[0].1.truncate(1);
+    // Ship chiplet's combined trace values as
+    // 1 entry; under zero knowledge they travel
+    // in the claims oracle and the vector is empty.
+    proof.chiplet_point_evaluations[0].1.push(F::ONE);
 
     let mut vt = Transcript::<H>::new(b"ChipletSecurity");
     let pinned_id = program_id(&air).unwrap();
@@ -312,6 +303,41 @@ fn chiplet_eval_values_truncated() {
 
     assert_eq!(
         result,
+        Err(Rejection::Malformed(Error::Protocol {
+            protocol: "verifier",
+            message: "zero-knowledge proof carries evals outside the claims oracle",
+        }))
+    );
+}
+
+// ==========================================================
+// EXPLOIT: Truncated chiplet claimed values, raw mode
+//
+// A malicious prover drops the last entry of
+// the chiplet's combined evaluation vector. The
+// verifier must reject with an error, not panic.
+// ==========================================================
+
+#[test]
+fn chiplet_short_eval_values_rejected_in_raw_mode() {
+    let (air, instance, witness, config) = build_test_system(6);
+
+    let config = Config {
+        zero_knowledge: false,
+        ..config
+    };
+
+    let (mut proof, baseline) = prove_and_verify(&air, &instance, &witness, &config);
+    assert_eq!(baseline, Ok(()));
+
+    // ATTACK:
+    // Drop the last of the chiplet's combined trace values.
+    proof.chiplet_point_evaluations[0].1.pop();
+
+    let outcome = verify(&air, &instance, &config, &proof, b"ChipletSecurity");
+
+    assert_eq!(
+        outcome,
         Err(Rejection::Malformed(Error::Protocol {
             protocol: "verifier",
             message: "combined trace values length mismatch with physical trace",

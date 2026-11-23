@@ -72,8 +72,8 @@ pub struct EvalVerifyContext<'a, F: HardwareField> {
     pub pool: &'a FoldPool,
     pub tables: &'a [TableClaims<'a, F>],
 
-    /// Masked claims: the ring-switch final
-    /// check is left to the outer argument.
+    /// Under zero knowledge the replay starts from zero, and
+    /// the outer argument checks both ends of the sumcheck.
     pub masked: bool,
 }
 
@@ -125,7 +125,12 @@ where
         for (table, pooled) in ctx.tables.iter().zip(pool.tables()) {
             let plan = &pooled.plan;
 
-            if table.claims.flat().len() != plan.total_claims() + plan.next_claims() {
+            let sent = match ctx.masked {
+                true => 0,
+                false => plan.total_claims() + plan.next_claims(),
+            };
+
+            if table.claims.flat().len() != sent {
                 return Err(Rejection::Malformed(errors::Error::Protocol {
                     protocol: "evaluator_verifier",
                     message: "ring-switch plan claim count does not match the claimed evaluations",
@@ -161,25 +166,28 @@ where
 
         let rho_hw: Vec<Flat<F>> = rho.iter().map(|r| r.to_hardware()).collect();
 
-        let ring_span = trace_span!("ring_target").entered();
-
-        let mut maps = RingMaps::new(&r_mix);
         let mut weights = Vec::with_capacity(ctx.tables.len());
-        let mut target = F::ZERO;
-
-        for (i, (table, pooled)) in ctx.tables.iter().zip(pool.tables()).enumerate() {
-            let unit_weights = pool.unit_weights(i, eta_tower.to_hardware(), &rho_hw)?;
-
-            target +=
-                ring_target::<F>(&pooled.plan, &unit_weights, table.claims.flat(), &mut maps)?;
-
-            weights.push(unit_weights);
+        for i in 0..ctx.tables.len() {
+            weights.push(pool.unit_weights(i, eta_tower.to_hardware(), &rho_hw)?);
         }
 
-        drop(maps);
-        drop(ring_span);
+        let target_flat = match ctx.masked {
+            true => zero,
+            false => trace_span!("ring_target").in_scope(|| {
+                let mut maps = RingMaps::new(&r_mix);
+                let mut target = F::ZERO;
 
-        let target_flat = target.to_hardware();
+                for ((table, pooled), unit_weights) in
+                    ctx.tables.iter().zip(pool.tables()).zip(&weights)
+                {
+                    let claims = table.claims.flat();
+                    target += ring_target::<F>(&pooled.plan, unit_weights, claims, &mut maps)?;
+                }
+
+                Ok::<_, errors::Error>(target.to_hardware())
+            })?,
+        };
+
         let num_vars = layout.num_vars();
 
         if !proof.sumcheck_proof.skip.is_empty() {

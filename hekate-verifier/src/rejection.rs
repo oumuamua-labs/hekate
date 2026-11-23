@@ -171,16 +171,20 @@ pub enum FoldStage {
 /// in the order the verifier runs them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OuterStage {
+    /// The product reductions do not match the statement's
+    /// levels, or a level's rounds end off its final value.
+    Products,
+
     /// The masked scalars the replay consumed differ
     /// from the count the statement derives.
     PadCount,
 
-    /// The pad or aux opening covers
+    /// The pad, claims or aux opening covers
     /// other than the queried columns.
     Coverage,
 
-    /// The pad or aux opening does not
-    /// authenticate against its root.
+    /// The pad, claims or aux opening does
+    /// not authenticate against its root.
     Opening,
 
     /// The interleaved proximity test failed.
@@ -236,6 +240,13 @@ impl SumcheckRejection {
         };
 
         Rejection::PoolEval(stage)
+    }
+
+    pub(crate) fn products(self) -> Rejection {
+        match self {
+            Self::Rounds | Self::Degree | Self::Claim => Rejection::Outer(OuterStage::Products),
+            Self::Malformed(e) => Rejection::Malformed(e),
+        }
     }
 }
 

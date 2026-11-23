@@ -4,7 +4,7 @@
 
 //! F₂-linear maps on `F` as linearized polynomials
 //! `Σ_j μ_j x^{2^j}`, and the outer-statement gadget that
-//! proves `Σ_c a_c φ(h_c)` on committed pad entries with
+//! proves `Σ_c a_c φ(h_c)` on committed claim entries with
 //! a Frobenius-Horner chain of `F::BITS − 1` squarings.
 
 use crate::predicate::{AffineRow, Unknown, WireRole};
@@ -292,7 +292,7 @@ impl<F: TraceCompatibleField> Frobenius<F> {
     }
 }
 
-/// `Δ = Σ_c a_c φ_k(h_c)` over pad entries `(pad, a_c, k)`, `φ_k`
+/// `Δ = Σ_c a_c φ_k(h_c)` over claim entries `(claim, a_c, k)`, `φ_k`
 /// of `mu[k]`: `X_j = T'_j + X_{j+1}²` on wire `first_wire + j - 1`,
 /// `T'_j = Σ_c σ^{-j}(μ_{k,j} a_c) h_c`, `X_BITS = 0`, `Δ = X_0`.
 pub struct RingGadget<F> {
@@ -351,7 +351,7 @@ impl<F: HardwareField> RingGadget<F> {
         2 * (j - 1)
     }
 
-    /// `f(pad, w_c)` per pad entry, with
+    /// `f(claim, w_c)` per claim entry, with
     /// `w_c = Σ_j scales[row_of(j)] · tie_j[c]`
     /// folded into one F₂-linear map of `a_c`.
     pub fn for_each_tie_weight(
@@ -393,8 +393,8 @@ impl<F: HardwareField> RingGadget<F> {
             })
             .collect::<errors::Result<Vec<TieMap<F>>>>()?;
 
-        for &(pad, a, k) in &self.ring {
-            f(pad, maps[k].apply(a)?);
+        for &(claim, a, k) in &self.ring {
+            f(claim, maps[k].apply(a)?);
         }
 
         Ok(())
@@ -428,7 +428,6 @@ impl<F: HardwareField> RingGadget<F> {
 
             rows.push(AffineRow {
                 unknowns,
-                claims: Vec::new(),
                 constant: zero,
             });
 
@@ -449,7 +448,6 @@ impl<F: HardwareField> RingGadget<F> {
                         one,
                     ),
                 ],
-                claims: Vec::new(),
                 constant: zero,
             });
         }
@@ -457,12 +455,12 @@ impl<F: HardwareField> RingGadget<F> {
         rows
     }
 
-    /// `Δ` over the pad entries and the wire `Product_1`.
+    /// `Δ` over the claim entries and the wire `Product_1`.
     pub fn delta_form(&self) -> Vec<(Unknown, Flat<F>)> {
         let mut form: Vec<(Unknown, Flat<F>)> = self
             .ring
             .iter()
-            .map(|&(pad, a, k)| (Unknown::Pad(pad), a * self.mu0[k]))
+            .map(|&(claim, a, k)| (Unknown::Claim(claim), a * self.mu0[k]))
             .collect();
 
         form.push((
@@ -477,15 +475,15 @@ impl<F: HardwareField> RingGadget<F> {
     }
 
     /// Honest `[X_j, X_j, X_j²]` for `j = 1..BITS`
-    /// from the pad values, indexed by wire.
-    pub fn wires(&self, pad_values: &[Flat<F>]) -> errors::Result<Vec<[Flat<F>; 3]>>
+    /// from the claim values, indexed by wire.
+    pub fn wires(&self, claims: &[Flat<F>]) -> errors::Result<Vec<[Flat<F>; 3]>>
     where
         F: TraceCompatibleField,
     {
         let mut wires = vec![[Flat::from_raw(F::ZERO); 3]; F::BITS - 1];
         let mut x = Flat::from_raw(F::ZERO);
 
-        for (j, tie) in self.tie_dots(pad_values)?.into_iter().enumerate().rev() {
+        for (j, tie) in self.tie_dots(claims)?.into_iter().enumerate().rev() {
             x = tie + x * x;
             wires[j] = [x, x, x * x];
         }
@@ -493,26 +491,26 @@ impl<F: HardwareField> RingGadget<F> {
         Ok(wires)
     }
 
-    /// `Δ = Σ_c a_c φ(h_c)` on plaintext pad values.
-    pub fn delta(&self, pad_values: &[Flat<F>]) -> errors::Result<Flat<F>>
+    /// `Δ = Σ_c a_c φ(h_c)` on the claim values.
+    pub fn delta(&self, claims: &[Flat<F>]) -> errors::Result<Flat<F>>
     where
         F: TraceCompatibleField,
     {
         let x = self
-            .tie_dots(pad_values)?
+            .tie_dots(claims)?
             .into_iter()
             .rev()
             .fold(Flat::from_raw(F::ZERO), |x, tie| tie + x * x);
 
         let mut t0 = Flat::from_raw(F::ZERO);
-        for (&h, &(_, a, k)) in pad_values.iter().zip(&self.ring) {
+        for (&h, &(_, a, k)) in claims.iter().zip(&self.ring) {
             t0 += a * self.mu0[k] * h;
         }
 
         Ok(t0 + x * x)
     }
 
-    fn tie_dots(&self, pad_values: &[Flat<F>]) -> errors::Result<Vec<Flat<F>>>
+    fn tie_dots(&self, claims: &[Flat<F>]) -> errors::Result<Vec<Flat<F>>>
     where
         F: TraceCompatibleField,
     {
@@ -524,7 +522,7 @@ impl<F: HardwareField> RingGadget<F> {
         let mut present = vec![false; fields];
         let mut raw = [0u8; MAX_BYTES];
 
-        for (&(_, a, k), &h) in self.ring.iter().zip(pad_values) {
+        for (&(_, a, k), &h) in self.ring.iter().zip(claims) {
             a.into_raw().serialize(&mut raw[..bytes]).map_err(|()| {
                 errors::Error::InvariantViolation {
                     message: "ring coefficient does not serialize",
@@ -686,6 +684,7 @@ fn chain<F: HardwareField>(lambda: &[Flat<F>], x: Flat<F>) -> Flat<F> {
 mod tests {
     use super::*;
     use crate::expander::field_coeffs;
+    use crate::predicate::Form;
     use hekate_core::trace::ColumnType;
     use hekate_math::{BinaryFieldExtras, Block128, Block256};
 
@@ -764,7 +763,7 @@ mod tests {
 
     /// `f(j, tie_j)` for `j = BITS − 1` down to `1`,
     /// `tie_j[c] = σ^{-j}(μ_j a_c)`; the coefficients
-    /// of row `Lhs_j` on the pad entries.
+    /// of row `Lhs_j` on the claim entries.
     fn tie_rows<F: HardwareField>(gadget: &RingGadget<F>, mut f: impl FnMut(usize, &[Flat<F>])) {
         let mut powers: Vec<Flat<F>> = gadget.ring.iter().map(|&(_, a, _)| a).collect();
         let mut tie = vec![Flat::from_raw(F::ZERO); powers.len()];
@@ -786,32 +785,25 @@ mod tests {
     /// from `wire_rows()`, tie terms streamed onto `row_of(j)`.
     fn chain_rows_at<F: HardwareField>(
         gadget: &RingGadget<F>,
-        pad: &[Flat<F>],
+        claims: &[Flat<F>],
         wires: &[[Flat<F>; 3]],
     ) -> Vec<Flat<F>> {
-        let value = |u: Unknown| -> Flat<F> {
-            match u {
-                Unknown::Pad(i) => pad[i as usize],
-                Unknown::Wire { mul, role } => wires[mul as usize][role as usize],
-            }
-        };
-
         let mut acc: Vec<Flat<F>> = gadget
             .wire_rows()
-            .iter()
+            .into_iter()
             .map(|row| {
-                let mut acc = row.constant;
-                for &(u, coeff) in &row.unknowns {
-                    acc += coeff * value(u);
-                }
+                let form = Form {
+                    unknowns: row.unknowns,
+                    constant: row.constant,
+                };
 
-                acc
+                form.evaluate(claims, &[], wires)
             })
             .collect();
 
         tie_rows(gadget, |j, tie| {
-            for (&(pad_idx, _, _), &t) in gadget.ring.iter().zip(tie) {
-                acc[gadget.row_of(j)] += t * value(Unknown::Pad(pad_idx));
+            for (&(claim, _, _), &t) in gadget.ring.iter().zip(tie) {
+                acc[gadget.row_of(j)] += t * claims[claim as usize];
             }
         });
 
@@ -871,19 +863,19 @@ mod tests {
             })
             .collect();
 
-        let pad: Vec<Flat<F>> = (0..7).map(|_| F::next(&mut state).to_hardware()).collect();
+        let claims: Vec<Flat<F>> = (0..7).map(|_| F::next(&mut state).to_hardware()).collect();
 
         let mut direct = Flat::from_raw(F::ZERO);
-        for (&(_, a, k), &h) in ring.iter().zip(&pad) {
+        for (&(_, a, k), &h) in ring.iter().zip(&claims) {
             direct += a * phi(FIELDS[k].0, h.to_tower(), &r_mix).to_hardware();
         }
 
         let gadget = RingGadget::new(ring, mu, 0).unwrap();
-        assert_eq!(gadget.delta(&pad).unwrap(), direct);
+        assert_eq!(gadget.delta(&claims).unwrap(), direct);
 
-        let wires = gadget.wires(&pad).unwrap();
+        let wires = gadget.wires(&claims).unwrap();
 
-        for (i, v) in chain_rows_at(&gadget, &pad, &wires).iter().enumerate() {
+        for (i, v) in chain_rows_at(&gadget, &claims, &wires).iter().enumerate() {
             assert_eq!(*v, Flat::from_raw(F::ZERO), "row {i}");
         }
 
@@ -892,16 +884,12 @@ mod tests {
             assert_eq!(wire[0] * wire[1], wire[2]);
         }
 
-        let mut delta = Flat::from_raw(F::ZERO);
-        for &(u, coeff) in &gadget.delta_form() {
-            delta += coeff
-                * match u {
-                    Unknown::Pad(i) => pad[i as usize],
-                    Unknown::Wire { mul, role } => wires[mul as usize][role as usize],
-                };
-        }
+        let delta = Form {
+            unknowns: gadget.delta_form(),
+            constant: Flat::from_raw(F::ZERO),
+        };
 
-        assert_eq!(delta, direct);
+        assert_eq!(delta.evaluate(&claims, &[], &wires), direct);
     }
 
     fn tie_dots_of_rows<F: Draw>(seed: u128) {
@@ -920,17 +908,17 @@ mod tests {
                 })
                 .collect();
 
-            let pad: Vec<Flat<F>> = (0..len)
+            let claims: Vec<Flat<F>> = (0..len)
                 .map(|_| F::next(&mut state).to_hardware())
                 .collect();
 
             let gadget = RingGadget::new(ring, mu, 0).unwrap();
 
             let mut expected = vec![Flat::from_raw(F::ZERO); F::BITS - 1];
-            tie_rows(&gadget, |j, tie| expected[j - 1] = dot(&pad, tie));
+            tie_rows(&gadget, |j, tie| expected[j - 1] = dot(&claims, tie));
 
             assert_eq!(
-                gadget.tie_dots(&pad).unwrap(),
+                gadget.tie_dots(&claims).unwrap(),
                 expected,
                 "{} bits, {len} entries",
                 F::BITS
@@ -1022,10 +1010,10 @@ mod tests {
             .map(|c| (c, next(&mut state).to_hardware(), 0))
             .collect();
 
-        let pad: Vec<Flat<Block128>> = (0..7).map(|_| next(&mut state).to_hardware()).collect();
+        let claims: Vec<Flat<Block128>> = (0..7).map(|_| next(&mut state).to_hardware()).collect();
 
         let gadget = RingGadget::new(ring, mu, 0).unwrap();
-        let honest = gadget.wires(&pad).unwrap();
+        let honest = gadget.wires(&claims).unwrap();
         let delta = next(&mut state).to_hardware();
 
         let zero = Flat::from_raw(Block128::ZERO);
@@ -1035,7 +1023,7 @@ mod tests {
                 let mut wires = honest.clone();
                 wires[target][role] += delta;
 
-                let row_broken = chain_rows_at(&gadget, &pad, &wires)
+                let row_broken = chain_rows_at(&gadget, &claims, &wires)
                     .iter()
                     .any(|acc| *acc != zero);
                 let hadamard_broken = wires.iter().any(|w| w[0] * w[1] != w[2]);
@@ -1072,7 +1060,7 @@ mod tests {
             let mut expected: Vec<(u32, Flat<Block128>)> = gadget
                 .ring
                 .iter()
-                .map(|&(pad, _, _)| (pad, Flat::from_raw(Block128::ZERO)))
+                .map(|&(claim, _, _)| (claim, Flat::from_raw(Block128::ZERO)))
                 .collect();
 
             tie_rows(&gadget, |j, tie| {
@@ -1083,7 +1071,7 @@ mod tests {
 
             let mut folded = Vec::new();
             gadget
-                .for_each_tie_weight(&scales, |pad, w| folded.push((pad, w)))
+                .for_each_tie_weight(&scales, |claim, w| folded.push((claim, w)))
                 .unwrap();
 
             assert_eq!(folded, expected);

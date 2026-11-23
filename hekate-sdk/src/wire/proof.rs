@@ -8,14 +8,15 @@ use flatbuffers::FlatBufferBuilder;
 use hekate_core::errors::Result;
 use hekate_core::poly::UnivariatePoly;
 use hekate_core::proofs::{
-    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, SumcheckProof, TreeOpening,
+    FoldEvalProof, InnerProof, LogUpAux, OuterOpening, OuterProof, ProductLevel, SumcheckProof,
+    TreeOpening,
 };
 use hekate_crypto::merkle::Multiproof;
 use hekate_math::TowerField;
 
 use crate::generated::proof as fb;
 
-const WIRE_PROOF_VERSION: u32 = 9;
+const WIRE_PROOF_VERSION: u32 = 10;
 
 pub fn serialize_proof<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -111,10 +112,36 @@ fn serialize_multiproof<'a>(
     )
 }
 
+fn serialize_product_level<'a, F: TowerField>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    level: &ProductLevel<F>,
+) -> flatbuffers::WIPOffset<fb::ProductLevel<'a>> {
+    let sums: Vec<fb::Block256> = level.sums.iter().map(|f| block_from_field(f)).collect();
+    let sums = fbb.create_vector(&sums);
+    let sumcheck = serialize_sumcheck(fbb, &level.sumcheck);
+
+    fb::ProductLevel::create(
+        fbb,
+        &fb::ProductLevelArgs {
+            sums: Some(sums),
+            sumcheck: Some(sumcheck),
+        },
+    )
+}
+
 fn serialize_outer<'a, F: TowerField>(
     fbb: &mut FlatBufferBuilder<'a>,
     outer: &OuterProof<F>,
 ) -> flatbuffers::WIPOffset<fb::OuterProof<'a>> {
+    let claims_root = fbb.create_vector(&outer.claims_root);
+
+    let product_offsets: Vec<_> = outer
+        .products
+        .iter()
+        .map(|level| serialize_product_level(fbb, level))
+        .collect();
+
+    let products = fbb.create_vector(&product_offsets);
     let aux_root = fbb.create_vector(&outer.aux_root);
 
     let field_vec = |fbb: &mut FlatBufferBuilder<'a>, values: &[F]| {
@@ -128,16 +155,20 @@ fn serialize_outer<'a, F: TowerField>(
     let quadratic = field_vec(fbb, &outer.quadratic);
 
     let pad_opening = serialize_outer_opening(fbb, &outer.pad_opening);
+    let claims_opening = serialize_outer_opening(fbb, &outer.claims_opening);
     let aux_opening = serialize_outer_opening(fbb, &outer.aux_opening);
 
     fb::OuterProof::create(
         fbb,
         &fb::OuterProofArgs {
+            claims_root: Some(claims_root),
+            products: Some(products),
             aux_root: Some(aux_root),
             interleaved: Some(interleaved),
             linear: Some(linear),
             quadratic: Some(quadratic),
             pad_opening: Some(pad_opening),
+            claims_opening: Some(claims_opening),
             aux_opening: Some(aux_opening),
         },
     )
@@ -298,7 +329,35 @@ fn deserialize_multiproof(fb: Option<fb::Multiproof<'_>>) -> Result<Multiproof> 
     })
 }
 
+fn deserialize_product_level<F: TowerField>(fb: fb::ProductLevel<'_>) -> Result<ProductLevel<F>> {
+    let sumcheck = fb
+        .sumcheck()
+        .map(|p| deserialize_sumcheck::<F>(p))
+        .transpose()?
+        .ok_or(wire_err("missing product level sumcheck"))?;
+
+    Ok(ProductLevel {
+        sums: deserialize_field_vec::<F>(fb.sums())?,
+        sumcheck,
+    })
+}
+
 fn deserialize_outer<F: TowerField>(fb: fb::OuterProof<'_>) -> Result<OuterProof<F>> {
+    let claims_root =
+        deserialize_bytes(fb.claims_root()).ok_or(wire_err("missing outer claims_root"))?;
+
+    let products = match fb.products() {
+        Some(v) => {
+            let mut levels = Vec::with_capacity(v.len());
+            for i in 0..v.len() {
+                levels.push(deserialize_product_level::<F>(v.get(i))?);
+            }
+
+            levels
+        }
+        None => Vec::new(),
+    };
+
     let aux_root = deserialize_bytes(fb.aux_root()).ok_or(wire_err("missing outer aux_root"))?;
 
     let pad_opening = fb
@@ -307,6 +366,12 @@ fn deserialize_outer<F: TowerField>(fb: fb::OuterProof<'_>) -> Result<OuterProof
         .transpose()?
         .ok_or(wire_err("missing outer pad_opening"))?;
 
+    let claims_opening = fb
+        .claims_opening()
+        .map(|o| deserialize_outer_opening::<F>(o))
+        .transpose()?
+        .ok_or(wire_err("missing outer claims_opening"))?;
+
     let aux_opening = fb
         .aux_opening()
         .map(|o| deserialize_outer_opening::<F>(o))
@@ -314,11 +379,14 @@ fn deserialize_outer<F: TowerField>(fb: fb::OuterProof<'_>) -> Result<OuterProof
         .ok_or(wire_err("missing outer aux_opening"))?;
 
     Ok(OuterProof {
+        claims_root,
+        products,
         aux_root,
         interleaved: deserialize_field_vec::<F>(fb.interleaved())?,
         linear: deserialize_field_vec::<F>(fb.linear())?,
         quadratic: deserialize_field_vec::<F>(fb.quadratic())?,
         pad_opening,
+        claims_opening,
         aux_opening,
     })
 }
